@@ -1,0 +1,67 @@
+# One-command Sestrian node.
+#
+#   # fetch the genesis once (verified against the id compiled into the node):
+#   curl -fL -o genesis.bin.zst \
+#     https://github.com/sestrian/sestrian/releases/download/devnet-genesis-1/genesis.bin.zst
+#   zstd -d genesis.bin.zst
+#
+#   # save an identity ONCE — this seed is your wallet; losing it loses the coins:
+#   echo "SESTRIAN_KEY_SEED=$(head -c32 /dev/urandom | xxd -p -c64)" > .env
+#
+#   docker compose -f deploy/docker-compose.yml up node     # watch + sync + serve
+#   docker compose -f deploy/docker-compose.yml up miner    # ...and train (Linux+NVIDIA)
+#
+# Paths are relative to the repo root, so run compose with -f as shown.
+
+services:
+  # The node alone: sync, validate, serve the API. No GPU, no PyTorch, small image.
+  node:
+    image: ghcr.io/sestrian/sestrian-node:latest
+    restart: unless-stopped
+    command: >
+      --data-dir /data
+      --genesis-file /genesis/genesis.bin
+      --api-bind 0.0.0.0
+    environment:
+      SESTRIAN_KEY_SEED: ${SESTRIAN_KEY_SEED:?set it in .env — see the header}
+    volumes:
+      - ../genesis.bin:/genesis/genesis.bin:ro
+      - sestrian-data:/data
+    ports:
+      - "8090:8090"   # HTTP API + dashboard
+      - "7900:7900"   # p2p
+
+  # Node + PyTorch trainer. Mines and earns.
+  #
+  # GPU: uncomment the `deploy.resources` block below and build the cu121 image
+  #      (see deploy/Dockerfile.miner). Needs the NVIDIA Container Toolkit.
+  # macOS: Docker cannot reach the Apple GPU — this will train on CPU, slowly.
+  #        Use `scripts/install.sh --mine` natively on a Mac instead.
+  miner:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.miner
+      args:
+        TORCH_FLAVOR: ${TORCH_FLAVOR:-cpu}   # set to cu121 for NVIDIA
+    restart: unless-stopped
+    environment:
+      SESTRIAN_KEY_SEED: ${SESTRIAN_KEY_SEED:?set it in .env — see the header}
+      SESTRIAN_DATA_REFS: ${SESTRIAN_DATA_REFS:-genesis}
+    volumes:
+      - ../genesis.bin:/genesis/genesis.bin:ro
+      - sestrian-miner-data:/data
+    ports:
+      - "8090:8090"
+      - "7900:7900"
+    profiles: ["miner"]
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+volumes:
+  sestrian-data:
+  sestrian-miner-data:

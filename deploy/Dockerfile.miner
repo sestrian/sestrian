@@ -1,0 +1,63 @@
+# A MINING image: the node AND the PyTorch trainer in one container.
+#
+# deploy/Dockerfile ships the node alone (small, and all a watch/serve/relay node
+# needs). Mining additionally needs PyTorch, which is heavy — hence a separate
+# image rather than bloating the node one for everybody.
+#
+#   # CPU (works anywhere, slow — fine for trying it out):
+#   docker build -f deploy/Dockerfile.miner -t sestrian-miner .
+#
+#   # NVIDIA (what you actually want to mine with):
+#   docker build -f deploy/Dockerfile.miner --build-arg TORCH_FLAVOR=cu121 \
+#       -t sestrian-miner:cuda .
+#   docker run --gpus all ... sestrian-miner:cuda
+#
+# APPLE SILICON CANNOT MINE IN DOCKER. Docker Desktop on macOS has no GPU
+# passthrough, so MPS is invisible inside a container and you would fall back to
+# CPU. On a Mac, run scripts/install.sh --mine natively instead.
+
+# ---- build the node -------------------------------------------------------
+FROM rust:1-slim AS build
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY node /src/node
+RUN cd node && cargo build --release --bin sestrian-node && \
+    strip target/release/sestrian-node
+
+# ---- runtime: node + trainer ----------------------------------------------
+FROM python:3.11-slim
+
+# cpu  -> ~800MB image, runs anywhere
+# cu121 -> ~3GB image, needs `--gpus all` and the NVIDIA Container Toolkit
+ARG TORCH_FLAVOR=cpu
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl zstd tini && \
+    rm -rf /var/lib/apt/lists/*
+
+# torch first, on its own layer: it is by far the largest and least-changing part
+RUN pip install --no-cache-dir \
+        --index-url "https://download.pytorch.org/whl/${TORCH_FLAVOR}" torch && \
+    pip install --no-cache-dir numpy pynacl
+
+COPY --from=build /src/node/target/release/sestrian-node /usr/local/bin/sestrian-node
+WORKDIR /app
+COPY client /app/client
+COPY rig /app/rig
+COPY deploy/miner-entrypoint.sh /usr/local/bin/miner-entrypoint
+RUN chmod +x /usr/local/bin/miner-entrypoint && \
+    useradd --system --create-home --uid 10001 sestrian && \
+    mkdir -p /data /genesis && chown -R sestrian /data /genesis /app
+
+USER sestrian
+ENV SESTRIAN_DATA_DIR=/data \
+    SESTRIAN_GENESIS=/genesis/genesis.bin \
+    SESTRIAN_API_PORT=8090 \
+    SESTRIAN_BRIDGE_PORT=7999 \
+    SESTRIAN_DATA_REFS=genesis \
+    SESTRIAN_MODEL=small \
+    PYTHONUNBUFFERED=1
+EXPOSE 8090 7900
+# tini reaps the two child processes properly, so ^C actually stops both
+ENTRYPOINT ["/usr/sbin/tini", "--", "/usr/local/bin/miner-entrypoint"]

@@ -1,0 +1,173 @@
+name: release
+
+# Prebuilt sestrian-node binaries, so nobody has to install Rust to run a node
+# and so the npm CLI has something to download.
+#
+#   git tag v0.3.0 && git push origin v0.3.0   -> publishes to that release
+#   workflow_dispatch                          -> refreshes `devnet-latest` only
+#
+# Every archive is covered by a single SHA256SUMS built in the publish job, which
+# is what the npm installer verifies against before it will run a binary.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  BIN: sestrian-node
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            smoke: full          # runs --help AND the preflight path
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            apt: gcc-aarch64-linux-gnu
+            linker: aarch64-linux-gnu-gcc
+            strip: aarch64-linux-gnu-strip
+            smoke: none          # cross-built: cannot execute on this runner
+          - target: aarch64-apple-darwin
+            os: macos-14
+            archive: tar.gz
+            smoke: help
+          - target: x86_64-apple-darwin
+            os: macos-13
+            archive: tar.gz
+            smoke: help
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+            smoke: help
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: node
+          key: ${{ matrix.target }}
+
+      - name: cross-compilation toolchain
+        if: matrix.apt != ''
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ${{ matrix.apt }}
+
+      - name: build
+        working-directory: node
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker }}
+          CC_aarch64_unknown_linux_gnu: ${{ matrix.linker }}
+        run: cargo build --release --bin sestrian-node --target ${{ matrix.target }}
+
+      - name: strip
+        if: runner.os != 'Windows'
+        run: ${{ matrix.strip || 'strip' }} node/target/${{ matrix.target }}/release/$BIN || true
+
+      # A binary that will not execute must fail the job, never get published.
+      - name: smoke — it runs at all
+        if: matrix.smoke != 'none' && runner.os != 'Windows'
+        run: node/target/${{ matrix.target }}/release/$BIN --help > /dev/null
+
+      - name: smoke — it runs at all (windows)
+        if: runner.os == 'Windows'
+        run: node\target\${{ matrix.target }}\release\sestrian-node.exe --help > $null
+
+      # Deeper: prove the real preflight path works on a throwaway local chain.
+      - name: smoke — preflight on a local toy chain
+        if: matrix.smoke == 'full'
+        env:
+          SESTRIAN_KEY_SEED: 1111111111111111111111111111111111111111111111111111111111111111
+        run: |
+          node/target/${{ matrix.target }}/release/$BIN --check \
+            --network local --toy-dim 64 --data-dir "$(mktemp -d)"
+
+      - name: package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          tar -czf "dist/$BIN-${{ matrix.target }}.tar.gz" \
+              -C "node/target/${{ matrix.target }}/release" "$BIN"
+          ls -l dist
+
+      - name: package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Force `
+            -Path "node/target/${{ matrix.target }}/release/sestrian-node.exe" `
+            -DestinationPath "dist/sestrian-node-${{ matrix.target }}.zip"
+          Get-ChildItem dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: staged
+
+      - name: collect + checksum
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find staged -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec mv {} dist/ \;
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      # Always downloadable, even for an untagged workflow_dispatch run.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sestrian-node-binaries
+          path: dist/*
+          if-no-files-found: error
+
+      - name: publish to the tag's release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+                 --title "sestrian-node $tag" --generate-notes
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber dist/*
+
+      # A stable URL that always points at the newest build, so docs and the npm
+      # installer have something durable to fall back to between tags.
+      - name: refresh devnet-latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=devnet-latest
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$tag" --repo "$GITHUB_REPOSITORY" --prerelease \
+                 --title "sestrian-node (latest devnet build)" \
+                 --notes "Rolling build of the node binary from the default branch. Pinned releases live under \`v*\` tags; this tag moves."
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber dist/*

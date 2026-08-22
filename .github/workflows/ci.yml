@@ -73,10 +73,75 @@ jobs:
         with:
           context: .
           file: deploy/Dockerfile
-          push: ${{ github.ref == 'refs/heads/main' }}
+          load: true
+          push: false
+          tags: ghcr.io/sestrian/sestrian-node:ci
+          cache-from: type=gha,scope=node
+          cache-to: type=gha,mode=max,scope=node
+      # Prove it runs BEFORE publishing it.
+      - name: node image starts
+        run: docker run --rm ghcr.io/sestrian/sestrian-node:ci --help > /dev/null
+      - name: publish node image (main only)
+        if: github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          push: true
           tags: |
             ghcr.io/sestrian/sestrian-node:latest
             ghcr.io/sestrian/sestrian-node:${{ github.sha }}
+          cache-from: type=gha,scope=node
+
+  # The MINING image: node + PyTorch trainer. Separate from the node image
+  # because torch is heavy and a watch/serve/relay node has no use for it. CI
+  # publishes the CPU flavour; build --build-arg TORCH_FLAVOR=cu121 for NVIDIA.
+  miner-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.miner
+          build-args: TORCH_FLAVOR=cpu
+          load: true
+          push: false
+          tags: ghcr.io/sestrian/sestrian-miner:ci
+          cache-from: type=gha,scope=miner
+          cache-to: type=gha,mode=max,scope=miner
+      # The entrypoint must REFUSE to start without a genesis rather than run a
+      # node that can never sync. Verify that guard actually fires.
+      - name: miner refuses to start misconfigured
+        run: |
+          if docker run --rm ghcr.io/sestrian/sestrian-miner:ci 2>&1 | tee /tmp/o | grep -q "no genesis at"; then
+            echo "missing-genesis guard fired correctly"
+          else
+            echo "guard did NOT fire; output was:"; cat /tmp/o; exit 1
+          fi
+      - name: log in to ghcr (main only)
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: publish miner image (main only)
+        if: github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.miner
+          build-args: TORCH_FLAVOR=cpu
+          push: true
+          tags: |
+            ghcr.io/sestrian/sestrian-miner:latest
+            ghcr.io/sestrian/sestrian-miner:${{ github.sha }}
+          cache-from: type=gha,scope=miner
 
   # The reference test suite. Advisory until the suite is pinned + green
   # (tracked separately); surfaces regressions in the rig without blocking.

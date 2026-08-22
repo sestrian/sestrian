@@ -58,9 +58,41 @@ docker run --rm -it \
   --data-dir /data --genesis-file /genesis/genesis.bin --api-bind 0.0.0.0
 ```
 
-The image carries the node only, so this covers **watch, sync and serve**.
-Mining also needs the PyTorch trainer, which isn't in the image — use the
-installer for that.
+That image carries the node only — **watch, sync and serve**. To mine in Docker,
+use the miner image, which bundles the PyTorch trainer:
+
+```bash
+docker run --rm -it --gpus all \
+  -v "$PWD/genesis.bin:/genesis/genesis.bin:ro" \
+  -v sestrian-data:/data \
+  -p 8090:8090 \
+  -e SESTRIAN_KEY_SEED=$(head -c32 /dev/urandom | xxd -p -c64) \
+  ghcr.io/sestrian/sestrian-miner
+```
+
+It runs its own preflight, refuses to start if the genesis is missing or the
+config can't earn, and **exits if either the node or the trainer dies** rather
+than sitting there looking healthy while earning nothing.
+
+> **Docker mining is Linux + NVIDIA only.** Docker Desktop on macOS has no GPU
+> passthrough, so the Apple GPU is invisible inside a container and you would
+> silently fall back to CPU — the image warns you if that happens. **On a Mac,
+> run `scripts/install.sh --mine` natively** to use MPS.
+>
+> The published image is the **CPU** build (it works everywhere, just slowly).
+> For NVIDIA, build the CUDA flavour once — it's ~3GB:
+> ```bash
+> docker build -f deploy/Dockerfile.miner --build-arg TORCH_FLAVOR=cu121 \
+>     -t sestrian-miner:cuda .
+> ```
+
+Or with compose, which wires the volumes and ports for you:
+
+```bash
+echo "SESTRIAN_KEY_SEED=$(head -c32 /dev/urandom | xxd -p -c64)" > .env   # SAVE THIS
+docker compose -f deploy/docker-compose.yml up node             # watch/serve
+docker compose -f deploy/docker-compose.yml --profile miner up miner
+```
 
 ## You do not configure the network
 
