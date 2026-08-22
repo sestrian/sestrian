@@ -90,21 +90,22 @@
 </style>
 
 <header><div class="wrap mast">
-  <span class="brand">Sestrian</span><span class="tag">Technical brief · confidential</span>
+  <span class="brand">Sestrian</span><span class="tag">Technical brief</span>
   <span class="spacer"></span><button class="toggle" id="tg">Theme</button>
 </div></header>
 
 <div class="wrap">
   <div class="title">
-    <p class="eyebrow">Decentralized AI · protocol · pre-seed</p>
+    <p class="eyebrow">Decentralized AI · protocol · open devnet</p>
     <h1>A blockchain whose state is a model.</h1>
-    <p class="lede">Technical companion for diligence: the architecture, what is
-      implemented and tested today, the honest security posture, and what the
-      raise buys down. Every claim below points at running code.</p>
+    <p class="lede">The architecture, what is implemented and tested today, the
+      honest security posture, and what is still unproven. Every claim below
+      points at running code in the public repository.</p>
     <div class="meta">
-      <span><b>117</b> passing tests</span><span><b>~5,600</b> lines</span>
-      <span><b>33</b> modules</span><span>verified <b>cross-machine</b></span>
-      <span>numpy · py_ecc (BLS12-381) · libsodium</span>
+      <span><b>85.4M</b> params, live</span><span><b>49</b> node tests</span>
+      <span><b>23</b> golden-vector families</span>
+      <span>Rust node ≡ <b>Python reference</b>, bit-exact</span>
+      <span>verified <b>cross-vendor GPU</b></span>
     </div>
   </div>
 
@@ -246,20 +247,44 @@
   </section>
 
   <section style="border-bottom:none">
-    <h2>8 · The ask</h2>
-    <p>Pre-seed capital to stand up the Phase-1 devnet in a data-rich vertical and
-      drive toward the revenue crossover no network has reached. The design is
-      validated in running, tested code; what we're funding is the phase where the
-      remaining questions become answerable. Full whitepaper, the rig, and the live
-      viewer available under diligence.</p>
+    <h2>8 · What could kill this</h2>
+    <p>A limits section written by us before a reviewer writes it for us. Live
+      status is tracked continuously in
+      <a href="https://github.com/sestrian/sestrian/blob/main/docs/production-readiness.md">production-readiness.md</a>
+      and <a href="https://github.com/sestrian/sestrian/blob/main/docs/internal/threat-model.md">the threat model</a>.</p>
+    <ul>
+      <li><strong>Score trust.</strong> Delta scoring is enforced at the
+        <em>committed</em> level: the proposer evaluates each update on a held-out
+        batch and commits the scores; validators check structure, bounds and the
+        commitment, but do not re-run the model. A lying proposer is bounded by
+        the score cap, its bond and the challenge market — not yet by a
+        multi-evaluator committee. That committee needs independent operators, so
+        it gates on the testnet, not on more code.</li>
+      <li><strong>Poisoning.</strong> Robust aggregation trims outliers and holds
+        for ≥3 honest miners, and provenance forces every update to name staked,
+        challengeable data. Neither claims a determined adversary with many
+        identities is stopped today — that is what enforced scoring plus slashing
+        is for.</li>
+      <li><strong>Scale.</strong> The live model is 85.4M parameters. Convergence
+        at billions of parameters, the compute handicap of decentralized training,
+        and multi-GB corpus availability are unproven here and are honest unknowns.</li>
+      <li><strong>Demand.</strong> The economics only close if inference revenue
+        eventually exceeds issuance. Tail emission guarantees training is always
+        funded, but the crossover has to be earned by real paying usage.</li>
+      <li><strong>Throughput.</strong> Every block carries a multi-MB delta, so a
+        joining node syncs the full history and a slow uplink can miss the
+        inclusion window. Mitigated — auto-fitted training rounds, DA-sharded
+        genesis, visible stale-delta alarms — not solved.</li>
+    </ul>
   </section>
 </div>
 
 <footer><div class="wrap">
-  SESTRIAN · technical brief · confidential pre-seed
-  <div class="d">Figures describe a toy-scale reference implementation and modeled
-    economics, not a live network, revenue, or committed customers. Forward-looking;
-    nothing here is an offer of securities.</div>
+  SESTRIAN · technical brief
+  <div class="d">Describes an open devnet: consensus, provenance, delta scoring and
+    the token economy run live and are pinned to the Python reference by golden
+    vectors, while the multi-operator mechanisms above remain testnet-phase. Treat
+    devnet rewards as testnet play. Nothing here is financial advice.</div>
 </div></footer>
 
 <script>
