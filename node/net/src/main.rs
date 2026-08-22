@@ -53,6 +53,13 @@ struct NetworkParams {
     genesis_model: &'static str,
     genesis_seed: u64,
     bootstrap: &'static str,
+    /// Seconds between proposal attempts. Not consensus — but it sets the
+    /// trainer's per-round budget and how often you compete for a block, so a
+    /// node running a wildly different cadence than the network wastes its work:
+    /// tiny useless rounds, and blocks that lose fork choice. Ships with the
+    /// network so a joiner cannot get it wrong by accident (the old 10s default
+    /// against this 180s network gave a 6-second training budget).
+    block_interval: f64,
 }
 
 const DEVNET: NetworkParams = NetworkParams {
@@ -62,6 +69,7 @@ const DEVNET: NetworkParams = NetworkParams {
     genesis_model: "small",
     genesis_seed: 1337,
     bootstrap: "/ip4/169.58.211.248/tcp/9800",
+    block_interval: 180.0,
 };
 
 /// A private/local chain: nothing is baked, everything is explicit. This is the
@@ -74,6 +82,7 @@ const LOCAL: NetworkParams = NetworkParams {
     genesis_model: "toy",
     genesis_seed: 1337,
     bootstrap: "",
+    block_interval: 10.0,
 };
 
 /// The exact command that reproduces a network's genesis — printed on every
@@ -120,6 +129,9 @@ fn apply_network(args: &mut Args) -> &'static NetworkParams {
     if args.peers.is_empty() && !net.bootstrap.is_empty() {
         args.peers = net.bootstrap.to_string();       // extra peers may be added
     }
+    if args.interval <= 0.0 {
+        args.interval = net.block_interval;           // cadence follows the network
+    }
     net
 }
 
@@ -162,7 +174,9 @@ struct Args {
     peers: String,
     #[arg(long, default_value_t = false)]
     produce: bool,
-    #[arg(long, default_value_t = 10.0)]
+    /// Seconds between proposal attempts. 0 (the default) adopts the network's
+    /// cadence — see NetworkParams::block_interval. Override only if you know why.
+    #[arg(long, default_value_t = 0.0)]
     interval: f64,
     #[arg(long, default_value = "")]
     rotate: String,          // "n,id" — deterministic devnet leader rotation

@@ -124,8 +124,9 @@ if [ "$SERVICE" = 0 ]; then
   say "ready — run it"
   echo "  $BIN ${ARGS[*]}"
   [ "$MINE" = 1 ] && echo "  # and in another shell, the trainer:
-  cd $REPO && $UV -m client.miner_bridge --node-port 7999 \\
-      --model $MODEL --data <your-corpus.txt> --device <cuda|mps>"
+  cd $REPO && $UV -m client.miner_bridge --node-port 7999 --model $MODEL
+  # (no --data needed: it fetches a public-domain corpus on first run.
+  #  point --data at your own text once you stake it.)"
   echo
   echo "  watch:  curl -s localhost:8090/status   (stale_deltas must stay 0)"
   exit 0

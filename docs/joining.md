@@ -1,118 +1,149 @@
-# Joining the Sestrian devnet
+# Join the Sestrian devnet
 
-The network is **open** — permissionless, like Bitcoin. To join you need exactly
-three things, all public:
-
-1. **the software** (this repo),
-2. **one bootstrap peer address** (a running node's multiaddr), and
-3. **the published genesis id** (a 32-byte hash).
-
-You **reproduce the genesis locally** from the published model+seed and check
-that it hashes to the published id, then sync the chain from the peer. The
-genesis is deterministic, so reproducing it is *more* trustless than downloading
-it — and at ~650MB it is far too large to ship over the p2p sync transport
-anyway (a peer will refuse to serve it; that is expected, not a fault).
-
-> Live devnet parameters:
->
-> | | value |
-> |---|---|
-> | bootstrap peer | `/ip4/169.58.211.248/tcp/9800` |
-> | genesis id | `30ea20da27f1da0c94512d50a6291370a63a426b77dc425b9826ca17bd213c28` |
-> | model | 85.4M-param GPT, from-scratch genesis (seed 1337) |
-> | **data-contributor** | `3432d48fd6878b4f2e7a1e40cc15e112c512fae7` |
-> | public API | `http://169.58.211.248:8080/status` |
-
-**You do not pass any of these.** Like Bitcoin's `-testnet`, they are compiled
-into the binary and selected with `--network devnet` (the default) — the table is
-here so you can verify what your node is using, not so you can type it in.
-Consensus values were briefly free-form flags; omitting `--data-contributor`
-produced a node that connected, received blocks, discarded every one, and sat at
-height 0 forever with no error. Now a contradicting flag is a startup error.
-Running your own chain: `--network local`, and supply everything yourself.
-
-## Run a node (watch + sync)
+One command gets you a running node. Two get you mining.
 
 ```bash
-# build (or pull ghcr.io/sestrian/sestrian-node)
-cd node && cargo build --release && cd ..
-
-# a wallet/identity key (0600); this is your on-chain identity
-head -c32 /dev/urandom | xxd -p -c64 > ~/.sestrian.key && chmod 600 ~/.sestrian.key
-
-# reproduce the genesis; it MUST print the published genesis id above
-uv run --with torch --with numpy --with pynacl \
-    python -m client.make_genesis --model small --seed 1337 --out genesis.bin
-
-# PREFLIGHT — verify you can actually contribute before running for hours
-node/target/release/sestrian-node --check \
-  --data-dir ~/.sestrian --key-file ~/.sestrian.key --genesis-file genesis.bin
-
-# join and sync
-node/target/release/sestrian-node \
-  --data-dir ~/.sestrian \
-  --key-file ~/.sestrian.key \
-  --genesis-file genesis.bin \
-  --api-port 8090
+git clone https://github.com/sestrian/sestrian && cd sestrian
+scripts/install.sh            # watch + sync
+scripts/install.sh --mine     # train and earn (needs a GPU)
+scripts/install.sh --service  # ...and survive reboots
 ```
 
-Watch it: `curl -s localhost:8090/status` (height, peers, supply) and
-`curl -s localhost:8090/metrics` (Prometheus).
+The installer builds the node, creates your wallet, reproduces the genesis and
+verifies it against the network, then runs a **preflight** that refuses to leave
+you in a state where you'd silently earn nothing. It is safe to re-run.
 
-`--check` is worth the 30 seconds every time: it catches an unreachable peer, a
-genesis that doesn't match the network (you'd silently be on a different chain),
-and mining settings that would make your work uninludable.
+> **Expect the first run to take a while.** Compiling the Rust node is ~2 min,
+> and reproducing the 85.4M-parameter genesis is ~2–3 min of CPU. Syncing the
+> chain then takes longer than you'd guess: every block carries a multi-megabyte
+> training delta, so catching up is bandwidth-bound, not CPU-bound.
 
-## If you mine: watch `stale_deltas`
+## What you need
 
-A delta can only be included at the current head. If your training round takes
-longer than the block interval, every delta you produce arrives too late and is
-dropped — **you would mine forever and earn nothing.** The trainer now measures
-its own speed and auto-fits its inner steps to the interval, but check anyway:
+- **Rust** and **Python 3.11+** — the installer offers to install Rust; for
+  Python it uses [uv](https://astral.sh/uv) if present.
+- **To mine:** a GPU with PyTorch support — NVIDIA (CUDA) or Apple silicon (MPS).
+  A laptop GPU is fine; the trainer measures your speed and sizes each round to
+  fit the block interval.
+- **To just watch/serve:** no GPU at all.
+
+### Skip the genesis build
+
+The genesis is deterministic, so you can download a prebuilt copy instead of
+spending CPU on it — the node still verifies it against the id compiled into the
+binary, so a tampered file fails at startup:
 
 ```bash
-curl -s localhost:8090/status | grep stale_deltas   # should stay 0
+SESTRIAN_GENESIS_URL=<url-to-genesis.bin.zst> scripts/install.sh
 ```
 
-Non-zero and climbing means your rounds are overrunning: lower `--inner` on the
-trainer, or ask the operator to raise the network's block interval. The node also
-logs a loud warning naming the cause.
+## You do not configure the network
 
-## Contribute compute and earn
+Bootstrap peer, genesis id, the genesis-ledger contributor and the block cadence
+are **compiled into the binary** and selected with `--network devnet` (the
+default), exactly like Bitcoin's `-testnet`. You cannot typo yourself onto a
+chain that will never validate — a flag contradicting the network is a startup
+error, not a silent fork.
 
-Two jobs earn the token; do either or both.
+The current values, so you can verify what your node is using:
 
-**Train (mining).** Add `--produce` to the node, then attach the PyTorch trainer
-— it pulls the head weights, trains locally, and returns compressed deltas the
-node gossips. Provenance is required (rev 5): every delta must name the staked
-corpus it trains on via `--data-refs` — during the devnet that's the always-staked
-founding corpus, `--data-refs genesis`; once you stake your own corpus, name its
-data hash instead and the block data share pays *you*:
+| | value |
+|---|---|
+| network | `devnet` |
+| bootstrap peer | `/ip4/169.58.211.248/tcp/9800` |
+| genesis id (state root) | `30ea20da27f1da0c94512d50a6291370a63a426b77dc425b9826ca17bd213c28` |
+| model | 85.4M-param GPT, from scratch (`--model small --seed 1337`) |
+| genesis-ledger contributor | `3432d48fd6878b4f2e7a1e40cc15e112c512fae7` |
+| block interval | 180s |
+| public API | http://169.58.211.248:8080/status |
+
+Running your own chain instead: `--network local`, and supply everything yourself.
+
+## Is it working?
 
 ```bash
-target/release/sestrian-node ... --produce --bridge-port 7999 --data-refs genesis
-python -m client.miner_bridge --node-port 7999 --model <MODEL> --data <corpus.txt> --device cuda
+curl -s localhost:8090/status
 ```
 
-A better-scoring delta earns more of the block reward; the proposer lottery is
-stake-weighted, and fork choice follows the VRF luck of eligible proposers.
+| field | what you want |
+|---|---|
+| `height` | climbing, and matching the [public API](http://169.58.211.248:8080/status) |
+| `peers` | at least 1 |
+| `model_attached` | `true` if you're mining |
+| **`stale_deltas`** | **0** |
 
-**Serve (inference).** Run a `--serve-only` bridge; users pay fees via signed
-`POST /inference` receipts that settle payer → your wallet on-chain.
+**`stale_deltas` is the one to watch.** A delta can only be included at the
+current head, so if your training round finishes after the head moves on, your
+work is dropped — you would mine forever and earn nothing. The trainer auto-fits
+its step count to the block interval to prevent this, and the node logs a loud
+warning naming the cause if it still happens. Non-zero and climbing means lower
+`--inner` on the trainer.
 
-## What everyone can see and do
+Your balance, any time:
 
-Once connected you have the full chain, the reconstructed model weights (replay
-from genesis), and the data registry. You can validate blocks, submit deltas,
-serve inference, transfer tokens, and submit/challenge data. Nothing is hidden
-by design — that is what makes it a public, self-funding network.
+```bash
+uv run --with numpy --with pynacl python -m client.wallet balance
+```
+
+## The three ways to earn
+
+**⛏ Mine.** `scripts/install.sh --mine`, or add `--produce --data-refs genesis`
+to the node and attach the trainer:
+
+```bash
+uv run --with torch --with numpy --with pynacl python -m client.miner_bridge \
+    --node-port 7999 --model small
+```
+
+Your GPU is detected automatically (`--device cuda|mps|cpu` to force it), and no
+`--data` is needed — the trainer fetches a public-domain corpus on first run, so
+you can start immediately. Point `--data` at your own text once you've staked it.
+
+Every delta must name the staked corpus it trained on — that's provenance, and
+it's enforced. `genesis` is the always-staked founding corpus and the right
+starting point. Blocks pay ∝ the held-out loss improvement your delta actually
+achieved.
+
+**📚 Supply data.** Stake coins behind a corpus you own, and earn the data share
+of every block trained on it plus a cut of inference fees when the model actually
+leans on it:
+
+```bash
+uv run --with numpy --with pynacl python -m client.wallet submit-data \
+    --file corpus.txt --stake 5
+```
+
+It prints the `--data-refs` value to mine with afterwards, so your own data
+starts paying you. You need coins first — mine for a while with `--data-refs
+genesis`, then stake.
+
+**🔌 Serve.** Run a serve-only bridge and answer paid inference:
+
+```bash
+uv run --with torch --with numpy --with pynacl python -m client.miner_bridge \
+    --node-port 7999 --model small --serve-only
+```
+
+Callers `POST /inference` with a signed, fee-bearing receipt that settles to your
+wallet on-chain.
+
+## Back up your wallet
+
+`~/.sestrian/wallet.json` **is** your identity and your balance. There is no
+recovery service. Copy it somewhere safe.
 
 ## Honest status
 
-Delta loss-scoring is not yet enforced on-chain (it needs off-chain model
-execution — see [production-readiness.md](production-readiness.md)). Until it is,
-this is a **small, monitored devnet**: run it with people you can watch, on a
-low-value model, and treat block rewards as testnet play. The `trimmed_mean`
-aggregation is Byzantine-robust for ≥3 honest miners, but a determined adversary
-with many identities is exactly the case scoring defends — that's why open
-*mainnet* waits for the testnet phase + an external audit.
+This is an **open devnet**, so treat rewards as testnet play.
+
+Live and enforced: consensus safety, provenance (deltas must name staked,
+challengeable data), committed delta scoring, influence-sketch usage royalties,
+the tail-emission economics, and erasure-coded data availability — all pinned to
+the Python reference by golden vectors.
+
+Still testnet-phase, because they need *independent operators* rather than more
+code: the multi-evaluator scoring committee (today the block proposer commits the
+scores, bounded by its bond and the challenge market), consensus-level
+cross-inclusion challenges, and sketch verification. Details in
+[production-readiness.md](production-readiness.md) and
+[the threat model](internal/threat-model.md).
