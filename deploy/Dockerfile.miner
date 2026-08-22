@@ -32,9 +32,14 @@ FROM python:3.11-slim
 # cu121 -> ~3GB image, needs `--gpus all` and the NVIDIA Container Toolkit
 ARG TORCH_FLAVOR=cpu
 
+# The trailing `command -v tini` fails the BUILD if tini is missing, rather than
+# every `docker run`. The entrypoint binary is the one thing no test inside the
+# image can cover: get its path wrong and the container dies in runc before a
+# single line of ours executes.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl zstd tini && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    command -v tini
 
 # torch first, on its own layer: it is by far the largest and least-changing part
 RUN pip install --no-cache-dir \
@@ -60,4 +65,7 @@ ENV SESTRIAN_DATA_DIR=/data \
     PYTHONUNBUFFERED=1
 EXPOSE 8090 7900
 # tini reaps the two child processes properly, so ^C actually stops both
-ENTRYPOINT ["/usr/sbin/tini", "--", "/usr/local/bin/miner-entrypoint"]
+# Resolved via PATH, not hardcoded: Debian ships tini in /usr/bin, and the
+# hardcoded /usr/sbin/tini meant the image could not start AT ALL —
+# "exec: /usr/sbin/tini: no such file or directory", before the entrypoint ran.
+ENTRYPOINT ["tini", "--", "/usr/local/bin/miner-entrypoint"]
