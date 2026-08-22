@@ -41,15 +41,23 @@ jobs:
             apt: gcc-aarch64-linux-gnu libc6-dev-arm64-cross
             linker: aarch64-linux-gnu-gcc
             strip: aarch64-linux-gnu-strip
-            smoke: arch          # cross-built: verify the ELF arch, can't execute
+            smoke: arch          # cross-built: verify the arch, can't execute
+            arch_pattern: ARM aarch64
           - target: aarch64-apple-darwin
             os: macos-14
             archive: tar.gz
             smoke: help
+          # Cross-built from the arm64 runner on purpose. macos-13 is the last
+          # Intel image and is being retired: a v0.3.0 job sat queued for 37
+          # minutes and never picked up a runner. Apple's SDK is universal, so
+          # clang targets x86_64 from arm without extra toolchain. Trade-off:
+          # this binary ships without ever executing (no Rosetta on the arm
+          # runners), so the arch check below is all that stands behind it.
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-14
             archive: tar.gz
-            smoke: help
+            smoke: arch
+            arch_pattern: x86_64
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             archive: zip
@@ -82,8 +90,10 @@ jobs:
         run: ${{ matrix.strip || 'strip' }} node/target/${{ matrix.target }}/release/$BIN || true
 
       # A binary that will not execute must fail the job, never get published.
+      # Listed positively: a cross-built target CANNOT run here, so `!= none`
+      # would drag aarch64-linux in and fail it on Exec format error.
       - name: smoke — it runs at all
-        if: matrix.smoke != 'none' && runner.os != 'Windows'
+        if: (matrix.smoke == 'help' || matrix.smoke == 'full') && runner.os != 'Windows'
         run: node/target/${{ matrix.target }}/release/$BIN --help > /dev/null
 
       - name: smoke — it runs at all (windows)
@@ -98,7 +108,8 @@ jobs:
           set -euo pipefail
           f=$(file -b "node/target/${{ matrix.target }}/release/$BIN")
           echo "$f"
-          echo "$f" | grep -q 'ARM aarch64' || { echo "not an aarch64 binary"; exit 1; }
+          echo "$f" | grep -q '${{ matrix.arch_pattern }}' \
+            || { echo "expected a ${{ matrix.arch_pattern }} binary, got: $f"; exit 1; }
 
       # Deeper: prove the real preflight path works on a throwaway local chain.
       - name: smoke — preflight on a local toy chain
