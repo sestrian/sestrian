@@ -35,10 +35,13 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz
-            apt: gcc-aarch64-linux-gnu
+            # libc6-dev-arm64-cross is REQUIRED, not a nicety: `ring` compiles C,
+            # and with only the cross COMPILER installed it falls back to the
+            # host's x86 /usr/include and dies on bits/libc-header-start.h.
+            apt: gcc-aarch64-linux-gnu libc6-dev-arm64-cross
             linker: aarch64-linux-gnu-gcc
             strip: aarch64-linux-gnu-strip
-            smoke: none          # cross-built: cannot execute on this runner
+            smoke: arch          # cross-built: verify the ELF arch, can't execute
           - target: aarch64-apple-darwin
             os: macos-14
             archive: tar.gz
@@ -87,12 +90,27 @@ jobs:
         if: runner.os == 'Windows'
         run: node\target\${{ matrix.target }}\release\sestrian-node.exe --help > $null
 
+      # A cross-built binary can't run here, so at least prove it is the right
+      # architecture and not an accidentally-native build wearing the wrong name.
+      - name: smoke — correct architecture (cross-built)
+        if: matrix.smoke == 'arch'
+        run: |
+          set -euo pipefail
+          f=$(file -b "node/target/${{ matrix.target }}/release/$BIN")
+          echo "$f"
+          echo "$f" | grep -q 'ARM aarch64' || { echo "not an aarch64 binary"; exit 1; }
+
       # Deeper: prove the real preflight path works on a throwaway local chain.
       - name: smoke — preflight on a local toy chain
         if: matrix.smoke == 'full'
         env:
-          SESTRIAN_KEY_SEED: 1111111111111111111111111111111111111111111111111111111111111111
+          # QUOTED deliberately: unquoted, GitHub Actions turns a 64-digit value
+          # into scientific notation (1.111...e+63), the node gets a non-hex seed
+          # and panics in hex::decode. Cost us a red build to learn.
+          SESTRIAN_KEY_SEED: "1111111111111111111111111111111111111111111111111111111111111111"
         run: |
+          set -euo pipefail
+          test ${#SESTRIAN_KEY_SEED} -eq 64 || { echo "seed mangled by YAML: ${#SESTRIAN_KEY_SEED} chars"; exit 1; }
           node/target/${{ matrix.target }}/release/$BIN --check \
             --network local --toy-dim 64 --data-dir "$(mktemp -d)"
 

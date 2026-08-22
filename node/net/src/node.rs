@@ -1089,9 +1089,15 @@ pub async fn run(
     let jitter: f64 = rand::random::<f64>() * 0.5;
     // SIGTERM is what systemd/k8s send on stop — handle it (not just SIGINT) so
     // the post-loop final snapshot runs and the next boot fast-boots at head.
-    let mut sigterm = tokio::signal::unix::signal(
+    // Windows has no SIGTERM; CTRL_SHUTDOWN is its analogue (sent when a service
+    // is stopped or the machine shuts down), so graceful shutdown works there too.
+    #[cfg(unix)]
+    let mut stop_signal = tokio::signal::unix::signal(
         tokio::signal::unix::SignalKind::terminate())
         .expect("install SIGTERM handler");
+    #[cfg(windows)]
+    let mut stop_signal = tokio::signal::windows::ctrl_shutdown()
+        .expect("install CTRL_SHUTDOWN handler");
 
     loop {
         if now() >= end {
@@ -1102,8 +1108,8 @@ pub async fn run(
                 info!("SIGINT — shutting down");
                 break;
             }
-            _ = sigterm.recv() => {
-                info!("SIGTERM — shutting down");
+            _ = stop_signal.recv() => {
+                info!("terminate signal — shutting down");
                 break;
             }
             _ = tick.tick() => {

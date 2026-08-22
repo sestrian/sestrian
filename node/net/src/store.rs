@@ -17,7 +17,6 @@ use sestrian_core::token::TokenLedger;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
-use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use tracing::{info, warn};
 
@@ -43,9 +42,16 @@ impl Store {
         Ok(Store { dir, _lock: lock })
     }
 
-    /// Take an exclusive, non-blocking advisory lock on `<dir>/.lock`. Fails
-    /// with a clear error if another node process already holds it.
+    /// Take an exclusive, non-blocking lock on `<dir>/.lock`. Two writers on one
+    /// data dir interleave appends into blocks.jsonl and corrupt the chain, so
+    /// this is a hard guarantee on every platform.
+    ///
+    /// Unix: advisory `flock`. Windows: opening with an empty share mode, which
+    /// makes the OS itself refuse a second opener. Both are released by the OS
+    /// when the process dies — the property that matters after a crash.
+    #[cfg(unix)]
     fn acquire_lock(dir: &PathBuf) -> std::io::Result<fs::File> {
+        use std::os::unix::io::AsRawFd;
         let path = dir.join(".lock");
         let file = fs::OpenOptions::new().create(true).write(true).truncate(false).open(&path)?;
         // SAFETY: valid fd for the lifetime of `file`; LOCK_NB never blocks.
@@ -57,6 +63,35 @@ impl Store {
             ));
         }
         Ok(file)
+    }
+
+    #[cfg(windows)]
+    fn acquire_lock(dir: &PathBuf) -> std::io::Result<fs::File> {
+        use std::os::windows::fs::OpenOptionsExt;
+        let path = dir.join(".lock");
+        // share_mode(0): no other process may open this file at all, so a second
+        // node fails right here instead of racing us for the data dir.
+        fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .share_mode(0)
+            .open(&path)
+            .map_err(|e| {
+                // ERROR_SHARING_VIOLATION (32) is the one that means "someone
+                // else has it open". Everything else — missing dir, read-only
+                // volume, ACL — must keep its own message, or we would blame a
+                // second node for a problem that has nothing to do with one.
+                const ERROR_SHARING_VIOLATION: i32 = 32;
+                if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION) {
+                    std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        format!("another sestrian-node already holds {}", path.display()),
+                    )
+                } else {
+                    e
+                }
+            })
     }
 
     // ---- genesis ---------------------------------------------------------

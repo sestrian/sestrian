@@ -228,9 +228,32 @@ fn decrypt_wallet(enc: &serde_json::Value, passphrase: &str) -> Option<[u8; 32]>
 /// transient key material doesn't linger in freed memory.
 fn seed_from_hex(mut hexed: String) -> [u8; 32] {
     use zeroize::Zeroize;
-    let mut raw = hex::decode(hexed.trim()).expect("key seed must be hex");
+    // Say what is wrong WITHOUT echoing key material. A bare "must be hex" panic
+    // is useless when the real cause is upstream mangling — a YAML/CI layer
+    // turning 64 digits into scientific notation, a stray newline, a truncated
+    // paste. Report the shape, never the value.
+    let trimmed = hexed.trim().to_string();
+    let n = trimmed.len();
+    let raw = hex::decode(&trimmed);
     hexed.zeroize();
-    let out: [u8; 32] = raw.as_slice().try_into().expect("key seed must be 32 bytes");
+    let mut raw = match raw {
+        Ok(r) => r,
+        Err(e) => {
+            let mut t = trimmed;
+            t.zeroize();
+            panic!("key seed is not valid hex ({e}): got {n} characters, expected \
+                    64 hex digits. If this came from CI or a config file, check \
+                    it is QUOTED — a 64-digit unquoted value can be reinterpreted \
+                    as a number.");
+        }
+    };
+    let mut t = trimmed;
+    t.zeroize();
+    let out: [u8; 32] = raw.as_slice().try_into().unwrap_or_else(|_| {
+        let len = raw.len();
+        raw.zeroize();
+        panic!("key seed must be 32 bytes ({len} decoded from {n} hex chars)")
+    });
     raw.zeroize();
     out
 }
