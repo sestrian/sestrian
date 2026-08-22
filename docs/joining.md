@@ -29,13 +29,38 @@ you in a state where you'd silently earn nothing. It is safe to re-run.
 
 ### Skip the genesis build
 
-The genesis is deterministic, so you can download a prebuilt copy instead of
-spending CPU on it — the node still verifies it against the id compiled into the
-binary, so a tampered file fails at startup:
+The genesis is deterministic, so you can download a prebuilt copy (190MB) instead
+of spending CPU on it. Convenience, **not** trust: the node verifies whatever you
+give it against the state root compiled into the binary, so a tampered file fails
+at startup rather than silently forking you.
 
 ```bash
-SESTRIAN_GENESIS_URL=<url-to-genesis.bin.zst> scripts/install.sh
+SESTRIAN_GENESIS_URL=https://github.com/sestrian/sestrian/releases/download/devnet-genesis-1/genesis.bin.zst \
+SESTRIAN_GENESIS_SHA256=6987fb34ebf654655cebbd1d0133f3d70d7f470d7a279dcf2b9f498a27468978 \
+  scripts/install.sh
 ```
+
+That removes Python and torch from the requirements entirely — you need only
+Rust to build the node, or the container below to skip that too.
+
+### Or run the container (no toolchain at all)
+
+```bash
+curl -fL -o genesis.bin.zst https://github.com/sestrian/sestrian/releases/download/devnet-genesis-1/genesis.bin.zst
+zstd -d genesis.bin.zst && mkdir -p sestrian-data
+
+docker run --rm -it \
+  -v "$PWD/genesis.bin:/genesis/genesis.bin:ro" \
+  -v "$PWD/sestrian-data:/data" \
+  -p 8090:8090 \
+  -e SESTRIAN_KEY_SEED=$(head -c32 /dev/urandom | xxd -p -c64) \
+  ghcr.io/sestrian/sestrian-node \
+  --data-dir /data --genesis-file /genesis/genesis.bin --api-bind 0.0.0.0
+```
+
+The image carries the node only, so this covers **watch, sync and serve**.
+Mining also needs the PyTorch trainer, which isn't in the image — use the
+installer for that.
 
 ## You do not configure the network
 

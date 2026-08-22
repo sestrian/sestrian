@@ -12,3 +12,4 @@ runs/
 corpus/
 corpus_mac/
 *.bin
+dist/
