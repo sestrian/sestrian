@@ -7,7 +7,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
-const { ensureBinary, HOME_DIR } = require('../scripts/download.js');
+const { ensureBinary, ensureGenesis, HOME_DIR } = require('../scripts/download.js');
 
 const API_PORT = process.env.SESTRIAN_API_PORT || '8090';
 const DATA_DIR = path.join(HOME_DIR, 'nodedata');
@@ -17,7 +17,9 @@ const GENESIS = path.join(HOME_DIR, 'genesis.bin');
 const USAGE = `sestrian — run a node on the Sestrian devnet
 
   sestrian run       start a node (syncs and serves; add --produce to mine)
+                     fetches the genesis weights on first run if needed
   sestrian check     preflight: can this machine actually contribute?
+  sestrian genesis   download + verify the genesis weights, then print the path
   sestrian status    query a node already running on :${API_PORT}
   sestrian <flags>   anything else is passed to sestrian-node unchanged
                      (sestrian node-help lists the node's own flags —
@@ -41,6 +43,16 @@ function defaults() {
   if (fs.existsSync(GENESIS)) a.push('--genesis-file', GENESIS);
   a.push('--api-port', String(API_PORT));
   return a;
+}
+
+// Only devnet needs the published genesis. A local/toy chain builds its own,
+// and someone who passed their own --genesis-file has already answered this.
+function wantsDevnetGenesis(argv) {
+  if (fs.existsSync(GENESIS)) return false;
+  if (argv.includes('--toy-dim') || argv.includes('--genesis-file')) return false;
+  const i = argv.indexOf('--network');
+  const net = i >= 0 ? argv[i + 1] : 'devnet';
+  return net === 'devnet';
 }
 
 function runNode(bin, args) {
@@ -107,7 +119,17 @@ async function main() {
   const bin = await ensureBinary();
   // explicit escape hatch for the node's own --help, which does need the binary
   if (cmd === 'node-help') return runNode(bin, ['--help']);
-  if (cmd === 'run') return runNode(bin, [...defaults(), ...rest]);
+  if (cmd === 'genesis') {
+    const p = await ensureGenesis(GENESIS);
+    return void console.log(p);
+  }
+  if (cmd === 'run') {
+    // `run` fetches the genesis it needs: you have committed to running a node,
+    // and a node without genesis cannot validate a single block. `check` never
+    // does — a preflight that quietly pulls 190MB is not a preflight.
+    if (wantsDevnetGenesis(rest)) await ensureGenesis(GENESIS);
+    return runNode(bin, [...defaults(), ...rest]);
+  }
   if (cmd === 'check') return runNode(bin, ['--check', ...defaults(), ...rest]);
   return runNode(bin, [cmd, ...rest]); // straight through to the node
 }

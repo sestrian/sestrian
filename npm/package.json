@@ -1,6 +1,6 @@
 {
   "name": "sestrian",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Run a Sestrian node — a blockchain whose state is the weights of a public neural network.",
   "bin": {
     "sestrian": "bin/sestrian.js"
@@ -10,6 +10,9 @@
     "scripts/",
     "README.md"
   ],
+  "scripts": {
+    "test": "node --test"
+  },
   "engines": {
     "node": ">=18"
   },

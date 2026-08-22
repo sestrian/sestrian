@@ -41,6 +41,30 @@ jobs:
         working-directory: node
         run: cargo fmt --check || true
 
+  # The npx CLI. Its genesis download is the one path that takes 650MB of
+  # consensus state off the network and writes it to disk, so its checksum
+  # guards are tested against deliberately corrupt manifests. Node 18 is the
+  # floor declared in package.json — test there too, since the newest Node has
+  # built-in zstd and would hide a break in the fallback path.
+  npm-cli:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: ['18', '22', 'latest']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: zstd fallback must exist for Node without built-in zstd
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zstd
+      - name: cli loads and prints usage without touching the network
+        working-directory: npm
+        run: node bin/sestrian.js --help
+      - name: tests
+        working-directory: npm
+        run: npm test
+
   # The Python rig is the SPEC. Regenerate the golden vectors and assert the
   # committed file is byte-identical — this is what pins the Rust node to the
   # reference. A drift here means Rust and Python disagree.

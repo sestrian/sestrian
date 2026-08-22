@@ -1,38 +1,57 @@
 # Join the Sestrian devnet
 
-One command gets you a running node. Two get you mining.
+```bash
+npx sestrian run
+```
+
+That is the whole thing. It downloads a prebuilt node for your platform, creates
+your wallet, fetches the 652MB genesis weights and joins the network. No clone,
+no compiler, no Python. Then:
+
+```bash
+npx sestrian status     # height, peers, whether you are actually earning
+npx sestrian check      # preflight: can this machine contribute?
+```
+
+Everything it downloads is checked against a published sha256 before it runs,
+and the genesis is checked twice: once as an archive, and again as raw weights
+whose hash **is** this chain's genesis id. A tampered mirror fails loudly
+instead of quietly putting you on a different chain.
+
+> **The first run takes a while, and most of it is sync.** The downloads are a
+> few minutes; catching up to the head is longer, because every block carries a
+> multi-megabyte training delta — it is bandwidth-bound, not CPU-bound.
+
+`npx sestrian run` **watches and serves**; it does not mine. Training needs
+PyTorch and a GPU, which is what the installer below sets up.
+
+## Mining
+
+Mining means training the model and earning for the improvement you contribute,
+so it needs a GPU and the Python trainer:
 
 ```bash
 git clone https://github.com/sestrian/sestrian && cd sestrian
-scripts/install.sh            # watch + sync
 scripts/install.sh --mine     # train and earn (needs a GPU)
 scripts/install.sh --service  # ...and survive reboots
 ```
 
-The installer builds the node, creates your wallet, reproduces the genesis and
+The installer builds the node, creates your wallet, obtains the genesis and
 verifies it against the network, then runs a **preflight** that refuses to leave
 you in a state where you'd silently earn nothing. It is safe to re-run.
 
-> **Expect the first run to take a while.** Compiling the Rust node is ~2 min,
-> and reproducing the 85.4M-parameter genesis is ~2–3 min of CPU. Syncing the
-> chain then takes longer than you'd guess: every block carries a multi-megabyte
-> training delta, so catching up is bandwidth-bound, not CPU-bound.
+### What you need
 
-## What you need
-
-- **Rust** and **Python 3.11+** — the installer offers to install Rust; for
-  Python it uses [uv](https://astral.sh/uv) if present.
 - **To mine:** a GPU with PyTorch support — NVIDIA (CUDA) or Apple silicon (MPS).
   A laptop GPU is fine; the trainer measures your speed and sizes each round to
-  fit the block interval.
-- **To just watch/serve:** no GPU at all.
+  fit the block interval. Plus **Rust** and **Python 3.11+** — the installer
+  offers to install Rust; for Python it uses [uv](https://astral.sh/uv).
+- **To just watch/serve:** nothing beyond `npx sestrian run`.
 
 ### Skip the genesis build
 
-The genesis is deterministic, so you can download a prebuilt copy (190MB) instead
-of spending CPU on it. Convenience, **not** trust: the node verifies whatever you
-give it against the state root compiled into the binary, so a tampered file fails
-at startup rather than silently forking you.
+The installer reproduces the genesis from scratch (~2–3 min of CPU, plus a torch
+install). Point it at the published copy instead:
 
 ```bash
 SESTRIAN_GENESIS_URL=https://github.com/sestrian/sestrian/releases/download/devnet-genesis-1/genesis.bin.zst \
@@ -40,8 +59,10 @@ SESTRIAN_GENESIS_SHA256=6987fb34ebf654655cebbd1d0133f3d70d7f470d7a279dcf2b9f498a
   scripts/install.sh
 ```
 
-That removes Python and torch from the requirements entirely — you need only
-Rust to build the node, or the container below to skip that too.
+Convenience, **not** trust: the node verifies whatever you give it against the
+state root compiled into the binary, so a tampered file fails at startup rather
+than silently forking you. `npx sestrian genesis` performs the same fetch and
+verification on its own if you want the file without the installer.
 
 ### Or run the container (no toolchain at all)
 

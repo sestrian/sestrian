@@ -149,4 +149,152 @@ async function ensureBinary() {
   );
 }
 
-module.exports = { ensureBinary, targetTriple, HOME_DIR, BIN_NAME, TAGS };
+// ---------------------------------------------------------------------------
+// Genesis
+//
+// The chain's state IS the model, so a node cannot validate anything without
+// the 683MB genesis weight vector. Reproducing it locally is trustless but
+// costs a PyTorch install; downloading it is one hash-verified fetch. We do the
+// fetch and verify it hard, because the decompressed bytes hash to exactly the
+// genesis state root — checking the download IS checking the chain identity,
+// not merely that a file arrived intact.
+
+const GENESIS_TAG = process.env.SESTRIAN_GENESIS_TAG || 'devnet-genesis-1';
+
+function human(n) {
+  return n >= 1 << 30 ? `${(n / 2 ** 30).toFixed(2)}GB` : `${Math.round(n / 2 ** 20)}MB`;
+}
+
+// A zstd decompressor, or null if this Node cannot do it natively.
+// Streaming matters: the output is 683MB and must never be a single Buffer.
+function zstdStream() {
+  const zlib = require('zlib');
+  return typeof zlib.createZstdDecompress === 'function'
+    ? zlib.createZstdDecompress()
+    : null;
+}
+
+function hasZstdCli() {
+  try {
+    execFileSync('zstd', ['--version'], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Path to a verified genesis.bin, downloading it if absent.
+ * @returns {Promise<string>}
+ */
+async function ensureGenesis(dest) {
+  if (fs.existsSync(dest)) return dest;
+
+  const stream = require('stream');
+  const { pipeline } = require('stream/promises');
+
+  const manifest = JSON.parse(
+    (await fetchBuffer(dl(GENESIS_TAG, 'genesis-manifest.json'))).toString('utf8')
+  );
+  const wantZst = manifest.zstd?.sha256;
+  const wantRaw = manifest.raw?.sha256;
+  if (!wantZst || !wantRaw) throw new Error(`genesis manifest is missing checksums`);
+
+  const asset = manifest.zstd.file || 'genesis.bin.zst';
+  const url = dl(GENESIS_TAG, asset);
+  process.stderr.write(
+    `sestrian: fetching genesis ${human(manifest.zstd.bytes)} -> ` +
+    `${human(manifest.raw.bytes)}` +
+    (manifest.params ? ` (${manifest.params.toLocaleString()} parameters)` : '') + `\n` +
+    `sestrian: this is a one-time download; the model is the chain state\n`
+  );
+
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  const part = `${dest}.part`;
+  const zstPart = `${dest}.zst.part`;
+  const cleanup = () => {
+    for (const f of [part, zstPart]) { try { fs.unlinkSync(f); } catch {} }
+  };
+
+  const res = await fetch(url, { redirect: 'follow' });
+  if (!res.ok) throw new Error(`GET ${url} -> HTTP ${res.status}`);
+
+  const zstSum = crypto.createHash('sha256');
+  const rawSum = crypto.createHash('sha256');
+  let seen = 0;
+  let lastPct = -1;
+  const total = manifest.zstd.bytes;
+  const watch = new stream.Transform({
+    transform(chunk, _enc, cb) {
+      zstSum.update(chunk);
+      seen += chunk.length;
+      // A carriage return only redraws on a terminal. Piped to a log or a CI
+      // job it just concatenates every tick into one unreadable line, so there
+      // we print sparse, newline-terminated milestones instead.
+      const tty = process.stderr.isTTY === true;
+      const step = tty ? 5 : 25;
+      const pct = Math.floor((seen / total) * 100);
+      if (pct !== lastPct && pct % step === 0) {
+        lastPct = pct;
+        process.stderr.write(tty
+          ? `\rsestrian: downloading genesis ${pct}%`
+          : `sestrian: downloading genesis ${pct}%\n`);
+      }
+      cb(null, chunk);
+    },
+  });
+  const tally = new stream.Transform({
+    transform(chunk, _enc, cb) { rawSum.update(chunk); cb(null, chunk); },
+  });
+
+  try {
+    const unzstd = zstdStream();
+    if (unzstd) {
+      await pipeline(
+        stream.Readable.fromWeb(res.body), watch, unzstd, tally, fs.createWriteStream(part)
+      );
+    } else if (hasZstdCli()) {
+      // Older Node: land the archive, then let the system zstd expand it.
+      await pipeline(stream.Readable.fromWeb(res.body), watch, fs.createWriteStream(zstPart));
+      execFileSync('zstd', ['-d', '-f', '-o', part, zstPart], { stdio: 'inherit' });
+      await pipeline(fs.createReadStream(part), tally, new stream.Writable({
+        write(_c, _e, cb) { cb(); },
+      }));
+      fs.unlinkSync(zstPart);
+    } else {
+      throw new Error(
+        `cannot decompress zstd: this Node (${process.version}) has no built-in zstd ` +
+        `and no \`zstd\` binary is on PATH.\n` +
+        `  Install zstd (brew install zstd / apt install zstd) and retry, or fetch it yourself:\n` +
+        `    curl -fL -o genesis.bin.zst ${url}\n` +
+        `    zstd -d genesis.bin.zst -o ${dest}`
+      );
+    }
+    if (process.stderr.isTTY === true) process.stderr.write('\n');
+
+    const gotZst = zstSum.digest('hex');
+    const gotRaw = rawSum.digest('hex');
+    if (gotZst !== wantZst) {
+      throw new Error(
+        `GENESIS CHECKSUM MISMATCH (archive) — refusing to install.\n` +
+        `  expected: ${wantZst}\n  got:      ${gotZst}`
+      );
+    }
+    // The decisive check: these bytes hash to the genesis state root, so a pass
+    // here means we hold the same chain everyone else does.
+    if (gotRaw !== wantRaw) {
+      throw new Error(
+        `GENESIS CHECKSUM MISMATCH (weights) — refusing to install.\n` +
+        `  expected: ${wantRaw}\n  got:      ${gotRaw}`
+      );
+    }
+    fs.renameSync(part, dest);
+    process.stderr.write(`sestrian: verified genesis state_root ${gotRaw}\n`);
+    return dest;
+  } catch (e) {
+    cleanup();
+    throw e;
+  }
+}
+
+module.exports = { ensureBinary, ensureGenesis, targetTriple, HOME_DIR, BIN_NAME, TAGS };

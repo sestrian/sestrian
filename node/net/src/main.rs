@@ -52,6 +52,9 @@ struct NetworkParams {
     /// how to reproduce the genesis weights (client/make_genesis.py)
     genesis_model: &'static str,
     genesis_seed: u64,
+    /// Published, hash-verifiable genesis archive — the fast path. Empty for a
+    /// network that publishes none, in which case only reproduction is offered.
+    genesis_url: &'static str,
     bootstrap: &'static str,
     /// Seconds between proposal attempts. Not consensus — but it sets the
     /// trainer's per-round budget and how often you compete for a block, so a
@@ -68,6 +71,7 @@ const DEVNET: NetworkParams = NetworkParams {
     data_contributor: "3432d48fd6878b4f2e7a1e40cc15e112c512fae7",
     genesis_model: "small",
     genesis_seed: 1337,
+    genesis_url: "https://github.com/sestrian/sestrian/releases/download/devnet-genesis-1/genesis.bin.zst",
     bootstrap: "/ip4/169.58.211.248/tcp/9800",
     block_interval: 180.0,
 };
@@ -81,20 +85,40 @@ const LOCAL: NetworkParams = NetworkParams {
     data_contributor: "",
     genesis_model: "toy",
     genesis_seed: 1337,
+    genesis_url: "",
     bootstrap: "",
     block_interval: 10.0,
 };
 
-/// The exact command that reproduces a network's genesis — printed on every
-/// genesis failure so the remedy is never a search through the docs.
+/// Every way to obtain a network's genesis — printed on every genesis failure
+/// so the remedy is never a search through the docs.
+///
+/// Download first, deliberately. Both paths end at the same bytes and the node
+/// hashes them against the baked-in state root either way, so the download is
+/// no less safe — it just does not cost a multi-gigabyte PyTorch install. When
+/// the only option we offered was "reproduce it", that install was the price of
+/// finding out whether your machine could join at all.
 fn genesis_recipe(network: &str) -> String {
     let n = network_params(network);
-    format!("  uv run --with torch --with numpy --with pynacl \\\n    \
-             python -m client.make_genesis --model {} --seed {} --out genesis.bin\n  \
-             (it must print state_root {})",
-            n.genesis_model, n.genesis_seed,
-            if n.genesis_state_root.is_empty() { "<your own network's id>" }
-            else { n.genesis_state_root })
+    let expected = if n.genesis_state_root.is_empty() { "<your own network's id>" }
+                   else { n.genesis_state_root };
+    let mut s = String::new();
+    if !n.genesis_url.is_empty() {
+        s.push_str(&format!(
+            "  Download it (verified against the genesis id — no PyTorch needed):\n    \
+             npx sestrian genesis\n  \
+             or by hand:\n    \
+             curl -fL -o genesis.bin.zst {}\n    \
+             zstd -d genesis.bin.zst -o genesis.bin\n\n  \
+             Or reproduce it yourself — deterministic, so it needs no trust:\n",
+            n.genesis_url));
+    }
+    s.push_str(&format!(
+        "  uv run --with torch --with numpy --with pynacl \\\n    \
+         python -m client.make_genesis --model {} --seed {} --out genesis.bin\n  \
+         (either way the weights must hash to {})",
+        n.genesis_model, n.genesis_seed, expected));
+    s
 }
 
 fn network_params(name: &str) -> &'static NetworkParams {
@@ -449,8 +473,8 @@ async fn resolve_genesis(args: &Args, store: &store::Store,
         }
     } else {
         panic!("{}", [
-            "no genesis available. Reproduce this network's genesis locally",
-            "(it is deterministic, so this is trustless) and pass it:",
+            "no genesis available — the node cannot validate a block without the",
+            "weights. Get them either way:",
             "",
             &genesis_recipe(&args.network),
             "",
@@ -648,10 +672,10 @@ async fn preflight(args: &Args, key: &core::Key, store: &store::Store,
         (None, _) if args.toy_dim > 0 =>
             pass(format!("toy genesis of {} params (local chain)", args.toy_dim)),
         (None, _) => {
-            println!("  \x1b[31mFAIL\x1b[0m  no genesis. Reproduce this network's \
-                      genesis locally (deterministic, so trustless):");
+            println!("  \x1b[31mFAIL\x1b[0m  no genesis weights — the node cannot \
+                      validate anything without them.");
             println!("{}", genesis_recipe(&args.network));
-            println!("        then pass --genesis-file genesis.bin");
+            println!("  then re-run with --genesis-file genesis.bin");
             fails += 1;
         }
     }
