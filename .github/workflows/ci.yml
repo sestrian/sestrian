@@ -25,6 +25,14 @@ jobs:
       - name: test
         working-directory: node
         run: cargo test --all
+      # The wallet-encryption round-trip is #[ignore]d because argon2id MODERATE
+      # crawls unoptimised (~16s vs ~1s). It guards a nasty failure — a node that
+      # writes wallets only it can open, not the Python client — so run it here,
+      # in release, reusing the binaries the build step already produced. Named
+      # explicitly: the other #[ignore]d test is a cost benchmark, not correctness.
+      - name: wallet interop (release; too slow in debug)
+        working-directory: node
+        run: cargo test --release --bin sestrian-node encrypted_wallet_round_trips -- --ignored
       # clippy + fmt are advisory until a repo-wide normalization pass lands
       - name: clippy (advisory)
         working-directory: node

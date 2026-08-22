@@ -32,12 +32,12 @@ This package ships the NODE only. Mining also needs the Python trainer —
 see https://github.com/sestrian/sestrian/blob/main/docs/joining.md
 `;
 
-// Only pass paths that exist: the node prints genuinely useful guidance when a
-// genesis or identity is missing, and clobbering that with "file unreadable"
-// would be a worse error than the one it already writes.
+// --wallet is always passed: the node creates the file when it is missing, so
+// handing it the path is what makes a first run work at all. Genesis is only
+// passed when present — the node prints genuinely useful guidance when it is
+// missing, and clobbering that with "file unreadable" would be a worse error.
 function defaults() {
-  const a = ['--data-dir', DATA_DIR];
-  if (fs.existsSync(WALLET)) a.push('--wallet', WALLET);
+  const a = ['--data-dir', DATA_DIR, '--wallet', WALLET];
   if (fs.existsSync(GENESIS)) a.push('--genesis-file', GENESIS);
   a.push('--api-port', String(API_PORT));
   return a;

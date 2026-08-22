@@ -224,6 +224,98 @@ fn decrypt_wallet(enc: &serde_json::Value, passphrase: &str) -> Option<[u8; 32]>
     sk.try_into().ok()
 }
 
+/// Encrypt a seed the way the Python client does, so a wallet this node writes
+/// is readable by `client.wallet` and vice versa: argon2id(MODERATE) over a
+/// random salt, then XSalsa20-Poly1305 with the nonce prefixed to the blob.
+fn encrypt_wallet(seed: &[u8; 32], passphrase: &str) -> serde_json::Value {
+    use argon2::{Algorithm, Argon2, Params, Version};
+    use crypto_secretbox::aead::Aead;
+    use crypto_secretbox::{KeyInit, XSalsa20Poly1305};
+    use rand::RngCore;
+    use zeroize::Zeroize;
+
+    let mut salt = [0u8; 16];
+    let mut nonce = [0u8; 24];
+    rand::rngs::OsRng.fill_bytes(&mut salt);
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+
+    // Must match _decrypt_sk: libsodium argon2id13 MODERATE = ops 3, mem 256MiB.
+    let params = Params::new(256 * 1024, 3, 1, Some(32)).expect("argon2 params");
+    let a2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut key = [0u8; 32];
+    a2.hash_password_into(passphrase.as_bytes(), &salt, &mut key)
+        .expect("argon2 kdf");
+
+    let ct = XSalsa20Poly1305::new((&key).into())
+        .encrypt((&nonce).into(), seed.as_slice())
+        .expect("wallet encryption");
+    key.zeroize();
+
+    let mut blob = nonce.to_vec();
+    blob.extend_from_slice(&ct);
+    serde_json::json!({ "salt": hex::encode(salt), "blob": hex::encode(blob) })
+}
+
+/// Create a wallet at `path` and return its seed.
+///
+/// Onboarding must not require a second toolchain. A new operator running
+/// `sestrian run` has no wallet, and the old behaviour — panic and tell them to
+/// go install Python and run `client.wallet new` — is the difference between
+/// joining and giving up. The format written here is byte-compatible with the
+/// Python client's version 2 record.
+fn create_wallet(path: &str, passphrase: Option<String>) -> [u8; 32] {
+    use rand::RngCore;
+    use std::io::Write;
+    let mut seed = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut seed);
+
+    let key = core::Key::from_seed(seed);
+    let pub_hex = key.pub_hex();
+    let mut rec = serde_json::json!({
+        "version": 2,
+        "pub": pub_hex,
+        "address": core::token::address(&pub_hex),
+    });
+    match passphrase {
+        Some(pw) if !pw.is_empty() => {
+            rec["enc"] = encrypt_wallet(&seed, &pw);
+        }
+        _ => {
+            warn!("SESTRIAN_WALLET_PASSPHRASE is not set — writing the key \
+                   UNENCRYPTED (0600). Fine for devnet; set a passphrase before \
+                   this identity holds anything you care about.");
+            rec["sk"] = serde_json::Value::String(hex::encode(seed));
+        }
+    }
+
+    let p = std::path::Path::new(path);
+    if let Some(parent) = p.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).expect("cannot create wallet directory");
+        }
+    }
+    // create_new: refuse to overwrite. Clobbering a wallet destroys an identity
+    // and every token balance behind it, so a race here must fail, never win.
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600); // owner-only from the instant it exists, not after
+    }
+    let mut f = opts.open(p).unwrap_or_else(|e| {
+        panic!("cannot create wallet {path}: {e}");
+    });
+    let body = serde_json::to_vec_pretty(&rec).expect("serialize wallet");
+    f.write_all(&body).expect("cannot write wallet");
+    f.sync_all().expect("cannot flush wallet");
+
+    warn!(wallet = path, address = %rec["address"].as_str().unwrap_or(""),
+          "created a NEW wallet — BACK THIS FILE UP. It is your identity and \
+           your balance, and nobody can recover it for you.");
+    seed
+}
+
 /// Decode a 32-byte hex seed, wiping the hex text + decoded Vec afterwards so
 /// transient key material doesn't linger in freed memory.
 fn seed_from_hex(mut hexed: String) -> [u8; 32] {
@@ -280,6 +372,16 @@ fn load_identity(args: &Args) -> [u8; 32] {
         return seed_from_hex(args.key_seed.clone());
     }
     if !args.wallet.is_empty() {
+        // First run: no wallet yet. Make one rather than sending the operator
+        // away to another toolchain. Only when it is genuinely absent — an
+        // unreadable existing file must still be a hard error, never quietly
+        // replaced by a fresh identity.
+        if !std::path::Path::new(&args.wallet).exists() {
+            return create_wallet(
+                &args.wallet,
+                std::env::var("SESTRIAN_WALLET_PASSPHRASE").ok(),
+            );
+        }
         let raw = std::fs::read_to_string(&args.wallet).expect("wallet file unreadable");
         let w: serde_json::Value = serde_json::from_str(&raw).expect("wallet file corrupt");
         if let Some(sk) = w.get("sk").and_then(|s| s.as_str()) {
@@ -293,7 +395,9 @@ fn load_identity(args: &Args) -> [u8; 32] {
         }
         panic!("wallet file has neither sk nor enc");
     }
-    panic!("identity required: --key-file, SESTRIAN_KEY_SEED, or --wallet");
+    panic!("identity required. Easiest: --wallet <path> — if that file does not \
+            exist yet the node creates one for you. Otherwise use --key-file or \
+            the SESTRIAN_KEY_SEED environment variable.");
 }
 
 /// Resolve the genesis weights: local disk (durable) -> --genesis-file ->
@@ -790,4 +894,85 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     node::run(n, swarm, api_rx, bridge_ev_rx).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod wallet_tests {
+    use super::*;
+
+    fn tmpdir() -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "sestrian-wallet-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// The wallet a fresh operator gets must be internally consistent: the
+    /// address in the file has to be the one the ledger will credit, and the
+    /// pubkey has to be the one the seed actually signs with. If these drift,
+    /// rewards go to an account nobody holds the key for.
+    #[test]
+    fn created_wallet_is_self_consistent() {
+        let p = tmpdir().join("plain.json");
+        let _ = std::fs::remove_file(&p);
+        let seed = create_wallet(p.to_str().unwrap(), None);
+
+        let rec: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        let pub_hex = rec["pub"].as_str().unwrap();
+
+        assert_eq!(rec["version"], 2, "must be the v2 format the client reads");
+        assert_eq!(core::Key::from_seed(seed).pub_hex(), pub_hex);
+        assert_eq!(rec["address"].as_str().unwrap(), core::token::address(pub_hex));
+        assert_eq!(rec["sk"].as_str().unwrap(), hex::encode(seed));
+        assert!(rec.get("enc").is_none(), "unencrypted wallet must not carry enc");
+    }
+
+    /// Overwriting a wallet destroys an identity and every token behind it.
+    #[test]
+    fn refuses_to_overwrite_an_existing_wallet() {
+        let p = tmpdir().join("nocobber.json");
+        let _ = std::fs::remove_file(&p);
+        create_wallet(p.to_str().unwrap(), None);
+        let before = std::fs::read_to_string(&p).unwrap();
+
+        let again = std::panic::catch_unwind(|| {
+            create_wallet(p.to_str().unwrap(), None);
+        });
+        assert!(again.is_err(), "second create must fail, not replace the identity");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), before, "file was modified");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plaintext_wallet_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let p = tmpdir().join("perms.json");
+        let _ = std::fs::remove_file(&p);
+        create_wallet(p.to_str().unwrap(), None);
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "a key file readable by other users is a leak");
+    }
+
+    /// Encrypt must be the exact inverse of the decrypt path that was written
+    /// to match pynacl — otherwise the node writes wallets only it can open.
+    /// Slow by design: argon2id MODERATE is 256 MiB and crawls in a debug build.
+    #[test]
+    // Ignored in debug only because argon2id MODERATE (256 MiB, 3 passes) takes
+    // ~16s unoptimised vs ~1s in release. CI runs it in release — see ci.yml.
+    #[ignore = "slow unoptimised (~16s); CI runs it in release"]
+    fn encrypted_wallet_round_trips() {
+        let p = tmpdir().join("enc.json");
+        let _ = std::fs::remove_file(&p);
+        let seed = create_wallet(p.to_str().unwrap(), Some("a passphrase".into()));
+
+        let rec: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert!(rec.get("sk").is_none(), "encrypted wallet must not also store the key");
+        assert_eq!(decrypt_wallet(&rec["enc"], "a passphrase"), Some(seed));
+        assert_eq!(decrypt_wallet(&rec["enc"], "wrong"), None);
+    }
 }
