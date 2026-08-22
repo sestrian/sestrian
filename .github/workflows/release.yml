@@ -137,7 +137,11 @@ jobs:
           mkdir -p dist
           find staged -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec mv {} dist/ \;
           cd dist
-          sha256sum * > SHA256SUMS
+          # List archives explicitly and sorted: `sha256sum *` can race its own
+          # output file into the glob, and a stable order keeps diffs readable.
+          find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) \
+            | sed 's|^\./||' | sort | xargs sha256sum > SHA256SUMS
+          test -s SHA256SUMS
           cat SHA256SUMS
 
       # Always downloadable, even for an untagged workflow_dispatch run.
