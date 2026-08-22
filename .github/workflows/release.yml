@@ -180,27 +180,72 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-      - name: publish to the tag's release
-        if: startsWith(github.ref, 'refs/tags/v')
+      # Upload every archive, then SHA256SUMS, then verify the release actually
+      # holds what the manifest claims.
+      #
+      # `gh release upload --clobber` deletes an asset before re-uploading it, so
+      # a transient API error mid-run leaves the release ADVERTISING a file it no
+      # longer has. That is exactly what happened on v0.3.2: an HTTP 502 dropped
+      # the Windows zip while SHA256SUMS still listed it, and every Windows user
+      # falling back to this tag would have hit a 404. Hence: retries, checksums
+      # last so the manifest is never newer than the binaries it describes, and a
+      # final readback that fails the job rather than leaving a half-published
+      # release looking green.
+      - name: publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          tag="${GITHUB_REF_NAME}"
-          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
-            || gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
-                 --title "sestrian-node $tag" --generate-notes
-          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber dist/*
-
-      # A stable URL that always points at the newest build, so docs and the npm
-      # installer have something durable to fall back to between tags.
-      - name: refresh devnet-latest
-        env:
-          GH_TOKEN: ${{ github.token }}
+          IS_TAG: ${{ startsWith(github.ref, 'refs/tags/v') }}
         run: |
           set -euo pipefail
-          tag=devnet-latest
-          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
-            || gh release create "$tag" --repo "$GITHUB_REPOSITORY" --prerelease \
+
+          upload() {   # upload <tag> <file...> — with backoff, because 5xx happens
+            local tag="$1"; shift
+            for f in "$@"; do
+              local n=0
+              until gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber "$f"; do
+                n=$((n + 1))
+                if [ "$n" -ge 5 ]; then
+                  echo "::error::giving up uploading $f to $tag after $n attempts"
+                  return 1
+                fi
+                echo "upload of $f failed (attempt $n) — retrying in $((n * 10))s"
+                sleep $((n * 10))
+              done
+            done
+          }
+
+          # Every archive must be present and match SHA256SUMS, or the tag is not
+          # safe to hand to the installer.
+          verify() {
+            local tag="$1" tmp
+            tmp="$(mktemp -d)"
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir "$tmp" --clobber
+            ( cd "$tmp" && sha256sum --check --strict SHA256SUMS )
+            echo "verified $tag: $(grep -c . "$tmp/SHA256SUMS") assets match their checksums"
+            rm -rf "$tmp"
+          }
+
+          publish_to() {
+            local tag="$1"
+            # Binaries first, manifest last: if we die in between, SHA256SUMS is
+            # stale rather than describing assets that were never uploaded.
+            upload "$tag" dist/*.tar.gz dist/*.zip
+            upload "$tag" dist/SHA256SUMS
+            verify "$tag"
+          }
+
+          if [ "$IS_TAG" = "true" ]; then
+            tag="${GITHUB_REF_NAME}"
+            gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+              || gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+                   --title "sestrian-node $tag" --generate-notes
+            publish_to "$tag"
+          fi
+
+          # A stable URL that always points at the newest build, so docs and the
+          # npm installer have something durable to fall back to between tags.
+          gh release view devnet-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create devnet-latest --repo "$GITHUB_REPOSITORY" --prerelease \
                  --title "sestrian-node (latest devnet build)" \
                  --notes "Rolling build of the node binary from the default branch. Pinned releases live under \`v*\` tags; this tag moves."
-          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber dist/*
+          publish_to devnet-latest
