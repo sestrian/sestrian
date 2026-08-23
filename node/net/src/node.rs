@@ -1965,8 +1965,9 @@ pub async fn run(
                                 }
                             }
             let served = response.blocks.len() as u64;
-                            let batch_min_h = response.blocks.iter()
-                                .map(|sb| sb.header.height).min();
+                            let batch_hashes: HashSet<String> = response.blocks
+                                .iter().map(|sb| sb.hash()).collect();
+                            let batch_blocks = response.blocks.clone();
                             // "learned" must count blocks parked as PENDING
                             // (payload not yet fetched) — they are new knowledge.
                             // Counting only applied blocks made a pending-wedged
@@ -1987,14 +1988,23 @@ pub async fn run(
                             let last_from = node.last_sync_req.remove(&peer)
                                 .map(|(_, f)| f);
                             let behind = response.head_height > node.head_height();
-                            // "floats": every served block sits above anything
-                            // that can CONNECT to our applied chain — its
-                            // ancestors are missing. Parking such blocks as
-                            // pending still counts as "learned", so floats must
-                            // be tested FIRST or the walk-back never triggers.
-                            let floats = batch_min_h
-                                .map_or(false, |m| m > node.head_height() + 1);
-                            if behind && served > 0 && floats {
+                            // "orphaned": some served block's parent is nowhere
+                            // — not applied, not pending, not in this batch. Its
+                            // ancestors are missing, so the fork point is below
+                            // the request window. Height comparisons are USELESS
+                            // here: an equal-length rival fork orphans at the
+                            // same heights we already have (found live — the
+                            // CUDA miner pulled the rival tip forever). Parking
+                            // orphans as pending counts as "learned", so this
+                            // must be tested FIRST.
+                            let orphaned = batch_blocks.iter().any(|sb| {
+                                let par = &sb.header.prev_hash;
+                                sb.header.height > 0
+                                    && !node.tree.blocks.contains_key(par)
+                                    && !node.pending.contains_key(par)
+                                    && !batch_hashes.contains(par)
+                            });
+                            if orphaned && served > 0 {
                                 // the batch floats ABOVE anything we can connect
                                 // to: the peer is on a fork whose divergence
                                 // point is BELOW our head. Walk the request
@@ -2010,7 +2020,6 @@ pub async fn run(
                                 *step = (*step * 2).min(4096);
                                 node.sync_cursor.insert(peer, cur);
                                 warn!(peer = %peer, from = cur,
-                                      batch_min = batch_min_h.unwrap_or(0),
                                       "sync batch unconnectable — walking back \
                                        to find the fork point");
                             } else if learned {
@@ -2044,7 +2053,7 @@ pub async fn run(
                             let moved = learned
                                 || (cursor_now.is_some()
                                     && cursor_now != last_from);
-                            if behind && served > 0 && moved {
+                            if (behind || orphaned) && served > 0 && moved {
                                 let from = cursor_now.unwrap_or_else(||
                                     node.head_height()
                                         .min(response.head_height)
