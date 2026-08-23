@@ -45,7 +45,11 @@ const MAX_SEEN: usize = 100_000;
 // at most one request in flight per peer, but re-request as soon as the previous
 // response lands — so a node that fell behind actually recovers.
 const SYNC_MAX_BLOCKS: usize = 64;
-const SYNC_BYTE_BUDGET: usize = 48 * 1024 * 1024;
+// 16MB (was 48): with the catch-up cursor + immediate re-request, small batches
+// cost only an extra round-trip each, while a giant response is exactly what
+// dies on a lossy WAN path (see the quic max_stream_data note in main.rs).
+// Always >= 1 block regardless, so payload-heavy chains still make progress.
+const SYNC_BYTE_BUDGET: usize = 16 * 1024 * 1024;
 const SYNC_INFLIGHT_TIMEOUT: f64 = 30.0;
 
 /// Coordinates per aggregation chunk — the memory/latency knob (K deltas ×
@@ -342,9 +346,21 @@ pub struct Node {
     /// be routed onto the corpse — so the node RECYCLES them (disconnect +
     /// redial) to force fresh transport. Found live in the CI soak.
     pub silent_rounds: u64,
-    /// per-peer timestamp of the last sync we requested — heartbeat-triggered
-    /// catch-up must not stack concurrent multi-hundred-MB transfers
-    pub last_sync_req: HashMap<PeerId, f64>,
+    /// per-peer (timestamp, from_height) of the last sync we requested —
+    /// heartbeat-triggered catch-up must not stack concurrent multi-hundred-MB
+    /// transfers, and the response handler needs the window we asked for to
+    /// detect a stalled overlap (see sync_cursor)
+    pub last_sync_req: HashMap<PeerId, (f64, u64)>,
+    /// Per-peer floor for the next sync request's from_height. Requests anchor
+    /// at head−2 (reorg margin), but the server packs oldest-first under a byte
+    /// budget — with payload-heavy blocks a batch can be EXACTLY the overlap
+    /// window, so every response re-delivers known blocks and the head never
+    /// moves (found live: the first WAN fresh-join on small-moe wedged at
+    /// height 3 forever). When a response teaches nothing new while the peer is
+    /// ahead, the cursor jumps past the served range; any response containing
+    /// a new block clears it (a real reorg always teaches new blocks, so the
+    /// margin is preserved exactly when it matters).
+    pub sync_cursor: HashMap<PeerId, u64>,
     pub peers_connected: usize,
     pub chat_pending: Vec<tokio::sync::oneshot::Sender<Value>>,
     pub chat_inflight: bool,
@@ -1381,13 +1397,15 @@ pub async fn run(
                             node.silent_rounds = 0;
                             dial_peers(&mut swarm, &node.cfg.peers.clone());
                         } else {
-                            let from = node.head_height().saturating_sub(8);
+                            let anchor = node.head_height().saturating_sub(8);
                             for p in connected {
                                 let inflight = node.last_sync_req.get(&p)
-                                    .map(|t| now() - t < SYNC_INFLIGHT_TIMEOUT)
+                                    .map(|(t, _)| now() - t < SYNC_INFLIGHT_TIMEOUT)
                                     .unwrap_or(false);
                                 if !inflight {
-                                    node.last_sync_req.insert(p, now());
+                                    let from = anchor
+                                        .max(node.sync_cursor.get(&p).copied().unwrap_or(0));
+                                    node.last_sync_req.insert(p, (now(), from));
                                     info!(peer = %p, from,
                                           "no foreign heads heard — direct sync pull");
                                     swarm.behaviour_mut().sync.send_request(&p,
@@ -1658,13 +1676,15 @@ pub async fn run(
                                 // timeout — so a lagging node keeps catching up.
                                 let inflight = node.last_sync_req
                                     .get(&propagation_source)
-                                    .map(|t| now() - t < SYNC_INFLIGHT_TIMEOUT)
+                                    .map(|(t, _)| now() - t < SYNC_INFLIGHT_TIMEOUT)
                                     .unwrap_or(false);
                                 if !node.tree.blocks.contains_key(&hash) && !inflight {
-                                    node.last_sync_req
-                                        .insert(propagation_source, now());
                                     let from = node.head_height()
-                                        .min(height).saturating_sub(2);
+                                        .min(height).saturating_sub(2)
+                                        .max(node.sync_cursor.get(&propagation_source)
+                                            .copied().unwrap_or(0));
+                                    node.last_sync_req
+                                        .insert(propagation_source, (now(), from));
                                     info!(peer = %propagation_source, their_h = height,
                                           from, "unknown head — requesting sync");
                                     let req = SyncRequest {
@@ -1676,6 +1696,17 @@ pub async fn run(
                             }
                         }
                     }
+                }
+                // failures were silently swallowed by the catch-all — a dead
+                // transfer looked identical to a healthy quiet mesh
+                SwarmEvent::Behaviour(BehaviourEvent::Sync(
+                        request_response::Event::OutboundFailure { peer, error, .. })) => {
+                    warn!(%peer, %error, "sync request failed");
+                    node.last_sync_req.remove(&peer);
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::Sync(
+                        request_response::Event::InboundFailure { peer, error, .. })) => {
+                    warn!(%peer, %error, "sync response delivery failed");
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Sync(
                         request_response::Event::Message { peer, message, .. })) => {
@@ -1767,14 +1798,52 @@ pub async fn run(
                                     node.payloads.insert(txid, p);
                                 }
                             }
+                            let served = response.blocks.len() as u64;
+                            let known_before = node.tree.blocks.len();
                             for sb in response.blocks {
                                 node.install(sb, None, &mut swarm);
                             }
                             node.retry_pending(&mut swarm);
+                            let learned = node.tree.blocks.len() > known_before;
                             // clear the in-flight marker so the next Head from this
                             // peer immediately pulls the next batch (continuous
                             // catch-up instead of one batch per throttle window)
-                            node.last_sync_req.remove(&peer);
+                            let last_from = node.last_sync_req.remove(&peer)
+                                .map(|(_, f)| f);
+                            let behind = response.head_height > node.head_height();
+                            if learned {
+                                // real progress (or a reorg branch — which always
+                                // teaches new blocks): the overlap anchor is safe
+                                node.sync_cursor.remove(&peer);
+                            } else if behind && served > 0 {
+                                // the peer is ahead but the whole batch was blocks
+                                // we already had: the byte-budgeted window is stuck
+                                // inside the reorg margin. Jump past what was served
+                                // or the loop repeats forever.
+                                if let Some(f) = last_from {
+                                    let cur = f + served;
+                                    node.sync_cursor.insert(peer, cur);
+                                    warn!(peer = %peer, cursor = cur,
+                                          their_head = response.head_height,
+                                          "sync batch taught nothing — advancing \
+                                           request cursor past the overlap");
+                                }
+                            }
+                            // still behind after a non-empty batch: pull the next
+                            // window NOW instead of waiting for the next Head
+                            // announcement (payload-heavy chains would otherwise
+                            // catch up at one batch per block interval)
+                            if behind && served > 0 {
+                                let from = node.head_height()
+                                    .min(response.head_height).saturating_sub(2)
+                                    .max(node.sync_cursor.get(&peer)
+                                        .copied().unwrap_or(0));
+                                node.last_sync_req.insert(peer, (now(), from));
+                                swarm.behaviour_mut().sync.send_request(&peer,
+                                    SyncRequest { from_height: from,
+                                                  count: SYNC_MAX_BLOCKS as u64,
+                                                  want_genesis: false });
+                            }
                         }
                     }
                 }
@@ -1855,20 +1924,35 @@ pub async fn run(
                         identify::Event::Received { peer_id, info, .. })) => {
                     debug!(%peer_id, agent = %info.agent_version, "peer identified");
                 }
-                SwarmEvent::ConnectionClosed { .. } => {
+                SwarmEvent::ConnectionClosed { peer_id, cause, num_established, .. } => {
                     node.peers_connected = node.peers_connected.saturating_sub(1);
+                    // a silent close is undebuggable — the US anchor's first WAN
+                    // catch-up died repeatedly with no trace of why
+                    info!(%peer_id, remaining = num_established,
+                          cause = ?cause, "peer connection closed");
                 }
                 SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                     node.peers_connected += 1;
                     info!(%peer_id, "peer connected");
                     // opportunistic catch-up from every new peer — anchor BELOW
                     // our head: an equal-height fork needs the peer's blocks at
-                    // heights we already have, not just above them
-                    let req = SyncRequest {
-                        from_height: node.head_height().saturating_sub(8), count: 64,
-                        want_genesis: false,
-                    };
-                    swarm.behaviour_mut().sync.send_request(&peer_id, req);
+                    // heights we already have, not just above them. Respects the
+                    // per-peer in-flight throttle and the catch-up cursor: on a
+                    // payload-heavy chain the redial loop otherwise re-requests
+                    // the same huge window on every reconnect, forever.
+                    let inflight = node.last_sync_req.get(&peer_id)
+                        .map(|(t, _)| now() - t < SYNC_INFLIGHT_TIMEOUT)
+                        .unwrap_or(false);
+                    if !inflight {
+                        let from = node.head_height().saturating_sub(8)
+                            .max(node.sync_cursor.get(&peer_id).copied().unwrap_or(0));
+                        node.last_sync_req.insert(peer_id, (now(), from));
+                        let req = SyncRequest {
+                            from_height: from, count: 64,
+                            want_genesis: false,
+                        };
+                        swarm.behaviour_mut().sync.send_request(&peer_id, req);
+                    }
                 }
                 _ => {}
             },

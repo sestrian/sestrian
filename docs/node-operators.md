@@ -104,6 +104,7 @@ asserts byte-identical convergence at exit. Golden vectors
 | Seed | Multiaddr | API |
 |---|---|---|
 | contabo-eu-1 (public, relay) | `/ip4/169.58.211.248/udp/9800/quic-v1` | `http://169.58.211.248:8080/status` |
+| contabo-us-1 (public, relay) | `/ip4/13.140.32.27/udp/9800/quic-v1` | `http://13.140.32.27:8080/status` |
 | cluster (private net) | `/ip4/10.0.1.1/udp/30980/quic-v1` | `http://10.0.1.1:30981/status` |
 
 ## Production hardening

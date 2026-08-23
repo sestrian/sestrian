@@ -1,12 +1,16 @@
 # Join the Sestrian devnet
 
 ```bash
-npx sestrian run
+SESTRIAN_GENESIS_TAG=devnet-genesis-2 npx sestrian run
 ```
 
 That is the whole thing. It downloads a prebuilt node for your platform, creates
-your wallet, fetches the 652MB genesis weights and joins the network. No clone,
-no compiler, no Python. Then:
+your wallet, fetches the 860MB genesis weights and joins the network. No clone,
+no compiler, no Python. (The `SESTRIAN_GENESIS_TAG` override is temporary: the
+published npm package predates devnet-genesis-2 and defaults to the retired
+genesis — the env var points it at the current one, and the node verifies
+whatever arrives against the id compiled into the binary either way. It
+disappears once the 0.4.0 package is published.) Then:
 
 ```bash
 npx sestrian status     # height, peers, whether you are actually earning
@@ -128,7 +132,7 @@ The current values, so you can verify what your node is using:
 | | value |
 |---|---|
 | network | `devnet` |
-| bootstrap peer | `/ip4/169.58.211.248/udp/9800/quic-v1` |
+| bootstrap peers | `/ip4/169.58.211.248/udp/9800/quic-v1` (EU) · `/ip4/13.140.32.27/udp/9800/quic-v1` (US) — either alone is enough to join |
 | genesis id (state root) | `a597316003dbf12122b7cc6f39226ce7c8f7a871e58e7ddf364e56b08102527b` — the PAGE-MERKLE root over the model's page table (protocol v1) |
 | model | 107.4M-param growable MoE GPT (~32M active/token), from scratch (`--model small-moe --seed 20260822`); the chain can GROW it — see /status `model` |
 | genesis-ledger contributor | `3432d48fd6878b4f2e7a1e40cc15e112c512fae7` |

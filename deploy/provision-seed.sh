@@ -28,9 +28,23 @@ GENESIS_MODEL=${SESTRIAN_MODEL:-small-moe}
 GENESIS_SEED=${SESTRIAN_GENESIS_SEED:-20260822}
 
 DATA_CONTRIBUTOR="3432d48fd6878b4f2e7a1e40cc15e112c512fae7"
+# Optional: comma-separated multiaddrs of the OTHER anchors. The first seed runs
+# inbound-only, but every subsequent anchor must dial an existing one or it sits
+# at height 0 until a third party happens to connect it to the network.
+PEERS=${SESTRIAN_PEERS:-}
 NODE_PORT=9800
 API_PORT=8080
 APP=/opt/sestrian
+
+echo "== swap =="
+# Catch-up validation on the ~860MB model peaks at several GB of transient
+# state; on an 8GB VPS that margin is thin enough that the OOM killer took an
+# anchor down mid-sync (live finding). Swap is the backstop, not the plan.
+if [ ! -f /swapfile ]; then
+    fallocate -l 4G /swapfile && chmod 600 /swapfile && mkswap /swapfile
+    swapon /swapfile
+    grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
 
 echo "== packages =="
 export DEBIAN_FRONTEND=noninteractive
@@ -143,7 +157,7 @@ ExecStart=$APP/node/target/release/sestrian-node \\
   --relay-server \\
   --prune-depth 2 \\
   --external-address /ip4/$PUBLIC_IP/udp/$NODE_PORT/quic-v1 \\
-  --data-contributor $DATA_CONTRIBUTOR
+  --data-contributor $DATA_CONTRIBUTOR${PEERS:+ --peers $PEERS}
 Restart=always
 RestartSec=5
 LimitNOFILE=65536

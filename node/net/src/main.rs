@@ -111,7 +111,7 @@ const DEVNET: NetworkParams = NetworkParams {
     genesis_model: "small-moe",
     genesis_seed: 20260822,
     genesis_url: "https://github.com/sestrian/sestrian/releases/download/devnet-genesis-2/genesis.bin.zst",
-    bootstrap: "/ip4/169.58.211.248/udp/9800/quic-v1",
+    bootstrap: "/ip4/169.58.211.248/udp/9800/quic-v1,/ip4/13.140.32.27/udp/9800/quic-v1",
     block_interval: 180.0,
     spec: (6, 512, 2048, 8, 16, 6_628_352),   // == client SMALL_MOE_CFG
     retarget_window: 16,
@@ -877,6 +877,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // keepalives so NAT mappings stay warm and transient loss is survivable.
             cfg.max_idle_timeout = 120_000;                 // ms
             cfg.keep_alive_interval = Duration::from_secs(15);
+            // Multi-MB sync responses over a lossy WAN killed connections with
+            // quinn's INTERNAL_ERROR "too many gaps in stream buffer": with a
+            // 10MB stream window, loss + reordering fragments the receiver's
+            // reassembly buffer past quinn's gap limit whenever the event loop
+            // pauses reading (block validation takes seconds). A 2MB stream
+            // window bounds how fragmented a stream can ever get and still
+            // sustains ~20MB/s at 100ms RTT — far above what catch-up needs.
+            // Found live on the first transatlantic anchor sync.
+            cfg.max_stream_data = 2_000_000;
+            cfg.max_connection_data = 6_000_000;
             cfg
         })
         .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)?
@@ -972,6 +982,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         last_foreign_head: 0.0,
         silent_rounds: 0,
         last_sync_req: Default::default(),
+        sync_cursor: Default::default(),
         peers_connected: 0,
         chat_pending: Vec::new(),
         chat_inflight: false,

@@ -23,9 +23,10 @@ each phase.
 - ✅ **Non-forgeable work**: header.work = vrf_work(VRF proof), verified in
   validate_block; VRF proposer sortition wired in, fixed-rotation SPOF removed (92, 113)
 - ✅ **Byzantine-robust aggregation** at low miner counts (always trim ≥1 at k≥3) (110)
-- Golden vectors: 17 families incl. negative, overflow, VRF-chain, and
-  low-count-robustness cases; Rust == Python. 35 Rust tests; devnet + soak
-  (kill/restart) converge.
+- Golden vectors: 28 families (protocol v1: +page_root, page_init, model_state,
+  quota, controller_fold; chain_replay rebuilt with an on-chain growth event)
+  incl. negative, overflow, VRF-attempt, and low-count-robustness cases;
+  Rust == Python. 67 Rust tests; devnet + soak (kill/restart) converge IN CI.
 
 ## Runtime & DoS hardening — ✅ COMPLETE (blocks Phase 1)
 - ✅ Bounded mempools/caches + admission gating (98/99)
@@ -71,6 +72,32 @@ each phase.
   redial the configured peers (guarded: inbound-only anchors never recycle).
   Liveness-only; fork choice reconciles on fresh transport. The soak asserts
   settled-prefix convergence through a mid-run SIGKILL.
+- ✅ Sync-window catch-up deadlock (found live: the first payload-heavy WAN
+  fresh-join — the second anchor wedged at height 3 forever): requests anchor at
+  head−2 for reorg safety, but the server packs oldest-first under a 48MB byte
+  budget, and with ~20MB delta payloads a batch is EXACTLY the already-known
+  overlap — zero progress per round-trip. Fix: a per-peer request cursor jumps
+  past a batch that taught nothing while the peer is ahead (any batch containing
+  a new block clears it, so the reorg margin holds exactly when it matters), and
+  a node still behind re-requests immediately instead of once per Head gossip.
+  CI never saw it: toy-moe payloads are tiny. Regression: devnet convergence ✓.
+- ✅ OOM during WAN catch-up (found live, same join): the ~860MB genesis state
+  was pinned in RAM forever "to serve joiners" — but sync already refuses to
+  serve a genesis that big, so the pin only burned a hard-won 8GB margin and
+  the OOM killer took the anchor down mid-sync. Fix: prune an oversized genesis
+  state like any block below the prune floor (still re-derivable from
+  genesis.bin); provision-seed.sh now also adds a 4GB swap backstop.
+- ✅ QUIC stream-gap connection kill (found live, same join): quinn axes the
+  whole connection with INTERNAL_ERROR "too many gaps in stream buffer" when a
+  multi-MB sync response arrives out-of-order faster than the event loop reads
+  it (block validation pauses reads for seconds). Fixes: 2MB QUIC stream window
+  (bounds reassembly fragmentation; still ~20MB/s at 100ms RTT), sync batch
+  budget 48→16MB, the connect-time opportunistic pull now respects the
+  in-flight throttle + cursor (it used to fire a duplicate ~50MB transfer on
+  every reconnect), and request-response failures / connection closes are now
+  logged with their cause instead of being silently swallowed. Follow-on
+  (testnet): move block validation off the swarm event loop so reads never
+  stall.
 - ✅ Delta scoring (rev 7) — held-out-shard loss scores COMMITTED per block
   (header.score_root), enforced structure/bounds/commitment in validation;
   miner pool + data credits split ∝ score, uniform fallback; the trainer bridge
@@ -106,18 +133,35 @@ token-gated/disabled.
 - ✅ Prometheus /metrics endpoint + alert rules (121)
 - ☐ Backup/restore script (122)
 - ☐ TLS termination for non-loopback API (123) — see below
-- ☐ Second bootstrap/DA anchor + failover (119)
+- ✅ Second bootstrap/DA anchor (119): contabo-us-1 (13.140.32.27) live on a
+  separate continent — regenerated the genesis root independently (fourth
+  platform), synced the chain over WAN (shaking out the three catch-up bugs
+  above), holds lockstep with contabo-eu-1, and a fresh joiner syncs through it
+  ALONE (bootstrap SPOF closed). Baked into the shipped bootstrap pair.
 
 ## Process
+- ☐ npm 0.4.0 publish — the founder has no npm account yet; the published 0.3.2
+  package works against devnet-genesis-2 with the documented
+  `SESTRIAN_GENESIS_TAG=devnet-genesis-2` override (joining.md), and a stale
+  install fails loudly, never silently. Create the account, `npm publish` from
+  npm/, then drop the override from joining.md.
+
 - ✅ CI: warning-clean build + tests + golden parity; image build (124)
 - 🧪 node/net tests: store lock/torn-line, mempool window, API auth (125) —
   expand alongside integrations
 - 📐 adversarial/chaos suite (126) · cross-machine e2e + soak (128)
-- ☐ Python reference suite pinned + green in CI (127)
+- ✅ Python reference suite pinned + green + BLOCKING in CI (127) — protocol v1;
+  devnet-convergence job on every PR, soak on main + nightly
 - ✅ Threat model (132) · this readiness doc (133)
 
 ## Remaining — testnet-phase extensions (need a multi-party network)
 The single-operator devnet can't validate these; the testnet is their gate.
+- gossip topic is `sestrian/v1` for every chain: a node on a DIFFERENT genesis
+  (observed live: a devnet-1 straggler still mining the old chain) lands in the
+  same mesh and its Head announcements trigger wasted sync pulls — validation
+  rejects its blocks, so it's noise, not risk. At the next coordinated protocol
+  bump, namespace the topic by genesis id (a change today would orphan the
+  published v0.4.0 binaries for a cosmetic win).
 - 108 committee upgrade: multi-evaluator commit-reveal score verification +
   automated slashing (the committed-scores mechanism itself is ✅ live; what
   remains is removing trust in the lone proposer's evaluation)

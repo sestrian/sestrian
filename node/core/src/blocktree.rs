@@ -533,6 +533,16 @@ impl BlockTree {
         Ok(became)
     }
 
+    /// A genesis state at or below this size is pinned in memory forever so it
+    /// can be served to joiners over sync (local/test networks). Above it, sync
+    /// refuses to serve the genesis anyway (it blows the response cap), so
+    /// pinning it only burns RAM — a production-size genesis (~860MB) plus the
+    /// prune window plus one in-flight validation OOM-killed an 8GB anchor
+    /// during its first WAN catch-up. Found live. It stays re-derivable from
+    /// genesis.bin on disk; a side-block needing it just orphans, exactly like
+    /// any block below the prune floor.
+    const GENESIS_PIN_MAX_BYTES: usize = 64 * 1024 * 1024;
+
     /// Drop heavy state vectors more than prune_depth below the head.
     fn prune_deep(&mut self) {
         let Some(depth) = self.prune_depth else { return };
@@ -544,6 +554,13 @@ impl BlockTree {
             .cloned().collect();
         for h in doomed {
             self.state.remove(&h);
+        }
+        if floor > 0 {
+            if let Some(g) = self.state.get(&self.genesis_hash) {
+                if g.len() * 8 > Self::GENESIS_PIN_MAX_BYTES {
+                    self.state.remove(&self.genesis_hash.clone());
+                }
+            }
         }
     }
 
