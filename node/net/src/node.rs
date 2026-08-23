@@ -50,6 +50,26 @@ const SYNC_MAX_BLOCKS: usize = 64;
 // dies on a lossy WAN path (see the quic max_stream_data note in main.rs).
 // Always >= 1 block regardless, so payload-heavy chains still make progress.
 const SYNC_BYTE_BUDGET: usize = 16 * 1024 * 1024;
+/// A delta body above this travels as an ANNOUNCEMENT (Dtx with an empty
+/// payload) + shard fetch, and sync serves the block without it. Inline
+/// paths die above this size: at a 4.7x retarget quota a body is ~92MB —
+/// over the 64MB gossip cap, over the sync response cap with block overhead,
+/// and 1.33x over everything once base64'd. The live network forked at its
+/// first quota rise because every one of those paths failed at once.
+const DTX_INLINE_MAX: usize = 8 * 1024 * 1024;
+/// Env-overridable accessor (SESTRIAN_DTX_INLINE_MAX) — a transport knob, not
+/// consensus. Tests force it to 0 so toy-size deltas exercise the
+/// announce+shard-fetch path that production only hits at high quotas.
+fn dtx_inline_max() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("SESTRIAN_DTX_INLINE_MAX").ok()
+        .and_then(|s| s.parse().ok()).unwrap_or(DTX_INLINE_MAX))
+}
+/// b64 bytes of shards per ShardResponse (one oversized shard may exceed it —
+/// at least one shard is always served so reconstruction can progress).
+const SHARD_SERVE_BUDGET: usize = 12 * 1024 * 1024;
+/// How long an announced-but-unfetched delta stays wanted before giving up.
+const WANT_DELTA_TTL: f64 = 600.0;
 const SYNC_INFLIGHT_TIMEOUT: f64 = 30.0;
 
 /// Coordinates per aggregation chunk — the memory/latency knob (K deltas ×
@@ -373,7 +393,11 @@ pub struct Node {
     pub quota_rejects: u64,
     /// per-peer rotation cursor for serving GENESIS shards one at a time, so a
     /// bootstrapping peer that keeps asking us collects K distinct shards.
-    pub genesis_shard_cursor: HashMap<PeerId, usize>,
+    /// Rotating serve cursor per (peer, body) — distinct shards per response.
+    pub shard_cursor: HashMap<(PeerId, String), usize>,
+    /// Announced deltas whose bodies we are fetching by shards: txid ->
+    /// (signed tx held until the body reconstructs, give-up deadline). Bounded.
+    pub want_deltas: HashMap<String, (crate::proto::WireDeltaTx, f64)>,
 }
 
 impl Node {
@@ -559,6 +583,12 @@ impl Node {
         }
         self.mark_seen(txid.clone());
         self.store.put_payload(&txid, &payload);
+        // Disperse oversized bodies into erasure shards NOW, not at prune time:
+        // a body over the inline gossip cap travels only by shard fetch, so the
+        // shards must exist the moment the announcement goes out.
+        if payload.wire_bytes() > dtx_inline_max() {
+            self.store.disperse_payload(&txid, &payload);
+        }
         self.payloads.insert(txid.clone(), payload);
         self.delta_pool.insert(txid, tx);
         self.evict_delta_pool();
@@ -1365,6 +1395,34 @@ pub async fn run(
                     if swarm.network_info().num_peers() < expected {
                         dial_peers(&mut swarm, &node.cfg.peers.clone());
                     }
+                    // truth-sync the peer gauge: the manual +1/-1 accounting
+                    // drifted upward under connection churn (a public page once
+                    // showed 251 "peers" on a 4-node network)
+                    node.peers_connected = swarm.network_info().num_peers();
+                    // BODY REFETCH: every round, re-ask connected peers for the
+                    // shards of (a) bodies that pending blocks are stuck on and
+                    // (b) announced deltas still wanted. One shard-request per
+                    // peer per round is cheap; responses are byte-budgeted.
+                    node.want_deltas.retain(|_, (_, dl)| *dl > now());
+                    let mut want: Vec<String> = node.pending.values()
+                        .flat_map(|(sb, _)| sb.txs.iter())
+                        .filter_map(|t| t.to_core().map(|tc| tc.txid()))
+                        .filter(|id| !node.payloads.contains_key(id))
+                        .collect();
+                    want.extend(node.want_deltas.keys().cloned());
+                    want.sort();
+                    want.dedup();
+                    want.truncate(32);
+                    if !want.is_empty() {
+                        info!(bodies = want.len(),
+                              "refetching missing delta bodies by shards");
+                        let ps: Vec<PeerId> =
+                            swarm.connected_peers().copied().collect();
+                        for p in ps {
+                            swarm.behaviour_mut().shards.send_request(&p,
+                                ShardRequest { txids: want.clone() });
+                        }
+                    }
                     // MESH-BLINDNESS HEAL: peers are connected but no foreign
                     // head has been heard for 2+ rounds — the gossipsub mesh
                     // may not have (re)grafted after churn. PULL directly over
@@ -1430,6 +1488,12 @@ pub async fn run(
                             .map(|p| (WireDeltaTx::from_core(t), p.clone())))
                         .collect();
                     for (tx, payload) in resend {
+                        // over the inline cap: announce (empty payload) — the
+                        // body travels by shards; inline gossip above 64MB is
+                        // silently dropped by the mesh, which forked the net
+                        let payload = if payload.wire_bytes() > dtx_inline_max() {
+                            Payload { n: payload.n, idx: String::new(), val: String::new() }
+                        } else { payload };
                         node.publish(&mut swarm, &Gossip::Dtx { tx, payload });
                     }
                     // train EVERY round (the delta gossips to whoever proposes)
@@ -1591,6 +1655,9 @@ pub async fn run(
                               "trained delta");
                         let wire = WireDeltaTx::from_core(&tx);
                         if node.accept_delta(tx, payload.clone()) {
+                            let payload = if payload.wire_bytes() > dtx_inline_max() {
+                                Payload { n: payload.n, idx: String::new(), val: String::new() }
+                            } else { payload };
                             node.publish(&mut swarm,
                                          &Gossip::Dtx { tx: wire, payload });
                         }
@@ -1650,7 +1717,40 @@ pub async fn run(
                         match g {
                             Gossip::Dtx { tx, payload } => {
                                 if let Some(t) = tx.to_core() {
-                                    node.accept_delta(t, payload);
+                                    let empty = payload.idx.is_empty()
+                                        && payload.val.is_empty();
+                                    if !empty {
+                                        node.accept_delta(t, payload);
+                                    } else {
+                                        // announcement of a body too big to
+                                        // gossip inline: reconstruct from
+                                        // shards we hold, or start fetching
+                                        let txid = t.txid();
+                                        if let Some(p) = node.payloads.get(&txid)
+                                            .cloned()
+                                            .or_else(|| node.store
+                                                .reconstruct_payload(&txid)) {
+                                            node.payloads
+                                                .insert(txid.clone(), p.clone());
+                                            node.accept_delta(t, p);
+                                        } else if node.want_deltas.len() < 64
+                                            && !node.want_deltas
+                                                .contains_key(&txid) {
+                                            info!(txid = &txid[..12],
+                                                  "big delta announced — \
+                                                   fetching body by shards");
+                                            node.want_deltas.insert(txid.clone(),
+                                                (tx, now() + WANT_DELTA_TTL));
+                                            let peers: Vec<PeerId> = swarm
+                                                .connected_peers().copied()
+                                                .collect();
+                                            for p in peers {
+                                                swarm.behaviour_mut().shards
+                                                    .send_request(&p, ShardRequest {
+                                                        txids: vec![txid.clone()] });
+                                            }
+                                        }
+                                    }
                                     node.retry_pending(&mut swarm);
                                 }
                             }
@@ -1740,6 +1840,12 @@ pub async fn run(
                                         let txid = tc.txid();
                                         if let Some(p) = node.payloads.get(&txid).cloned()
                                             .or_else(|| node.store.get_payload(&txid)) {
+                                            // an oversized body would blow the
+                                            // response cap — ship the block, let
+                                            // the requester shard-fetch the body
+                                            if p.wire_bytes() > dtx_inline_max() {
+                                                continue;
+                                            }
                                             bytes += p.wire_bytes();
                                             payloads.insert(txid, p);
                                         }
@@ -1798,13 +1904,21 @@ pub async fn run(
                                     node.payloads.insert(txid, p);
                                 }
                             }
-                            let served = response.blocks.len() as u64;
-                            let known_before = node.tree.blocks.len();
+            let served = response.blocks.len() as u64;
+                            // "learned" must count blocks parked as PENDING
+                            // (payload not yet fetched) — they are new knowledge.
+                            // Counting only applied blocks made a pending-wedged
+                            // node advance its cursor past the peer's real head,
+                            // after which sync pulled nothing at all (found live
+                            // during the quota-fork incident).
+                            let known_before =
+                                node.tree.blocks.len() + node.pending.len();
                             for sb in response.blocks {
                                 node.install(sb, None, &mut swarm);
                             }
                             node.retry_pending(&mut swarm);
-                            let learned = node.tree.blocks.len() > known_before;
+                            let learned = node.tree.blocks.len()
+                                + node.pending.len() > known_before;
                             // clear the in-flight marker so the next Head from this
                             // peer immediately pulls the next batch (continuous
                             // catch-up instead of one batch per throttle window)
@@ -1819,9 +1933,11 @@ pub async fn run(
                                 // the peer is ahead but the whole batch was blocks
                                 // we already had: the byte-budgeted window is stuck
                                 // inside the reorg margin. Jump past what was served
-                                // or the loop repeats forever.
+                                // or the loop repeats forever. CLAMPED to the peer's
+                                // head — past it, requests return nothing, forever.
                                 if let Some(f) = last_from {
-                                    let cur = f + served;
+                                    let cur = (f + served)
+                                        .min(response.head_height);
                                     node.sync_cursor.insert(peer, cur);
                                     warn!(peer = %peer, cursor = cur,
                                           their_head = response.head_height,
@@ -1829,15 +1945,20 @@ pub async fn run(
                                            request cursor past the overlap");
                                 }
                             }
-                            // still behind after a non-empty batch: pull the next
-                            // window NOW instead of waiting for the next Head
-                            // announcement (payload-heavy chains would otherwise
-                            // catch up at one batch per block interval)
-                            if behind && served > 0 {
+                            // still behind after a batch that MOVED something
+                            // (new blocks, or a strictly advanced cursor): pull
+                            // the next window NOW instead of waiting for the next
+                            // Head announcement. Gating on movement stops a
+                            // pending-wedged node from hammering the peer in a
+                            // tight request loop.
+                            let cursor_now = node.sync_cursor.get(&peer).copied();
+                            let moved = learned
+                                || (cursor_now.is_some()
+                                    && cursor_now != last_from);
+                            if behind && served > 0 && moved {
                                 let from = node.head_height()
                                     .min(response.head_height).saturating_sub(2)
-                                    .max(node.sync_cursor.get(&peer)
-                                        .copied().unwrap_or(0));
+                                    .max(cursor_now.unwrap_or(0));
                                 node.last_sync_req.insert(peer, (now(), from));
                                 swarm.behaviour_mut().sync.send_request(&peer,
                                     SyncRequest { from_height: from,
@@ -1850,42 +1971,49 @@ pub async fn run(
                 SwarmEvent::Behaviour(BehaviourEvent::Shards(
                         request_response::Event::Message { message, peer, .. })) => {
                     match message {
-                        // serve whatever shards we hold for the requested bodies
+                        // Serve shards for the requested bodies, BYTE-BUDGETED.
+                        // The old path b64-encoded every shard of every body into
+                        // one response; at retarget-window quotas a single delta
+                        // body is ~92MB, so the full shard set blew the response
+                        // cap and the transfer silently died — which forked the
+                        // live network at the first quota rise. Now: a rotating
+                        // per-(peer, body) cursor hands out distinct shards a
+                        // budget at a time (the pattern the genesis path already
+                        // used), so a requester asking repeatedly reconstructs
+                        // ANY size body from bounded responses. At least one
+                        // shard is always served, so progress is guaranteed.
                         request_response::Message::Request { request, channel, .. } => {
                             let mut bodies = Vec::new();
-                            for txid in request.txids.iter().take(128) {
-                                // The GENESIS shard set is ~2GB (48 x ~43MB), so
-                                // it can never be served the way a delta body is.
-                                // Return exactly ONE shard per response, and walk
-                                // a per-peer cursor so a requester asking
-                                // repeatedly collects K DISTINCT shards from us
-                                // (the request carries no "shards I already have"
-                                // list, so the server drives the rotation).
-                                if txid == crate::store::Store::GENESIS_DA_KEY {
-                                    let Some((k, n, orig_len)) = node.store.shard_meta(txid)
-                                        else { continue };
-                                    let have = node.store.list_shard_indices(txid);
-                                    if have.is_empty() {
-                                        continue;
-                                    }
-                                    let cur = node.genesis_shard_cursor.entry(peer).or_insert(0);
-                                    let pick = have[*cur % have.len()];
-                                    *cur = cur.wrapping_add(1);
-                                    if let Some(d) = node.store.read_shard(txid, pick) {
-                                        bodies.push(BodyShards {
-                                            txid: txid.clone(), k: k as u32, n: n as u32,
-                                            orig_len, shards: vec![(pick, b64(&d))] });
-                                    }
+                            let mut budget_used = 0usize;
+                            for txid in request.txids.iter().take(32) {
+                                if budget_used >= SHARD_SERVE_BUDGET {
+                                    break;
+                                }
+                                let Some((k, n, orig_len)) = node.store.shard_meta(txid)
+                                    else { continue };
+                                let have = node.store.list_shard_indices(txid);
+                                if have.is_empty() {
                                     continue;
                                 }
-                                if let Some((k, n, orig_len)) = node.store.shard_meta(txid) {
-                                    let shards: Vec<(u32, String)> = node.store.list_shards(txid)
-                                        .into_iter().map(|(i, d)| (i, b64(&d))).collect();
-                                    if !shards.is_empty() {
-                                        bodies.push(BodyShards {
-                                            txid: txid.clone(), k: k as u32, n: n as u32,
-                                            orig_len, shards });
+                                let cur = node.shard_cursor
+                                    .entry((peer, txid.clone())).or_insert(0);
+                                let mut shards: Vec<(u32, String)> = Vec::new();
+                                for step in 0..have.len() {
+                                    if budget_used >= SHARD_SERVE_BUDGET
+                                        && !shards.is_empty() {
+                                        break;
                                     }
+                                    let pick = have[(*cur + step) % have.len()];
+                                    if let Some(d) = node.store.read_shard(txid, pick) {
+                                        budget_used += d.len() * 4 / 3; // b64 size
+                                        shards.push((pick, b64(&d)));
+                                    }
+                                }
+                                *cur = (*cur + shards.len().max(1)) % have.len().max(1);
+                                if !shards.is_empty() {
+                                    bodies.push(BodyShards {
+                                        txid: txid.clone(), k: k as u32, n: n as u32,
+                                        orig_len, shards });
                                 }
                             }
                             let _ = swarm.behaviour_mut().shards
@@ -1908,6 +2036,26 @@ pub async fn run(
                                     && !node.payloads.contains_key(&b.txid) {
                                     if let Some(p) = node.store.reconstruct_payload(&b.txid) {
                                         node.payloads.insert(b.txid.clone(), p);
+                                    }
+                                }
+                                // an announced delta whose body just completed
+                                // enters the mempool like an inline one
+                                if let Some((wtx, _)) = node.want_deltas
+                                    .remove(&b.txid) {
+                                    match (wtx.to_core(),
+                                           node.payloads.get(&b.txid).cloned()) {
+                                        (Some(t), Some(p)) => {
+                                            info!(txid = &b.txid[..12],
+                                                  "announced delta body \
+                                                   reconstructed from shards");
+                                            node.accept_delta(t, p);
+                                        }
+                                        (_, None) => {
+                                            // not enough shards yet — keep wanting
+                                            node.want_deltas.insert(b.txid.clone(),
+                                                (wtx, now() + WANT_DELTA_TTL));
+                                        }
+                                        _ => {}
                                     }
                                 }
                             }

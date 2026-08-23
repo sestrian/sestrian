@@ -304,6 +304,7 @@ impl Store {
     }
 
     /// Every shard we currently hold for a body: (index, bytes).
+    #[cfg(test)]   // production serving is budgeted+rotating; tests read all
     pub fn list_shards(&self, txid: &str) -> Vec<(u32, Vec<u8>)> {
         let mut out = Vec::new();
         if let Ok(rd) = fs::read_dir(self.dir.join("da").join(txid)) {

@@ -1001,7 +1001,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         chat_inflight: false,
         stale_deltas: 0,
         quota_rejects: 0,
-        genesis_shard_cursor: Default::default(),
+        shard_cursor: Default::default(),
+        want_deltas: Default::default(),
     };
     node::run(n, swarm, api_rx, bridge_ev_rx).await;
     Ok(())
