@@ -1,0 +1,25 @@
+# api.sestrian.com — read-only HTTPS facade over a seed node's API, so the
+# https site can poll live chain stats (a browser will not fetch http:// from
+# an https page — site/chain.js upgrades itself the day this host answers).
+#
+#   apt install caddy
+#   cp deploy/Caddyfile.api /etc/caddy/Caddyfile && systemctl reload caddy
+#   DNS: A record  api.sestrian.com -> <this anchor's IP>  (DNS-only / grey
+#   cloud; Caddy terminates TLS with an automatic Let's Encrypt certificate)
+#
+# GET allow-list only; everything else 404s. The node's admin endpoints are
+# token-gated anyway — this is defense in depth, and it keeps operator-only
+# surfaces (bridge, gossip) unreachable from the public name.
+api.sestrian.com {
+	@ro {
+		method GET
+		path /status /miners /balance /chain /data/registry /metrics
+	}
+	handle @ro {
+		header Access-Control-Allow-Origin "*"
+		reverse_proxy 127.0.0.1:8080
+	}
+	handle {
+		respond 404
+	}
+}

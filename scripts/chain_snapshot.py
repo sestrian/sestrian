@@ -21,7 +21,12 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
-SEED = os.environ.get("SESTRIAN_SEED", "http://169.58.211.248:8080").rstrip("/")
+# Both anchors, tried in order — the panel must not go dark because one
+# region's seed is being restarted. SESTRIAN_SEED overrides with a single URL.
+SEEDS = ([os.environ["SESTRIAN_SEED"].rstrip("/")]
+         if os.environ.get("SESTRIAN_SEED")
+         else ["http://169.58.211.248:8080", "http://13.140.32.27:8080"])
+SEED = SEEDS[0]
 TIMEOUT = float(os.environ.get("SESTRIAN_SEED_TIMEOUT", "20"))
 
 # Only these reach the page. An allow-list rather than passing the node's
@@ -66,11 +71,18 @@ def main():
     out = sys.argv[1] if len(sys.argv) > 1 else "site/chain.json"
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    try:
-        raw = get("/status")
-    except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError) as e:
-        print(f"seed unreachable ({e}) — writing ok:false", file=sys.stderr)
-        payload = {"ok": False, "captured_at": now, "seed": SEED}
+    global SEED
+    raw = None
+    for SEED in SEEDS:
+        try:
+            raw = get("/status")
+            break
+        except (urllib.error.URLError, OSError, ValueError,
+                json.JSONDecodeError) as e:
+            print(f"{SEED} unreachable ({e}) — trying next", file=sys.stderr)
+    if raw is None:
+        print("no anchor reachable — writing ok:false", file=sys.stderr)
+        payload = {"ok": False, "captured_at": now, "seed": SEEDS[-1]}
     else:
         status = {k: raw[k] for k in STATUS_FIELDS if k in raw}
         model = raw.get("model") or {}

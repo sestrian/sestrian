@@ -9,7 +9,7 @@ on:
   # Refresh the live panel's baked chain snapshot without needing a commit.
   # Deploy-only: nothing is written back to the repo, so this costs no history.
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: "*/10 * * * *"
   workflow_dispatch:
 
 permissions:

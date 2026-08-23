@@ -132,7 +132,10 @@ token-gated/disabled.
 - ☐ Persistent-volume StatefulSet (118) · prebuilt image + CI push (120)
 - ✅ Prometheus /metrics endpoint + alert rules (121)
 - ☐ Backup/restore script (122)
-- ☐ TLS termination for non-loopback API (123) — see below
+- ◐ TLS termination (123): Caddy read-only HTTPS facade (deploy/Caddyfile.api)
+  installed + validated on contabo-us-1, GET allow-list + CORS for the site's
+  live panel; goes live (auto Let's Encrypt) once the api.sestrian.com A record
+  points at it. Operator APIs stay plain-http loopback/LAN.
 - ✅ Second bootstrap/DA anchor (119): contabo-us-1 (13.140.32.27) live on a
   separate continent — regenerated the genesis root independently (fourth
   platform), synced the chain over WAN (shaking out the three catch-up bugs
