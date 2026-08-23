@@ -231,8 +231,8 @@
 
   <div class="ticker" aria-hidden="true">
     <div class="track">
-      <span>85.4M params trained on-chain<b> ✺ </b>genesis 30ea20da…213c28<b> ✺ </b>Apple MPS + NVIDIA CUDA, no coordinator<b> ✺ </b>mine · serve · stake data<b> ✺ </b>open devnet, MIT<b> ✺ </b></span>
-      <span>85.4M params trained on-chain<b> ✺ </b>genesis 30ea20da…213c28<b> ✺ </b>Apple MPS + NVIDIA CUDA, no coordinator<b> ✺ </b>mine · serve · stake data<b> ✺ </b>open devnet, MIT<b> ✺ </b></span>
+      <span>107.4M-param MoE trained on-chain<b> ✺ </b>genesis a5973160…02527b<b> ✺ </b>Apple MPS + NVIDIA CUDA, no coordinator<b> ✺ </b>mine · serve · stake data<b> ✺ </b>open devnet, MIT<b> ✺ </b></span>
+      <span>107.4M-param MoE trained on-chain<b> ✺ </b>genesis a5973160…02527b<b> ✺ </b>Apple MPS + NVIDIA CUDA, no coordinator<b> ✺ </b>mine · serve · stake data<b> ✺ </b>open devnet, MIT<b> ✺ </b></span>
     </div>
   </div>
 
@@ -445,9 +445,9 @@
       it live: a MacBook and a gaming PC in different buildings, no referee between them,
       landing on the same model to the last bit. You never have to trust another machine.
       Or us.</p>
-    <div class="readout" role="img" aria-label="Terminal readout: both an Apple MPS device and an NVIDIA CUDA device compute the same state root, 30ea20da through 213c28. Consensus is bit-exact.">
-      <span class="lab">apple·mps</span>&nbsp;&nbsp;float step 0.73921… → int delta → root <span class="ok">30ea20da…213c28</span><br>
-      <span class="lab">nvidia·cuda</span> float step 0.73922… → int delta → root <span class="ok">30ea20da…213c28</span><br>
+    <div class="readout" role="img" aria-label="Terminal readout: both an Apple MPS device and an NVIDIA CUDA device compute the same state root, a5973160 through 02527b. Consensus is bit-exact.">
+      <span class="lab">apple·mps</span>&nbsp;&nbsp;float step 0.73921… → int delta → root <span class="ok">a5973160…02527b</span><br>
+      <span class="lab">nvidia·cuda</span> float step 0.73922… → int delta → root <span class="ok">a5973160…02527b</span><br>
       consensus <span class="ok">✓ bit-exact</span> — the floats never touch the chain
     </div>
   </section>
@@ -461,7 +461,7 @@
 $ <span class="s">scripts/install.sh --mine</span>   <span class="c"># or plain install.sh to watch &amp; sync</span></pre>
     </div>
     <p class="verify">Verify, don&rsquo;t trust — your node reproduces the genesis locally and must
-      print state root<br><b>30ea20da27f1da0c94512d50a6291370a63a426b77dc425b9826ca17bd213c28</b></p>
+      print state root<br><b>a597316003dbf12122b7cc6f39226ce7c8f7a871e58e7ddf364e56b08102527b</b></p>
   </section>
 
 </main>
@@ -493,7 +493,7 @@ $ <span class="s">scripts/install.sh --mine</span>   <span class="c"># or plain 
 
   /* ── ASCII flow field ── */
   var cv=document.getElementById("field"),ctx=cv.getContext("2d");
-  var GLYPHS="Σδ∂◦·:+×01".split(""),HASH="30ea20da213c28".split("");
+  var GLYPHS="Σδ∂◦·:+×01".split(""),HASH="a597316002527b".split("");
   var W,H,cols,rows,cell=18,t=0,px=-1e4,py=-1e4,DPR=Math.min(devicePixelRatio||1,1.5);
   var running=true;
   function size(){

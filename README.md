@@ -48,9 +48,9 @@ download), then sync:
 cd node && cargo build --release && cd ..
 python -m client.wallet new                      # your identity AND your balance
 
-# reproduce the genesis — must print state_root 30ea20da…c28
+# reproduce the genesis — must print state_root a5973160…527b (the page-Merkle root)
 uv run --with torch --with numpy --with pynacl \
-    python -m client.make_genesis --model small --seed 1337 --out genesis.bin
+    python -m client.make_genesis --model small-moe --seed 20260822 --out genesis.bin
 
 # check you can actually contribute BEFORE committing hours to it
 node/target/release/sestrian-node --check \
@@ -99,7 +99,7 @@ compressed deltas the node gossips:
 
 ```bash
 target/release/sestrian-node ... --produce --bridge-port 7999
-python -m client.miner_bridge --node-port 7999 --model small --data corpus.txt --device cuda
+python -m client.miner_bridge --node-port 7999 --model small-moe --data corpus.txt --device cuda
 ```
 
 A better-scoring delta earns more of the block reward. The proposer lottery is
@@ -143,7 +143,7 @@ To sell inference, run a serve-only bridge; callers pay per request with a signe
 receipt that settles payer → your wallet on-chain:
 
 ```bash
-python -m client.miner_bridge --node-port 7999 --model small --serve-only
+python -m client.miner_bridge --node-port 7999 --model small-moe --serve-only
 # callers: POST http://<you>:8090/inference  { prompt, fee, signature } → answer + on-chain receipt
 ```
 

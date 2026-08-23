@@ -42,11 +42,25 @@ each phase.
 - 🧪 DA layer primitive: erasure coding + Merkle sampling (`core::da`) (111)
   - ☐ node routing: disperse on submit, sample on validate, reconstruct on
     replay (112) — integration + testnet validation
-- 🧪 Proposer sortition primitive: verifiable stake-weighted VRF (`core::lottery`) (113)
-  - ☐ wire eligibility into validate_block + produce; VRF-derived work (92)
+- ✅ Proposer sortition ENFORCED (protocol v1, devnet-genesis-2): stake-weighted
+  VRF eligibility gates every block in `validate_block`, with a deterministic
+  attempt-widening liveness ladder (seed binds (prev, height, attempt);
+  `header.vrf_attempt` committed; work = attempt-discounted; ATTEMPT_MAX floor
+  keeps a 2-miner fleet live; cold-start rule covers the empty genesis ledger).
+  Golden-vectored (lottery family) + negative-tested. Devnet rotation deleted.
   - 📐 threshold-BLS beacon for unbiasability (`rig/beacon.py`)
-- 🧪 Capacity retarget controller (`core::capacity`) (117)
-  - ☐ enforce the work quota in validate_block
+- ✅ Capacity retarget ENFORCED (protocol v1): the integer controller folds into
+  consensus `ModelState` per block (committed as `header.model_root`), the WORK
+  QUOTA (nnz floor over the claimed pages) is validated per delta, and GROWTH
+  EVENTS activate on-chain — a new expert page appended with a deterministic
+  hash-stream init, replay bit-exact across the dimension change. Proven live:
+  `scripts/growth-proof.sh` (2 nodes + 2 torch trainers grow the model and stay
+  converged). Frozen pages reject deltas; genesis pages never freeze (117 →
+  DONE; the multi-operator delta-score committee remains testnet-phase).
+- ✅ Protocol VERSION field + `VERSION_SCHEDULE` (the previously-missing upgrade
+  affordance): headers commit `version`, validation pins it per height, unknown
+  versions fail with "upgrade your node". Pre-v1 wire/disk artifacts fail to
+  parse (no serde defaults on v1 fields) instead of half-loading.
 - ✅ Delta scoring (rev 7) — held-out-shard loss scores COMMITTED per block
   (header.score_root), enforced structure/bounds/commitment in validation;
   miner pool + data credits split ∝ score, uniform fallback; the trainer bridge

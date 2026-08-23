@@ -54,8 +54,8 @@ The installer reproduces the genesis from scratch (~2–3 min of CPU, plus a tor
 install). Point it at the published copy instead:
 
 ```bash
-SESTRIAN_GENESIS_URL=https://github.com/sestrian/sestrian/releases/download/devnet-genesis-1/genesis.bin.zst \
-SESTRIAN_GENESIS_SHA256=6987fb34ebf654655cebbd1d0133f3d70d7f470d7a279dcf2b9f498a27468978 \
+SESTRIAN_GENESIS_URL=https://github.com/sestrian/sestrian/releases/download/devnet-genesis-2/genesis.bin.zst \
+SESTRIAN_GENESIS_SHA256=<zstd sha256 from the devnet-genesis-2 release manifest> \
   scripts/install.sh
 ```
 
@@ -67,7 +67,7 @@ verification on its own if you want the file without the installer.
 ### Or run the container (no toolchain at all)
 
 ```bash
-curl -fL -o genesis.bin.zst https://github.com/sestrian/sestrian/releases/download/devnet-genesis-1/genesis.bin.zst
+curl -fL -o genesis.bin.zst https://github.com/sestrian/sestrian/releases/download/devnet-genesis-2/genesis.bin.zst
 zstd -d genesis.bin.zst && mkdir -p sestrian-data
 
 docker run --rm -it \
@@ -128,11 +128,12 @@ The current values, so you can verify what your node is using:
 | | value |
 |---|---|
 | network | `devnet` |
-| bootstrap peer | `/ip4/169.58.211.248/tcp/9800` |
-| genesis id (state root) | `30ea20da27f1da0c94512d50a6291370a63a426b77dc425b9826ca17bd213c28` |
-| model | 85.4M-param GPT, from scratch (`--model small --seed 1337`) |
+| bootstrap peer | `/ip4/169.58.211.248/udp/9800/quic-v1` |
+| genesis id (state root) | `a597316003dbf12122b7cc6f39226ce7c8f7a871e58e7ddf364e56b08102527b` — the PAGE-MERKLE root over the model's page table (protocol v1) |
+| model | 107.4M-param growable MoE GPT (~32M active/token), from scratch (`--model small-moe --seed 20260822`); the chain can GROW it — see /status `model` |
 | genesis-ledger contributor | `3432d48fd6878b4f2e7a1e40cc15e112c512fae7` |
 | block interval | 180s |
+| protocol version | 1 |
 | public API | http://169.58.211.248:8080/status |
 
 Running your own chain instead: `--network local`, and supply everything yourself.
@@ -199,7 +200,7 @@ genesis`, then stake.
 
 ```bash
 uv run --with torch --with numpy --with pynacl python -m client.miner_bridge \
-    --node-port 7999 --model small --serve-only
+    --node-port 7999 --model small-moe --serve-only
 ```
 
 Callers `POST /inference` with a signed, fee-bearing receipt that settles to your

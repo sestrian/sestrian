@@ -28,7 +28,8 @@ Infra nodes (seeds/relays) that never earn can use `--key-seed <32-byte hex>`.
 Every node must load the network's published genesis artifact:
 
 ```bash
-python -m client.make_genesis --model small --seed <published> --out genesis.bin
+python -m client.make_genesis --model small-moe --seed <published> --out genesis.bin \
+    --expect <published genesis id>
 # verify the printed genesis_state_root against the ceremony publication
 sestrian-node --genesis-file genesis.bin …
 ```
@@ -49,7 +50,7 @@ sestrian-node \
   --data-contributor <published-founder-address>
 
 # terminal 2 — the trainer (your GPU; any device torch supports):
-python -m client.miner_bridge --node-port 7999 --model small \
+python -m client.miner_bridge --node-port 7999 --model small-moe \
     --data <corpus.txt> --inner 300 --batch 32 --device cuda
 ```
 

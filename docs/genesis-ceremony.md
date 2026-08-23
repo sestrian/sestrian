@@ -5,6 +5,39 @@ and verifiable **before** block 1 exists — credibility is set at launch and
 cannot be retrofitted (WHITEPAPER §9.8). This document is the checklist and the
 script; each item names the mechanism that already implements it.
 
+## Ceremony 2 — devnet-genesis-2 (protocol v1, 2026-08-22)
+
+**Why a re-genesis.** Protocol v1 changed the chain's consensus surface in ways
+this document's own rule (§1: "any change to this table after ceremony is a
+hard fork by definition") makes a hard fork: the state commitment moved from a
+flat sha256 to a **page-Merkle root** over a consensus page table; delta
+transactions gained a signed **page-claim set** and lost `shard_id`; the header
+gained `model_root`, `vrf_attempt`, and a **protocol `version`** field (the
+upgrade affordance the chain previously lacked); proposer **eligibility** (VRF
+sortition with a deterministic attempt-widening liveness ladder) and the
+**capacity work quota** are now enforced in validation; and the network model
+became a **growable MoE** — the §9.4a capacity retarget can now append expert
+pages on-chain, with deterministically-derived weights. Rather than defer any
+of this into a future flag-day against strangers, the devnet was relaunched
+clean while its operators were only the founders. devnet-1 rewards were always
+documented as testnet play; wallets and keys carry over, balances do not.
+
+**Ceremony-2 parameters** (the §1 table's deltas):
+
+| Parameter | devnet-genesis-2 value |
+|---|---|
+| `model_config` | `small-moe`: 6 layers · 8 heads · d_model 512 · d_ff 2048 (=4d, frozen) · 8 experts/layer at genesis · `E_max` 16 router columns/layer · top-2 routing · RoPE (no position table) · byte vocab 256 |
+| `params` | 107,414,528 total (backbone 6,628,352 + 48 expert pages × 2,099,712 = 859,316,224 raw bytes); ~32M active per token |
+| `genesis_seed` | **20260822** (the ceremony date). A devnet re-genesis needs no grind-resistance — the weights are worthless at t=0 and the init distribution is seed-independent; the drand derivation below remains the **mainnet** procedure. |
+| `genesis_state_root` | **`a597316003dbf12122b7cc6f39226ce7c8f7a871e58e7ddf364e56b08102527b`** — the PAGE-MERKLE root printed by `make_genesis`. Verified by regeneration on the MPS founder host against the final code (`--expect` pass; generation is CPU+numpy, byte-stable across platforms, previously verified MPS/CUDA/CPU cross-machine). The CUDA founder host's verification is STRUCTURALLY ENFORCED at its first join: the node checks any genesis against this baked root at startup (`--check` / boot verification), so a divergent regeneration cannot join silently — it fails loudly and would trigger a re-ceremony. `scripts/release-genesis.sh` refuses to publish on mismatch. |
+| `retarget` | window 16 blocks · target 8 deltas/window · quota 0.25×–8× (4dp fixed point) · k_sustain 3 · announce lead 2 windows · growth bound 1 expert page/event · genesis experts never freeze |
+| `protocol_version` | 1 (header-committed; `VERSION_SCHEDULE` is the upgrade mechanism) |
+| `bootstrap_peers` | `/ip4/169.58.211.248/udp/9800/quic-v1` (+ the second anchor added at relaunch) — QUIC is canonical |
+| devnet-1 record | final height + head hash recorded at shutdown; the chain store backup is retained (deploy/backup-restore.sh), the `devnet-genesis-1` release assets stay published forever, and the pre-v1 code is tagged `devnet-1-final`. |
+
+Everything else in the §1 table (fair launch, zero balances, emission,
+reward split, founding corpus `85aa06fb…e3ae`, data_contributor) is unchanged.
+
 ## 0. Principles (all already protocol invariants)
 
 - **From scratch, on-chain.** Genesis weights are a deterministic random
