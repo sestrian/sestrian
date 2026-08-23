@@ -31,11 +31,35 @@ STATUS_FIELDS = ("height", "head", "supply", "peers", "stale_deltas",
                  "quota_rejects", "producer", "model_attached")
 MODEL_FIELDS = ("dim", "model_root", "expert_pages", "expert_pages_active",
                 "pages_total", "growth_events", "pending_growth", "window_id")
+# Per-miner rows for the network page's leaderboard. Addresses and block counts
+# are public chain facts — anyone replaying the chain derives them — but keep it
+# to an allow-list so an added operator-only field cannot leak by accident.
+MINER_FIELDS = ("address", "blocks_proposed", "deltas", "share_pct",
+                "balance", "last_height")
+
+# Subdomains the site links to. Probed here rather than assumed, so a button
+# never points at something that does not answer — the page renders it as
+# "soon" until this says otherwise, and lights up on the next deploy.
+ENDPOINTS = {"api": "https://api.sestrian.com/status",
+             "chat": "https://chat.sestrian.com/"}
 
 
 def get(path):
     with urllib.request.urlopen(f"{SEED}{path}", timeout=TIMEOUT) as r:
         return json.loads(r.read())
+
+
+def probe(url):
+    """True if `url` answers at all. Any HTTP response counts — we are asking
+    'does this host exist yet', not 'is every route healthy'."""
+    try:
+        req = urllib.request.Request(url, method="HEAD")
+        with urllib.request.urlopen(req, timeout=6) as r:
+            return r.status < 500
+    except urllib.error.HTTPError as e:
+        return e.code < 500          # 401/404 still means something is there
+    except Exception:                # noqa: BLE001 - DNS, TLS, timeout: not up
+        return False
 
 
 def main():
@@ -62,10 +86,15 @@ def main():
             lst = m.get("miners") if isinstance(m, dict) else m
             if isinstance(lst, list):
                 status["miners"] = len(lst)
+                status["miner_rows"] = sorted(
+                    [{k: r[k] for k in MINER_FIELDS if k in r} for r in lst],
+                    key=lambda r: r.get("blocks_proposed", 0), reverse=True)[:25]
         except Exception as e:                       # noqa: BLE001 - best effort
             print(f"/miners unavailable ({e}) — omitting", file=sys.stderr)
 
         payload = {"ok": True, "captured_at": now, "seed": SEED, "status": status}
+
+    payload["endpoints"] = {name: probe(url) for name, url in ENDPOINTS.items()}
 
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     with open(out, "w") as f:

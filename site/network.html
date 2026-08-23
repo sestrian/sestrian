@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sestrian — the network, live</title>
+<meta name="description" content="Live state of the Sestrian devnet: chain height, the model's page table, who is mining it, and the numbers you can check against any node.">
+<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="%230e0d0b"/><text x="32" y="46" font-family="Arial,sans-serif" font-weight="900" font-size="40" text-anchor="middle" fill="%23ff4d00">S</text></svg>'>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&display=swap" rel="stylesheet">
+<style>
+  /* Same brand system as the landing page: this is the product showing its
+     working, not a separate document. Committed single (dark) theme — every
+     colour is painted explicitly so it holds on any host background. */
+  :root{
+    --black:#0e0d0b; --bone:#ecebe4; --dim:#b4b1a6; --line:#2c2a25;
+    --signal:#ff4d00; --signal-deep:#c73a00; --panel:#141310;
+    --sans:"Archivo",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  ::selection{background:var(--signal);color:var(--black)}
+  :focus-visible{outline:2px solid var(--signal);outline-offset:3px}
+  body{margin:0;background:var(--black);color:var(--bone);font-family:var(--sans);
+    font-size:17px;line-height:1.6;-webkit-font-smoothing:antialiased}
+  a{color:inherit;text-decoration:none}
+  .wrap{max-width:1440px;margin:0 auto;padding:0 clamp(20px,4vw,64px)}
+  .skip{position:absolute;left:-9999px}
+  .skip:focus{left:12px;top:12px;background:var(--signal);color:var(--black);padding:8px 14px;z-index:99}
+
+  /* masthead — mirrors index.html */
+  header{position:sticky;top:0;z-index:50;background:var(--black);border-bottom:1px solid var(--line)}
+  .bar{display:flex;justify-content:space-between;align-items:center;gap:18px;
+    padding:18px clamp(20px,4vw,64px);flex-wrap:wrap}
+  .logo{font-weight:900;font-stretch:125%;letter-spacing:.06em;font-size:19px;text-transform:uppercase}
+  .bar nav{display:flex;gap:clamp(14px,2.4vw,30px);align-items:center;flex-wrap:wrap}
+  .bar nav a{font-family:var(--mono);font-size:13px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim)}
+  .bar nav a:hover{color:var(--signal)}
+  .bar nav a.here{color:var(--bone)}
+  .bar nav a.join{border:1px solid var(--bone);color:var(--bone);padding:9px 18px}
+  .bar nav a.join:hover{background:var(--bone);color:var(--black)}
+  /* a link to something not deployed yet must not look clickable */
+  .bar nav a.soon{opacity:.42;cursor:not-allowed}
+  .bar nav a.soon:hover{color:var(--dim)}
+  .bar nav a.soon::after{content:" soon";font-size:10px;letter-spacing:.16em;color:var(--signal)}
+
+  /* status band */
+  .band{border-bottom:1px solid var(--line);padding:clamp(38px,7vh,74px) 0 clamp(30px,5vh,52px)}
+  .state{font-family:var(--mono);font-size:13px;letter-spacing:.22em;text-transform:uppercase;
+    display:flex;align-items:center;gap:12px;color:var(--bone);margin:0 0 22px}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--signal);flex:none}
+  .dot.cold{background:var(--dim)}
+  @media(prefers-reduced-motion:no-preference){
+    .dot{animation:pulse 2s infinite}
+    .dot.cold{animation:none}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.28}}
+  }
+  .hgt{display:flex;align-items:baseline;gap:20px;flex-wrap:wrap}
+  .hgt .n{font-family:var(--mono);font-size:clamp(56px,12vw,150px);line-height:.9;
+    font-weight:700;letter-spacing:-.03em;font-variant-numeric:tabular-nums}
+  .hgt .cap{font-family:var(--mono);font-size:12px;letter-spacing:.2em;text-transform:uppercase;color:var(--dim)}
+  .headline{font-family:var(--mono);font-size:13.5px;color:var(--dim);margin-top:18px;word-break:break-all}
+  .headline b{color:var(--bone);font-weight:400}
+
+  /* stat grid */
+  .grid{display:grid;gap:1px;background:var(--line);border-top:1px solid var(--line);
+    border-bottom:1px solid var(--line);grid-template-columns:repeat(auto-fit,minmax(168px,1fr))}
+  .cell{background:var(--black);padding:22px clamp(20px,2.4vw,28px) 24px}
+  .k{font-family:var(--mono);font-size:11px;letter-spacing:.2em;text-transform:uppercase;
+    color:var(--dim);margin-bottom:11px}
+  .v{font-family:var(--mono);font-size:clamp(23px,2.7vw,34px);line-height:1;
+    font-variant-numeric:tabular-nums;word-break:break-word}
+  .v .u{font-size:.4em;color:var(--dim);letter-spacing:.12em;margin-left:.45em}
+  .v.warn{color:var(--signal)}
+  .note{font-family:var(--mono);font-size:11.5px;color:var(--dim);margin-top:9px}
+
+  section.blk{padding:clamp(48px,8vh,92px) 0;border-bottom:1px solid var(--line)}
+  h2{font-size:clamp(26px,3.4vw,46px);font-weight:900;font-stretch:118%;text-transform:uppercase;
+    letter-spacing:-.01em;line-height:1;margin:0 0 14px}
+  .lede{color:var(--dim);max-width:66ch;margin:0 0 30px;font-size:16.5px}
+
+  /* model page table */
+  .pages{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:20px}
+  .pg{width:26px;height:26px;border:1px solid var(--line);background:var(--panel)}
+  .pg.on{background:var(--signal-deep);border-color:var(--signal)}
+  .pg.base{background:var(--bone);border-color:var(--bone)}
+  .legend{font-family:var(--mono);font-size:12px;color:var(--dim);display:flex;gap:22px;flex-wrap:wrap}
+  .legend i{display:inline-block;width:11px;height:11px;margin-right:7px;vertical-align:-1px;border:1px solid var(--line)}
+  .legend .a{background:var(--signal-deep);border-color:var(--signal)}
+  .legend .b{background:var(--bone);border-color:var(--bone)}
+  .legend .c{background:var(--panel)}
+
+  /* miners */
+  table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:13.5px}
+  th{text-align:left;font-weight:400;font-size:11px;letter-spacing:.18em;text-transform:uppercase;
+    color:var(--dim);padding:0 14px 12px 0;border-bottom:1px solid var(--line);white-space:nowrap}
+  td{padding:14px 14px 14px 0;border-bottom:1px solid var(--line);
+    font-variant-numeric:tabular-nums;vertical-align:middle}
+  th.r,td.r{text-align:right;padding-right:0}
+  .addr{color:var(--bone);word-break:break-all}
+  .barcell{min-width:110px}
+  .barwrap{height:6px;background:var(--panel);border:1px solid var(--line)}
+  .barfill{height:100%;background:var(--signal)}
+  .tblwrap{overflow-x:auto}
+  .empty{color:var(--dim);font-family:var(--mono);font-size:13.5px}
+
+  .verify{font-family:var(--mono);font-size:13px;color:var(--dim);line-height:1.9;word-break:break-all}
+  .verify b{color:var(--signal);font-weight:400}
+  footer{padding:38px 0 64px;color:var(--dim);font-size:14px}
+  footer a{text-decoration:underline;text-underline-offset:3px}
+  footer a:hover{color:var(--signal)}
+  .flinks{display:flex;gap:26px;flex-wrap:wrap;margin-top:14px;font-family:var(--mono);font-size:12.5px;
+    letter-spacing:.1em;text-transform:uppercase}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header>
+  <div class="bar">
+    <a class="logo" href="/">Sestrian</a>
+    <nav aria-label="Main">
+      <a href="technical.html">Technical brief</a>
+      <a href="network.html" class="here" aria-current="page">The network</a>
+      <a href="https://chat.sestrian.com" data-endpoint="chat" class="soon" aria-disabled="true" tabindex="-1">Chat</a>
+      <a href="https://github.com/sestrian/sestrian">GitHub</a>
+      <a class="join" href="https://github.com/sestrian/sestrian/blob/main/docs/joining.md">Join the devnet</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+  <section class="band wrap">
+    <p class="state"><span class="dot cold" id="dot" aria-hidden="true"></span><span id="state">Reading the chain…</span></p>
+    <div class="hgt">
+      <span class="n" id="height">–</span>
+      <span class="cap">blocks<br>produced</span>
+    </div>
+    <p class="headline">
+      head <b id="head">—</b><br>
+      model root <b id="root">—</b>
+    </p>
+  </section>
+
+  <div class="grid" id="grid" aria-live="polite">
+    <div class="cell"><div class="k">supply</div><div class="v" id="supply">–<span class="u">SES</span></div>
+      <div class="note">minted by mining, so far</div></div>
+    <div class="cell"><div class="k">peers</div><div class="v" id="peers">–</div>
+      <div class="note">connected to the seed</div></div>
+    <div class="cell"><div class="k">miners</div><div class="v" id="miners">–</div>
+      <div class="note">producing blocks</div></div>
+    <div class="cell"><div class="k">parameters</div><div class="v" id="params">–</div>
+      <div class="note">the chain's entire state</div></div>
+    <div class="cell"><div class="k">expert pages</div><div class="v" id="pages">–</div>
+      <div class="note">active / allocated</div></div>
+    <div class="cell"><div class="k">growth events</div><div class="v" id="growth">–</div>
+      <div class="note">times the model grew</div></div>
+    <div class="cell"><div class="k">stale deltas</div><div class="v" id="stale">–</div>
+      <div class="note">wasted training rounds</div></div>
+    <div class="cell"><div class="k">quota rejects</div><div class="v" id="quota">–</div>
+      <div class="note">work over the cap</div></div>
+  </div>
+
+  <section class="blk wrap">
+    <h2>The model, page by page</h2>
+    <p class="lede">The chain's state is not a ledger of balances — it is the model itself, split
+      into pages. Each square is one page of weights. The network can vote to add more, so this
+      grid grows as the model does.</p>
+    <div class="pages" id="pagegrid" role="img" aria-label="Model page table" aria-describedby="pagedesc"></div>
+    <p class="legend" id="pagedesc">
+      <span><i class="b"></i>base page</span>
+      <span><i class="a"></i>expert page, active</span>
+      <span><i class="c"></i>allocated, not yet active</span>
+    </p>
+  </section>
+
+  <section class="blk wrap">
+    <h2>Who is training it</h2>
+    <p class="lede">Every block is a training step someone paid electricity for. Share is the
+      proportion of blocks each miner has produced — not a promise of future reward, just what
+      has happened so far.</p>
+    <div class="tblwrap">
+      <table id="minertable">
+        <thead><tr>
+          <th>address</th><th class="r">blocks</th><th class="r">deltas</th>
+          <th>share</th><th class="r">balance</th><th class="r">last seen</th>
+        </tr></thead>
+        <tbody id="minerbody">
+          <tr><td colspan="6" class="empty">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="blk wrap">
+    <h2>Don't take our word for it</h2>
+    <p class="lede">Everything above comes from one node. That node has no special authority —
+      run your own and it must land on the identical numbers, or the network rejects it.</p>
+    <p class="verify">genesis id (state root)<br><b>a597316003dbf12122b7cc6f39226ce7c8f7a871e58e7ddf364e56b08102527b</b></p>
+    <p class="verify" id="src" style="margin-top:18px"></p>
+  </section>
+
+</main>
+
+<footer><div class="wrap">
+  <p style="margin:0;max-width:70ch">Devnet figures. Treat rewards as testnet play — the chain
+    resets while the protocol is still moving, and it has done so more than once.</p>
+  <div class="flinks">
+    <a href="/">Home</a>
+    <a href="technical.html">Technical brief</a>
+    <a href="https://github.com/sestrian/sestrian">GitHub</a>
+    <a href="https://github.com/sestrian/sestrian/blob/main/docs/joining.md">Join</a>
+  </div>
+</div></footer>
+
+<script src="chain.js"></script>
+<script>
+(function(){
+  "use strict";
+  var F = SestrianChain.fmt;
+  var $ = function(id){ return document.getElementById(id); };
+
+  function txt(id, s, warn){
+    var el = $(id); if(!el) return;
+    if(el.textContent !== s) el.textContent = s;
+    if(warn !== undefined) el.classList.toggle("warn", !!warn);
+  }
+
+  function pageGrid(m){
+    var host = $("pagegrid");
+    var total = m.pages_total, experts = m.expert_pages, active = m.expert_pages_active;
+    if(total == null){ host.textContent = ""; return; }
+    // pages_total counts the base page plus the experts; render base first so
+    // the grid reads the same way the page table is laid out.
+    var base = Math.max(0, total - (experts || 0));
+    var want = [];
+    for(var i=0;i<base;i++) want.push("base");
+    for(var j=0;j<(experts||0);j++) want.push(j < active ? "on" : "");
+    if(host.childElementCount !== want.length){
+      host.textContent = "";
+      want.forEach(function(){ host.appendChild(document.createElement("span")); });
+    }
+    Array.prototype.forEach.call(host.children, function(el, i){
+      el.className = "pg " + want[i];
+    });
+    host.setAttribute("aria-label",
+      total + " pages: " + base + " base, " + active + " of " + (experts||0) + " expert pages active");
+  }
+
+  function miners(rows){
+    var body = $("minerbody");
+    if(!rows || !rows.length){
+      body.innerHTML = '<tr><td colspan="6" class="empty">No miners reported.</td></tr>';
+      return;
+    }
+    var top = rows.slice().sort(function(a,b){
+      return (b.blocks_proposed||0) - (a.blocks_proposed||0);
+    });
+    body.textContent = "";
+    top.forEach(function(r){
+      var share = r.share_pct == null ? 0 : r.share_pct;
+      var tr = document.createElement("tr");
+      // built with DOM calls, not innerHTML: addresses come off the wire and
+      // must never be interpreted as markup
+      function cell(text, cls){
+        var td = document.createElement("td");
+        if(cls) td.className = cls;
+        td.textContent = text;
+        return td;
+      }
+      tr.appendChild(cell(F.short(r.address, 10, 6), "addr"));
+      tr.appendChild(cell(F.n.format(r.blocks_proposed || 0), "r"));
+      tr.appendChild(cell(F.n.format(r.deltas || 0), "r"));
+
+      var td = document.createElement("td"); td.className = "barcell";
+      var wrap = document.createElement("div"); wrap.className = "barwrap";
+      var fill = document.createElement("div"); fill.className = "barfill";
+      fill.style.width = Math.max(0, Math.min(100, share)) + "%";
+      wrap.appendChild(fill); td.appendChild(wrap);
+      var lbl = document.createElement("div");
+      lbl.className = "note"; lbl.style.marginTop = "6px";
+      lbl.textContent = share.toFixed(1) + "%";
+      td.appendChild(lbl); tr.appendChild(td);
+
+      tr.appendChild(cell(F.ses(r.balance) + " SES", "r"));
+      tr.appendChild(cell(r.last_height == null ? "—" : "#" + F.n.format(r.last_height), "r"));
+      body.appendChild(tr);
+    });
+  }
+
+  SestrianChain.load(function(d, meta){
+    if(!meta.ok || !d){
+      txt("state", "Chain unreadable from this page");
+      $("dot").classList.add("cold");
+      $("minerbody").innerHTML =
+        '<tr><td colspan="6" class="empty">No data. That is a problem with this site, not the network.</td></tr>';
+      $("src").textContent = "Could not load chain.json, and no live endpoint answered.";
+      return;
+    }
+    var m = d.model || {};
+    txt("height", F.n.format(d.height));
+    txt("head", d.head || "—");
+    txt("root", m.model_root || "—");
+    var sup = $("supply");
+    sup.textContent = F.ses(d.supply);
+    var u = document.createElement("span"); u.className = "u"; u.textContent = "SES";
+    sup.appendChild(u);
+    txt("peers", F.n.format(d.peers));
+    txt("miners", d.miners == null ? "–" : F.n.format(d.miners));
+    txt("params", m.dim ? F.compact(m.dim) : "–");
+    txt("pages", m.expert_pages == null ? "–" : m.expert_pages_active + "/" + m.expert_pages);
+    txt("growth", m.growth_events == null ? "–" : F.n.format(m.growth_events));
+    // the two numbers that mean somebody's electricity is being wasted
+    txt("stale", d.stale_deltas == null ? "–" : F.n.format(d.stale_deltas), d.stale_deltas > 0);
+    txt("quota", d.quota_rejects == null ? "–" : F.n.format(d.quota_rejects), d.quota_rejects > 0);
+    pageGrid(m);
+    miners(d.miner_rows);
+
+    var dot = $("dot");
+    if(meta.live){
+      dot.classList.remove("cold");
+      txt("state", "Live · devnet");
+      $("src").textContent = "Polled from " + SestrianChain.LIVE +
+        " every " + (SestrianChain.POLL/1000) + "s.";
+    } else {
+      dot.classList.add("cold");
+      txt("state", "Snapshot · devnet");
+      $("src").textContent = "Captured " + F.ago(meta.at) +
+        ", when this page was last built. Live polling begins the moment the node has an https endpoint.";
+    }
+  });
+})();
+</script>
+</body>
+</html>

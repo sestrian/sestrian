@@ -37,11 +37,18 @@
   header{position:fixed;inset:0 0 auto 0;z-index:50;mix-blend-mode:difference;color:#fff}
   .bar{display:flex;justify-content:space-between;align-items:center;padding:22px clamp(20px,4vw,64px)}
   .logo{font-weight:900;font-stretch:125%;letter-spacing:.06em;font-size:19px;text-transform:uppercase}
-  .bar nav{display:flex;gap:clamp(16px,3vw,38px);align-items:center}
+  .bar nav{display:flex;gap:clamp(12px,2.2vw,30px);align-items:center;flex-wrap:wrap;justify-content:flex-end}
   .bar nav a{font-family:var(--mono);font-size:13px;letter-spacing:.12em;text-transform:uppercase}
   .bar nav a:hover{color:var(--signal)}
   header .join{border:1px solid currentColor;padding:9px 18px}
   header .join:hover{background:#fff;color:#000}
+  /* a subdomain that isn't deployed yet must not look clickable */
+  header nav a.soon{opacity:.42;cursor:not-allowed}
+  header nav a.soon:hover{color:inherit}
+  header nav a.soon::after{content:" soon";font-size:10px;letter-spacing:.16em}
+  /* five items will not fit a phone; GitHub is the one already reachable from
+     the footer, so it is the one that goes */
+  @media(max-width:720px){header nav a.gh{display:none}}
 
   /* ── hero ────────────────────────────────────────── */
   .hero{position:relative;min-height:100svh;display:flex;align-items:flex-end;overflow:hidden}
@@ -232,7 +239,10 @@
     <a class="logo" href="/">Sestrian</a>
     <nav aria-label="Main">
       <a href="technical.html" data-scramble>Technical brief</a>
-      <a href="https://github.com/sestrian/sestrian" data-scramble>GitHub</a>
+      <a href="network.html" data-scramble>The network</a>
+      <a href="https://chat.sestrian.com" data-endpoint="chat" class="soon"
+         aria-disabled="true" tabindex="-1" data-scramble>Chat</a>
+      <a class="gh" href="https://github.com/sestrian/sestrian" data-scramble>GitHub</a>
       <a class="join" href="#join" data-scramble>Join the devnet</a>
     </nav>
   </div>
@@ -530,6 +540,7 @@ $ <span class="s">scripts/install.sh --mine</span>   <span class="c"># or plain 
   <p class="fin">Sestrian · built in public · 2026</p>
 </div></footer>
 
+<script src="chain.js"></script>
 <script>
 (function(){
   "use strict";
@@ -644,129 +655,55 @@ $ <span class="s">scripts/install.sh --mine</span>   <span class="c"># or plain 
   });
 
   /* ── live devnet viewer ──────────────────────────────────────────────
-     Two sources, deliberately. chain.json is baked into the deploy, so the
-     panel shows real numbers the instant the page loads and never depends on
-     a node being reachable from the visitor's browser. Then we try the live
-     API and upgrade in place if it answers.
-
-     The live call WILL fail until an https endpoint exists: this page is
-     https, and a browser refuses to fetch http:// from it outright — the
-     request never leaves, and it doesn't even surface as a CORS error. That
-     is why the baked snapshot is the floor and live is the bonus, rather
-     than the other way round.                                            */
-  (function(){
-    var grid=document.getElementById("ch-grid");
-    if(!grid) return;
-    var LIVE="https://api.sestrian.com";     // cloudflared -> seed :8080
-    var POLL=20000;
-    var $=function(id){return document.getElementById(id);};
-
-    var nf=new Intl.NumberFormat("en-US");
-    function compact(n){
-      if(!isFinite(n)) return "–";
-      if(n>=1e9) return (n/1e9).toFixed(2).replace(/\.?0+$/,"")+"B";
-      if(n>=1e6) return (n/1e6).toFixed(1).replace(/\.0$/,"")+"M";
-      if(n>=1e3) return (n/1e3).toFixed(1).replace(/\.0$/,"")+"K";
-      return String(n);
-    }
-    function set(id,txt,warn){
-      var el=$(id); if(!el) return;
-      if(el.textContent!==txt) el.textContent=txt;
+     Loading lives in chain.js, shared with network.html — two copies of the
+     snapshot/live logic would drift the moment either page changed. This is
+     only the home page's compact rendering; the full view is its own page. */
+  if(document.getElementById("ch-grid")){
+    var F=SestrianChain.fmt;
+    var g=function(id){return document.getElementById(id);};
+    var put=function(id,str,warn){
+      var el=g(id); if(!el) return;
+      if(el.textContent!==str) el.textContent=str;
       if(warn!==undefined) el.classList.toggle("warn",!!warn);
-    }
-    function ago(iso){
-      var s=Math.max(0,(Date.now()-new Date(iso).getTime())/1000);
-      if(s<90) return Math.round(s)+"s ago";
-      if(s<5400) return Math.round(s/60)+" min ago";
-      if(s<172800) return Math.round(s/3600)+" h ago";
-      return Math.round(s/86400)+" days ago";
-    }
-
-    function render(d,meta){
+    };
+    SestrianChain.load(function(d,meta){
+      if(!meta.ok||!d){
+        g("ch-dot").classList.add("cold");
+        put("ch-state","devnet \u00b7 unreachable");
+        g("ch-stamp").innerHTML="Could not read the chain from this page. That is a "+
+          "problem with this site, not the network \u2014 "+
+          '<a href="network.html">try the network page</a>.';
+        return;
+      }
       var m=d.model||{};
-      set("ch-height", nf.format(d.height));
-      // supply is in base units (1e9 per SES), same as the wallet CLI prints
-      $("ch-supply").innerHTML = nf.format(Math.round((d.supply||0)/1e9)) +
-        '<span class="u">SES</span>';
-      set("ch-peers", nf.format(d.peers));
-      set("ch-miners", d.miners==null ? "–" : nf.format(d.miners));
-      set("ch-params", m.dim ? compact(m.dim) : "–");
-      set("ch-pages", m.expert_pages==null ? "–"
-            : m.expert_pages_active+"/"+m.expert_pages);
-      set("ch-growth", m.growth_events==null ? "–" : nf.format(m.growth_events));
-      // the number that means "miners are wasting their work" — call it out
-      set("ch-stale", d.stale_deltas==null ? "–" : nf.format(d.stale_deltas),
-          d.stale_deltas>0);
-      set("ch-head", d.head || "—");
-      set("ch-root", m.model_root || "—");
+      put("ch-height",F.n.format(d.height));
+      var sup=g("ch-supply"); sup.textContent=F.ses(d.supply);
+      var u=document.createElement("span"); u.className="u"; u.textContent="SES";
+      sup.appendChild(u);
+      put("ch-peers",F.n.format(d.peers));
+      put("ch-miners",d.miners==null?"\u2013":F.n.format(d.miners));
+      put("ch-params",m.dim?F.compact(m.dim):"\u2013");
+      put("ch-pages",m.expert_pages==null?"\u2013":m.expert_pages_active+"/"+m.expert_pages);
+      put("ch-growth",m.growth_events==null?"\u2013":F.n.format(m.growth_events));
+      /* non-zero means somebody is mining and earning nothing for it */
+      put("ch-stale",d.stale_deltas==null?"\u2013":F.n.format(d.stale_deltas),d.stale_deltas>0);
+      put("ch-head",d.head||"\u2014");
+      put("ch-root",m.model_root||"\u2014");
 
-      var dot=$("ch-dot");
+      var dot=g("ch-dot");
       if(meta.live){
         dot.classList.remove("cold");
-        set("ch-state","devnet · live");
-        $("ch-stamp").innerHTML='Polling the seed node every '+(POLL/1000)+
-          's. Cross-check any figure yourself: <a href="'+LIVE+'/status">'+
-          LIVE.replace(/^https:\/\//,"")+'/status</a>';
+        put("ch-state","devnet \u00b7 live");
+        g("ch-stamp").innerHTML="Updating every "+(SestrianChain.POLL/1000)+
+          's. <a href="network.html">See the full network view \u2192</a>';
       } else {
         dot.classList.add("cold");
-        set("ch-state","devnet · last snapshot");
-        $("ch-stamp").innerHTML='Captured '+ago(meta.at)+' when this page was built — '+
-          'live polling needs an https endpoint for the node. '+
-          '<a href="https://github.com/sestrian/sestrian">Run a node</a> to see it tick.';
+        put("ch-state","devnet \u00b7 last snapshot");
+        g("ch-stamp").innerHTML="Captured "+F.ago(meta.at)+" when this page was built. "+
+          '<a href="network.html">See the full network view \u2192</a>';
       }
-    }
-
-    function unavailable(){
-      $("ch-dot").classList.add("cold");
-      set("ch-state","devnet · unreachable");
-      $("ch-stamp").innerHTML="Could not read the chain from this page. That is a "+
-        "problem with this site, not the network — "+
-        '<a href="https://github.com/sestrian/sestrian">check a node directly</a>.';
-    }
-
-    // 1. baked snapshot: instant, always same-origin
-    fetch("chain.json",{cache:"no-store"})
-      .then(function(r){return r.ok?r.json():Promise.reject();})
-      .then(function(s){ if(s&&s.ok) render(s.status,{live:false,at:s.captured_at});
-                         else unavailable(); })
-      .catch(unavailable)
-      .finally(goLive);
-
-    // 2. upgrade to live if the node is reachable over https
-    function goLive(){
-      var tries=0;
-      (function poll(){
-        var ctl=new AbortController();
-        var t=setTimeout(function(){ctl.abort();},6000);
-        fetch(LIVE+"/status",{signal:ctl.signal,cache:"no-store"})
-          .then(function(r){return r.ok?r.json():Promise.reject();})
-          .then(function(d){
-            tries=0;
-            return fetch(LIVE+"/miners",{cache:"no-store"})
-              .then(function(r){return r.ok?r.json():null;})
-              .catch(function(){return null;})
-              .then(function(ms){
-                // /miners answers {head_height, miners[], …}; tolerate a bare
-                // array too. Reading it as an array outright silently rendered
-                // a dash where the miner count should be.
-                var lst=(ms&&!Array.isArray(ms))?ms.miners:ms;
-                if(Array.isArray(lst)) d.miners=lst.length;
-                render(d,{live:true});
-              });
-          })
-          .catch(function(){
-            // Stay on the snapshot and stop hammering an endpoint that isn't
-            // there. Three strikes is enough to tell "not deployed" from "one
-            // dropped request".
-            if(++tries>=3) return;
-          })
-          .finally(function(){
-            clearTimeout(t);
-            if(tries<3) setTimeout(poll,POLL);
-          });
-      })();
-    }
-  })();
+    });
+  }
 })();
 </script>
 </body>
