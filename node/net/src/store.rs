@@ -150,6 +150,11 @@ impl Store {
         true
     }
 
+    /// Cheap existence check — readiness tests must not load 92MB files.
+    pub fn has_payload(&self, txid: &str) -> bool {
+        self.dir.join("payloads").join(format!("{txid}.json")).exists()
+    }
+
     pub fn get_payload(&self, txid: &str) -> Option<Payload> {
         // monolithic body first; if it's gone, reconstruct from erasure shards
         // (the DA layer) — so losing a body file never blocks replay/sync as

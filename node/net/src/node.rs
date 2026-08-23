@@ -877,6 +877,21 @@ impl Node {
         if self.blocks_full.contains_key(&bh) {
             return false;
         }
+        // Bodies live on DISK between fetch and apply; RAM holds only what is
+        // actively validating. During the quota-fork heal ~80 fetched 92MB
+        // bodies accumulated in this map while their blocks waited for
+        // ancestors, and the OOM killer took an anchor down. Preload from the
+        // store here; the post-apply eviction below returns them to disk-only.
+        for t in &sb.txs {
+            if let Some(tc) = t.to_core() {
+                let id = tc.txid();
+                if !self.payloads.contains_key(&id) {
+                    if let Some(p) = self.store.get_payload(&id) {
+                        self.payloads.insert(id, p);
+                    }
+                }
+            }
+        }
         let Some(block) = sb.to_core(&self.payloads) else {
             // body missing: try to reconstruct it from erasure shards we already
             // hold, and if we can't, ask ALL peers for its shards (any one may
@@ -884,7 +899,7 @@ impl Node {
             let missing: Vec<String> = sb.txs.iter()
                 .filter_map(|t| t.to_core().map(|tc| tc.txid()))
                 .filter(|id| {
-                    if self.payloads.contains_key(id) {
+                    if self.payloads.contains_key(id) || self.store.has_payload(id) {
                         return false;
                     }
                     if let Some(p) = self.store.reconstruct_payload(id) {
@@ -989,7 +1004,9 @@ impl Node {
         let ready: Vec<String> = self.pending.iter()
             .filter(|(_, (sb, _))| {
                 sb.txs.iter().all(|t| t.to_core()
-                    .map(|tc| self.payloads.contains_key(&tc.txid()))
+                    .map(|tc| { let id = tc.txid();
+                        self.payloads.contains_key(&id)
+                            || self.store.has_payload(&id) })
                     .unwrap_or(false))
                 && self.tree.blocks.contains_key(&sb.header.prev_hash)
             })
@@ -1444,7 +1461,8 @@ pub async fn run(
                     let mut want: Vec<String> = node.pending.values()
                         .flat_map(|(sb, _)| sb.txs.iter())
                         .filter_map(|t| t.to_core().map(|tc| tc.txid()))
-                        .filter(|id| !node.payloads.contains_key(id))
+                        .filter(|id| !node.payloads.contains_key(id)
+                                && !node.store.has_payload(id))
                         .collect();
                     want.extend(node.want_deltas.keys().cloned());
                     want.sort();
@@ -2105,9 +2123,12 @@ pub async fn run(
                                 // the genesis key is raw weights, not a Payload —
                                 // reconstructing it is the bootstrap path's job
                                 if b.txid != crate::store::Store::GENESIS_DA_KEY
-                                    && !node.payloads.contains_key(&b.txid) {
+                                    && !node.payloads.contains_key(&b.txid)
+                                    && !node.store.has_payload(&b.txid) {
                                     if let Some(p) = node.store.reconstruct_payload(&b.txid) {
-                                        node.payloads.insert(b.txid.clone(), p);
+                                        // DISK, not RAM: install() preloads it
+                                        // when the block is ready to validate
+                                        node.store.put_payload(&b.txid, &p);
                                     }
                                 }
                                 // an announced delta whose body just completed
@@ -2115,7 +2136,9 @@ pub async fn run(
                                 if let Some((wtx, _)) = node.want_deltas
                                     .remove(&b.txid) {
                                     match (wtx.to_core(),
-                                           node.payloads.get(&b.txid).cloned()) {
+                                           node.payloads.get(&b.txid).cloned()
+                                               .or_else(|| node.store
+                                                   .get_payload(&b.txid))) {
                                         (Some(t), Some(p)) => {
                                             info!(txid = &b.txid[..12],
                                                   "announced delta body \
@@ -2144,7 +2167,8 @@ pub async fn run(
                                 let mut still: Vec<String> = node.pending.values()
                                     .flat_map(|(sb, _)| sb.txs.iter())
                                     .filter_map(|t| t.to_core().map(|tc| tc.txid()))
-                                    .filter(|id| !node.payloads.contains_key(id))
+                                    .filter(|id| !node.payloads.contains_key(id)
+                                            && !node.store.has_payload(id))
                                     .collect();
                                 still.extend(node.want_deltas.keys().cloned());
                                 still.sort();
