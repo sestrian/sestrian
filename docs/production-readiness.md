@@ -165,6 +165,14 @@ token-gated/disabled.
 
 ## Remaining — testnet-phase extensions (need a multi-party network)
 The single-operator devnet can't validate these; the testnet is their gate.
+- DEEP-REORG LIMIT (found live, quota-fork incident): a node cannot reorg onto
+  a rival fork whose divergence point is below its state prune window — the
+  fork-point state is gone, so the rival chain can never validate locally.
+  Same property as Bitcoin pruned nodes; the resolution is a re-sync from
+  genesis (or, later, from a checkpoint). The heal machinery (walk-back,
+  budgeted shard fetch, age-based pending) handles any fork WITHIN the prune
+  window automatically; beyond it, operator re-sync. prune_depth is therefore
+  a consensus-adjacent availability knob, not just a memory knob.
 - checkpoint sync: joining today replays every block from genesis, which is why
   ARCHIVE nodes (--da-retain-blocks 0, the anchors) must retain every body's
   shards forever. A verified state-snapshot join would let the whole network
