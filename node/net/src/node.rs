@@ -1977,7 +1977,11 @@ pub async fn run(
                             let known_before =
                                 node.tree.blocks.len() + node.pending.len();
                             for sb in response.blocks {
-                                node.install(sb, None, &mut swarm);
+                                // attribute to the responding peer: a block whose
+                                // body is missing then PARKS as pending (and the
+                                // refetch machinery drains it) instead of being
+                                // dropped to wait for a whole re-serve cycle
+                                node.install(sb, Some(peer), &mut swarm);
                             }
                             node.retry_pending(&mut swarm);
                             let learned = node.tree.blocks.len()
