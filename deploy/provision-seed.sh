@@ -95,7 +95,12 @@ else
         rm -rf $APP/data $APP/genesis.bin
         rm -f "$STAMP"
     fi
-    python3 -m venv $APP/.venv
+    # a stale venv (its interpreter replaced by an OS python upgrade) leaves
+    # pip un-executable — health-check and recreate rather than trusting it
+    if ! $APP/.venv/bin/python -c '' 2>/dev/null; then
+        rm -rf $APP/.venv
+        python3 -m venv $APP/.venv
+    fi
     $APP/.venv/bin/pip install -q --index-url https://download.pytorch.org/whl/cpu torch
     $APP/.venv/bin/pip install -q numpy pynacl
     ( cd $APP && .venv/bin/python -m client.make_genesis \
