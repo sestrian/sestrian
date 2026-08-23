@@ -1492,15 +1492,22 @@ pub async fn run(
                     // (b) announced deltas still wanted. One shard-request per
                     // peer per round is cheap; responses are byte-budgeted.
                     node.want_deltas.retain(|_, (_, dl)| *dl > now());
-                    let mut want: Vec<String> = node.pending.values()
-                        .flat_map(|(sb, _)| sb.txs.iter())
-                        .filter_map(|t| t.to_core().map(|tc| tc.txid()))
-                        .filter(|id| !node.payloads.contains_key(id)
+                    // LOWEST BLOCK FIRST: application is strictly bottom-up, so
+                    // fetching in txid order stalls the head until the lowest
+                    // body happens to arrive (found live on the fresh rejoin)
+                    let mut by_h: Vec<(u64, String)> = node.pending.values()
+                        .flat_map(|(sb, _)| sb.txs.iter()
+                            .filter_map(|t| t.to_core().map(|tc|
+                                (sb.header.height, tc.txid()))))
+                        .filter(|(_, id)| !node.payloads.contains_key(id)
                                 && !node.store.has_payload(id))
                         .collect();
+                    by_h.sort();
+                    let mut seen_ids = HashSet::new();
+                    let mut want: Vec<String> = by_h.into_iter()
+                        .filter(|(_, id)| seen_ids.insert(id.clone()))
+                        .map(|(_, id)| id).collect();
                     want.extend(node.want_deltas.keys().cloned());
-                    want.sort();
-                    want.dedup();
                     want.truncate(32);
                     if !want.is_empty() {
                         let ps: Vec<PeerId> =
@@ -2249,15 +2256,21 @@ pub async fn run(
                                 // would take hours. Terminates: every response
                                 // either stores a new shard (rotating serve
                                 // cursor) or comes back empty (got=false).
-                                let mut still: Vec<String> = node.pending.values()
-                                    .flat_map(|(sb, _)| sb.txs.iter())
-                                    .filter_map(|t| t.to_core().map(|tc| tc.txid()))
-                                    .filter(|id| !node.payloads.contains_key(id)
-                                            && !node.store.has_payload(id))
+                                let mut by_h: Vec<(u64, String)> = node.pending
+                                    .values()
+                                    .flat_map(|(sb, _)| sb.txs.iter()
+                                        .filter_map(|t| t.to_core().map(|tc|
+                                            (sb.header.height, tc.txid()))))
+                                    .filter(|(_, id)|
+                                        !node.payloads.contains_key(id)
+                                        && !node.store.has_payload(id))
                                     .collect();
+                                by_h.sort();
+                                let mut seen_ids = HashSet::new();
+                                let mut still: Vec<String> = by_h.into_iter()
+                                    .filter(|(_, id)| seen_ids.insert(id.clone()))
+                                    .map(|(_, id)| id).collect();
                                 still.extend(node.want_deltas.keys().cloned());
-                                still.sort();
-                                still.dedup();
                                 still.truncate(32);
                                 if !still.is_empty() {
                                     node.last_shard_req.insert(peer, now());
