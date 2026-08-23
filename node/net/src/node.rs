@@ -402,6 +402,9 @@ pub struct Node {
     pub quota_rejects: u64,
     /// per-peer rotation cursor for serving GENESIS shards one at a time, so a
     /// bootstrapping peer that keeps asking us collects K distinct shards.
+    /// Exponential walk-back step per peer while hunting a fork point below
+    /// our head (batches whose blocks can't connect to anything we know).
+    pub sync_walkback: HashMap<PeerId, u64>,
     /// Rotating serve cursor per (peer, body) — distinct shards per response.
     pub shard_cursor: HashMap<(PeerId, String), usize>,
     /// Announced deltas whose bodies we are fetching by shards: txid ->
@@ -1495,8 +1498,13 @@ pub async fn run(
                                     .map(|(t, _)| now() - t < SYNC_INFLIGHT_TIMEOUT)
                                     .unwrap_or(false);
                                 if !inflight {
-                                    let from = anchor
-                                        .max(node.sync_cursor.get(&p).copied().unwrap_or(0));
+                                    // a set cursor OVERRIDES the anchor: it may
+                                    // point BELOW our head while hunting a fork
+                                    // point (walk-back), or above it (overlap
+                                    // advance) — either way it is the search
+                                    // state, not a floor
+                                    let from = node.sync_cursor.get(&p).copied()
+                                        .unwrap_or(anchor);
                                     node.last_sync_req.insert(p, (now(), from));
                                     info!(peer = %p, from,
                                           "no foreign heads heard — direct sync pull");
@@ -1813,10 +1821,10 @@ pub async fn run(
                                     .map(|(t, _)| now() - t < SYNC_INFLIGHT_TIMEOUT)
                                     .unwrap_or(false);
                                 if !node.tree.blocks.contains_key(&hash) && !inflight {
-                                    let from = node.head_height()
-                                        .min(height).saturating_sub(2)
-                                        .max(node.sync_cursor.get(&propagation_source)
-                                            .copied().unwrap_or(0));
+                                    let from = node.sync_cursor
+                                        .get(&propagation_source).copied()
+                                        .unwrap_or_else(|| node.head_height()
+                                            .min(height).saturating_sub(2));
                                     node.last_sync_req
                                         .insert(propagation_source, (now(), from));
                                     info!(peer = %propagation_source, their_h = height,
@@ -1939,6 +1947,8 @@ pub async fn run(
                                 }
                             }
             let served = response.blocks.len() as u64;
+                            let batch_min_h = response.blocks.iter()
+                                .map(|sb| sb.header.height).min();
                             // "learned" must count blocks parked as PENDING
                             // (payload not yet fetched) — they are new knowledge.
                             // Counting only applied blocks made a pending-wedged
@@ -1959,10 +1969,37 @@ pub async fn run(
                             let last_from = node.last_sync_req.remove(&peer)
                                 .map(|(_, f)| f);
                             let behind = response.head_height > node.head_height();
-                            if learned {
-                                // real progress (or a reorg branch — which always
-                                // teaches new blocks): the overlap anchor is safe
+                            // "floats": every served block sits above anything
+                            // that can CONNECT to our applied chain — its
+                            // ancestors are missing. Parking such blocks as
+                            // pending still counts as "learned", so floats must
+                            // be tested FIRST or the walk-back never triggers.
+                            let floats = batch_min_h
+                                .map_or(false, |m| m > node.head_height() + 1);
+                            if behind && served > 0 && floats {
+                                // the batch floats ABOVE anything we can connect
+                                // to: the peer is on a fork whose divergence
+                                // point is BELOW our head. Walk the request
+                                // start back exponentially until batches
+                                // connect (found live: an anchor pinned its
+                                // cursor at a fork's TIP and pulled orphans
+                                // forever).
+                                let base = last_from
+                                    .unwrap_or_else(|| node.head_height());
+                                let step = node.sync_walkback.entry(peer)
+                                    .or_insert(4);
+                                let cur = base.saturating_sub(*step);
+                                *step = (*step * 2).min(4096);
+                                node.sync_cursor.insert(peer, cur);
+                                warn!(peer = %peer, from = cur,
+                                      batch_min = batch_min_h.unwrap_or(0),
+                                      "sync batch unconnectable — walking back \
+                                       to find the fork point");
+                            } else if learned {
+                                // real progress (or a reorg branch that actually
+                                // connects): the overlap anchor is safe again
                                 node.sync_cursor.remove(&peer);
+                                node.sync_walkback.remove(&peer);
                             } else if behind && served > 0 {
                                 // the peer is ahead but the whole batch was blocks
                                 // we already had: the byte-budgeted window is stuck
@@ -1990,9 +2027,10 @@ pub async fn run(
                                 || (cursor_now.is_some()
                                     && cursor_now != last_from);
                             if behind && served > 0 && moved {
-                                let from = node.head_height()
-                                    .min(response.head_height).saturating_sub(2)
-                                    .max(cursor_now.unwrap_or(0));
+                                let from = cursor_now.unwrap_or_else(||
+                                    node.head_height()
+                                        .min(response.head_height)
+                                        .saturating_sub(2));
                                 node.last_sync_req.insert(peer, (now(), from));
                                 swarm.behaviour_mut().sync.send_request(&peer,
                                     SyncRequest { from_height: from,
@@ -2095,6 +2133,27 @@ pub async fn run(
                             }
                             if got {
                                 node.retry_pending(&mut swarm);
+                                // CHAIN the fetch: this peer just proved it has
+                                // shards — immediately re-ask for whatever is
+                                // still missing instead of waiting for the next
+                                // round tick. A 92MB body needs K bounded
+                                // responses; at one per 180s round a fork heal
+                                // would take hours. Terminates: every response
+                                // either stores a new shard (rotating serve
+                                // cursor) or comes back empty (got=false).
+                                let mut still: Vec<String> = node.pending.values()
+                                    .flat_map(|(sb, _)| sb.txs.iter())
+                                    .filter_map(|t| t.to_core().map(|tc| tc.txid()))
+                                    .filter(|id| !node.payloads.contains_key(id))
+                                    .collect();
+                                still.extend(node.want_deltas.keys().cloned());
+                                still.sort();
+                                still.dedup();
+                                still.truncate(32);
+                                if !still.is_empty() {
+                                    swarm.behaviour_mut().shards.send_request(&peer,
+                                        ShardRequest { txids: still });
+                                }
                             }
                         }
                     }
@@ -2126,8 +2185,8 @@ pub async fn run(
                         .map(|(t, _)| now() - t < SYNC_INFLIGHT_TIMEOUT)
                         .unwrap_or(false);
                     if !inflight {
-                        let from = node.head_height().saturating_sub(8)
-                            .max(node.sync_cursor.get(&peer_id).copied().unwrap_or(0));
+                        let from = node.sync_cursor.get(&peer_id).copied()
+                            .unwrap_or_else(|| node.head_height().saturating_sub(8));
                         node.last_sync_req.insert(peer_id, (now(), from));
                         let req = SyncRequest {
                             from_height: from, count: 64,

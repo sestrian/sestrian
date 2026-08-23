@@ -1003,6 +1003,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         silent_rounds: 0,
         last_sync_req: Default::default(),
         sync_cursor: Default::default(),
+        sync_walkback: Default::default(),
         peers_connected: 0,
         chat_pending: Vec::new(),
         chat_inflight: false,
