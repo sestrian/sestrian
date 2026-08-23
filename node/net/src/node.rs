@@ -407,6 +407,11 @@ pub struct Node {
     pub quota_rejects: u64,
     /// per-peer rotation cursor for serving GENESIS shards one at a time, so a
     /// bootstrapping peer that keeps asking us collects K distinct shards.
+    /// One shard request in flight per peer — unthrottled requests queue past
+    /// the response timeout and the server uploads multi-MB responses nobody
+    /// is waiting for anymore (found live: the heal trickled at ~1 body per
+    /// 5 minutes while EU uploaded discarded 29MB responses in a loop).
+    pub last_shard_req: HashMap<PeerId, f64>,
     /// Exponential walk-back step per peer while hunting a fork point below
     /// our head (batches whose blocks can't connect to anything we know).
     pub sync_walkback: HashMap<PeerId, u64>,
@@ -921,8 +926,13 @@ impl Node {
             if !missing.is_empty() {
                 let peers: Vec<PeerId> = swarm.connected_peers().copied().collect();
                 for p in &peers {
-                    swarm.behaviour_mut().shards
-                        .send_request(p, ShardRequest { txids: missing.clone() });
+                    let busy = self.last_shard_req.get(p)
+                        .map(|t| now() - t < 120.0).unwrap_or(false);
+                    if !busy {
+                        self.last_shard_req.insert(*p, now());
+                        swarm.behaviour_mut().shards
+                            .send_request(p, ShardRequest { txids: missing.clone() });
+                    }
                 }
             }
             if let Some(peer) = from {
@@ -1493,13 +1503,22 @@ pub async fn run(
                     want.dedup();
                     want.truncate(32);
                     if !want.is_empty() {
-                        info!(bodies = want.len(),
-                              "refetching missing delta bodies by shards");
                         let ps: Vec<PeerId> =
                             swarm.connected_peers().copied().collect();
+                        let mut sent = 0;
                         for p in ps {
-                            swarm.behaviour_mut().shards.send_request(&p,
-                                ShardRequest { txids: want.clone() });
+                            let busy = node.last_shard_req.get(&p)
+                                .map(|t| now() - t < 120.0).unwrap_or(false);
+                            if !busy {
+                                node.last_shard_req.insert(p, now());
+                                swarm.behaviour_mut().shards.send_request(&p,
+                                    ShardRequest { txids: want.clone() });
+                                sent += 1;
+                            }
+                        }
+                        if sent > 0 {
+                            info!(bodies = want.len(), peers = sent,
+                                  "refetching missing delta bodies by shards");
                         }
                     }
                     // MESH-BLINDNESS HEAL: peers are connected but no foreign
@@ -1829,9 +1848,15 @@ pub async fn run(
                                                 .connected_peers().copied()
                                                 .collect();
                                             for p in peers {
-                                                swarm.behaviour_mut().shards
-                                                    .send_request(&p, ShardRequest {
-                                                        txids: vec![txid.clone()] });
+                                                let busy = node.last_shard_req.get(&p)
+                                                    .map(|t| now() - t < 120.0)
+                                                    .unwrap_or(false);
+                                                if !busy {
+                                                    node.last_shard_req.insert(p, now());
+                                                    swarm.behaviour_mut().shards
+                                                        .send_request(&p, ShardRequest {
+                                                            txids: vec![txid.clone()] });
+                                                }
                                             }
                                         }
                                     }
@@ -2106,6 +2131,7 @@ pub async fn run(
                 SwarmEvent::Behaviour(BehaviourEvent::Shards(
                         request_response::Event::OutboundFailure { peer, error, .. })) => {
                     warn!(%peer, %error, "shard request failed");
+                    node.last_shard_req.remove(&peer);
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Shards(
                         request_response::Event::InboundFailure { peer, error, .. })) => {
@@ -2167,6 +2193,7 @@ pub async fn run(
                         }
                         // store fetched shards; reconstruct any body now >= K
                         request_response::Message::Response { response, .. } => {
+                            node.last_shard_req.remove(&peer);
                             let mut got = false;
                             info!(bodies = response.bodies.len(),
                                   "shard response received");
@@ -2233,6 +2260,7 @@ pub async fn run(
                                 still.dedup();
                                 still.truncate(32);
                                 if !still.is_empty() {
+                                    node.last_shard_req.insert(peer, now());
                                     swarm.behaviour_mut().shards.send_request(&peer,
                                         ShardRequest { txids: still });
                                 }
