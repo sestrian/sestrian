@@ -917,12 +917,23 @@ impl Node {
                 }
             }
             if let Some(peer) = from {
-                let req = SyncRequest {
-                    from_height: sb.header.height.saturating_sub(1),
-                    count: 32,
-                    want_genesis: false,
-                };
-                swarm.behaviour_mut().sync.send_request(&peer, req);
+                // GATED like every other request site: an ungated per-block
+                // fallback floods the peer with concurrent syncs, and their
+                // interleaved responses corrupt the per-peer walk-back state
+                // (last_from no longer matches the response being processed —
+                // found live as a from=0 loop chasing tip-height orphans).
+                let inflight = self.last_sync_req.get(&peer)
+                    .map(|(t, _)| now() - t < SYNC_INFLIGHT_TIMEOUT)
+                    .unwrap_or(false);
+                if !inflight {
+                    let fh = sb.header.height.saturating_sub(1);
+                    self.last_sync_req.insert(peer, (now(), fh));
+                    swarm.behaviour_mut().sync.send_request(&peer, SyncRequest {
+                        from_height: fh,
+                        count: 32,
+                        want_genesis: false,
+                    });
+                }
                 self.queue_pending(bh, sb, peer);
             }
             return false;
