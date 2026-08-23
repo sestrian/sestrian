@@ -199,7 +199,7 @@ jobs:
           cache-dependency-glob: requirements-dev.txt
       - name: pytest
         run: |
-          uv run --python 3.11 -r requirements-dev.txt \
+          uv run --python 3.11 --with-requirements requirements-dev.txt \
             python -m pytest tests/ -q
 
   # Two nodes + two CPU trainers on the toy model must produce blocks and

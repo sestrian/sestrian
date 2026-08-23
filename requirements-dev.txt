@@ -1,8 +1,8 @@
 # Pinned dev/test dependencies for the Python reference (the rig) + tests.
 # The rig uses 3.10+ syntax; run on Python >= 3.11.
 #
-#   uv run --python 3.11 -r requirements-dev.txt python -m pytest tests/ -q
-#   uv run --python 3.11 -r requirements-dev.txt python -m scripts.golden_vectors
+#   uv run --python 3.11 --with-requirements requirements-dev.txt python -m pytest tests/ -q
+#   uv run --python 3.11 --with-requirements requirements-dev.txt python -m scripts.golden_vectors
 numpy>=1.26,<3
 pynacl>=1.5
 py_ecc>=6,<8
