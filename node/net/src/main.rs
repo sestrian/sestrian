@@ -111,7 +111,16 @@ const DEVNET: NetworkParams = NetworkParams {
     genesis_model: "small-moe",
     genesis_seed: 20260822,
     genesis_url: "https://github.com/sestrian/sestrian/releases/download/devnet-genesis-2/genesis.bin.zst",
-    bootstrap: "/ip4/169.58.211.248/udp/9800/quic-v1,/ip4/13.140.32.27/udp/9800/quic-v1",
+    // Names first, then the literal IPs they currently point at. The names are
+    // what let an anchor move hosts — repoint DNS instead of cutting a release
+    // and hoping everyone upgrades. The IPs stay as a floor so this build still
+    // bootstraps before those records exist, and so a DNS outage cannot isolate
+    // the network. Dials run in parallel; a name that does not resolve is just
+    // one failed attempt among several.
+    bootstrap: "/dns4/anchor1.sestrian.com/udp/9800/quic-v1,\
+                /dns4/anchor2.sestrian.com/udp/9800/quic-v1,\
+                /ip4/169.58.211.248/udp/9800/quic-v1,\
+                /ip4/13.140.32.27/udp/9800/quic-v1",
     block_interval: 180.0,
     spec: (6, 512, 2048, 8, 16, 6_628_352),   // == client SMALL_MOE_CFG
     retarget_window: 16,
@@ -889,6 +898,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             cfg.max_connection_data = 6_000_000;
             cfg
         })
+        // Resolve /dns4 anchors. An anchor named in DNS can move to another
+        // host without a binary release; a baked IP cannot, and every node
+        // still running the old build would quietly never find the network.
+        .with_dns()?
         .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)?
         .with_behaviour(|key, relay_client| {
             node::behaviour(key, relay_client, relay_server)

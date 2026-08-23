@@ -155,6 +155,38 @@ async fn inference(State(api): State<Api>, Json(b): Json<Value>) -> Json<Value> 
     ask(&api.tx, |o| ApiCmd::SubmitAccountTx(tag("inference", b), o)).await
 }
 
+/// Routes any origin may read from a browser.
+///
+/// Read-only chain facts, all of them derivable by replaying the chain — there
+/// is nothing here a visitor could not compute from a node of their own. The
+/// mutating and operator routes are deliberately absent: they must stay
+/// same-origin so a page on another site cannot drive somebody's node.
+const PUBLIC_READS: [&str; 5] = ["/status", "/metrics", "/chain", "/miners", "/data/registry"];
+
+/// Allow cross-origin reads of the public routes.
+///
+/// Without this a dashboard on any other host — sestrian.com included — gets
+/// the response and then has it withheld by the browser. Serving the node over
+/// https does NOT fix that; CORS is a separate refusal from mixed content, and
+/// solving one without the other still leaves the page blank.
+///
+/// `*` rather than a named origin on purpose: these are public facts, and any
+/// operator's own dashboard should work without us curating a list. Requests
+/// carry no cookies and credentials are never allowed, so `*` grants a reader
+/// nothing it could not get with curl.
+async fn cors(req: axum::extract::Request,
+              next: axum::middleware::Next) -> axum::response::Response {
+    let public = PUBLIC_READS.contains(&req.uri().path());
+    let mut res = next.run(req).await;
+    if public {
+        let h = res.headers_mut();
+        h.insert("access-control-allow-origin", "*".parse().unwrap());
+        // let a browser cache the permission rather than re-ask every poll
+        h.insert("access-control-max-age", "86400".parse().unwrap());
+    }
+    res
+}
+
 pub async fn run(bind: String, port: u16, admin_token: Option<String>,
                  tx: mpsc::Sender<ApiCmd>) {
     let guarded = admin_token.is_some();
@@ -173,6 +205,7 @@ pub async fn run(bind: String, port: u16, admin_token: Option<String>,
         .route("/data/challenge", post(data_challenge))
         .route("/data/vote", post(data_vote))
         .route("/inference", post(inference))
+        .layer(axum::middleware::from_fn(cors))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
         .with_state(Api { tx, admin_token });
     // retry the bind: fast restarts leave the old socket lingering briefly, and
@@ -381,5 +414,27 @@ mod api_auth_tests {
         assert!(authorized(&a, &hdr(Some("s3cret"))), "bare token accepted");
         assert!(!authorized(&a, &hdr(Some("Bearer wrong"))), "wrong token denied");
         assert!(!authorized(&a, &hdr(None)), "missing header denied");
+    }
+}
+
+#[cfg(test)]
+mod cors_tests {
+    use super::*;
+
+    /// The allow-list must never quietly grow to include a route that changes
+    /// state or needs the operator token. Asserting membership both ways so
+    /// adding a route to PUBLIC_READS is a deliberate act with a failing test
+    /// behind it, not a one-word edit nobody reviews.
+    #[test]
+    fn only_read_only_routes_are_public() {
+        for r in ["/status", "/metrics", "/chain", "/miners", "/data/registry"] {
+            assert!(PUBLIC_READS.contains(&r), "{r} should be publicly readable");
+        }
+        for r in ["/chat", "/upload", "/transfer", "/inference",
+                  "/data/submit", "/data/challenge", "/data/vote", "/balance", "/"] {
+            assert!(!PUBLIC_READS.contains(&r),
+                    "{r} must NOT be cross-origin readable — it mutates state, \
+                     needs the operator token, or exposes an account");
+        }
     }
 }
