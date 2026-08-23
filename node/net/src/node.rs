@@ -313,6 +313,13 @@ pub struct NodeConfig {
     pub seconds: f64,               // 0 = run forever
     pub peers: String,              // configured peers — re-dialed when lost
     pub data_refs: Vec<String>,     // rev 5: staked corpora this miner names on its deltas
+    /// DA retention: delete a body's shards once its block is this deep
+    /// (0 = archive node, keep everything). Shard-zone retention is LINEAR
+    /// growth — at retarget-window quotas it filled a founder disk in a day —
+    /// so home nodes prune to a window and the anchors archive. A pruned node
+    /// serves catch-up only inside its window; joining from genesis leans on
+    /// the archive anchors until checkpoint sync exists (tracked).
+    pub da_retain_blocks: u64,
 }
 
 pub struct Node {
@@ -320,6 +327,8 @@ pub struct Node {
     pub store: Store,
     pub key: core::Key,
     pub blocks_full: HashMap<String, StoredBlock>,
+    /// height up to which DA retention has already deleted old bodies
+    pub da_pruned_to: u64,
     pub payloads: HashMap<String, Payload>,       // txid -> compressed payload
     pub delta_pool: HashMap<String, core::BackpropTx>,
     /// rev 7: held-out-loss scores from OUR trainer for pool deltas (txid ->
@@ -1077,6 +1086,31 @@ impl Node {
     /// while every body stays reconstructable (locally from K+2 shards, or from
     /// peers via the shard exchange). Prunes exactly the block at the frontier.
     fn prune_old_bodies(&mut self, head_h: u64) {
+        // PRUNED-NODE RETENTION (opt-in via --da-retain-blocks): once a block
+        // is deeper than the window, delete its bodies' shards entirely.
+        // Shard-zone retention is linear disk growth and filled a founder
+        // machine within a day of the first quota rise. Archive nodes
+        // (retain = 0, the anchors) keep serving deep history to joiners.
+        if self.cfg.da_retain_blocks > 0 {
+            let floor = head_h.saturating_sub(self.cfg.da_retain_blocks);
+            if floor > self.da_pruned_to {
+                let doomed: Vec<String> = self.blocks_full.values()
+                    .filter(|sb| sb.header.height > self.da_pruned_to
+                            && sb.header.height <= floor)
+                    .flat_map(|sb| sb.txs.iter())
+                    .filter_map(|t| t.to_core().map(|tc| tc.txid()))
+                    .collect();
+                if !doomed.is_empty() {
+                    info!(bodies = doomed.len(), floor,
+                          "DA retention: deleting shard sets beyond the window");
+                }
+                for txid in doomed {
+                    self.store.delete_body_and_shards(&txid);
+                    self.payloads.remove(&txid);
+                }
+                self.da_pruned_to = floor;
+            }
+        }
         const BODY_WINDOW: u64 = 16;
         let frontier = match head_h.checked_sub(BODY_WINDOW + 1) {
             Some(f) if f > 0 => f,

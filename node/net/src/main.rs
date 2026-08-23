@@ -272,6 +272,11 @@ struct Args {
     external_address: String, // advertise a known public multiaddr
     #[arg(long, default_value_t = 8)]
     prune_depth: u64,
+    /// DA retention window in blocks: shard sets for bodies deeper than this
+    /// are DELETED (pruned node). 0 = archive node, keep everything — run the
+    /// public anchors this way so joiners can always fetch deep history.
+    #[arg(long, default_value_t = 0)]
+    da_retain_blocks: u64,
     /// shared round-clock origin (epoch seconds) — aligns round timing (and
     /// the sortition politeness ladder) across machines; 0 = process start
     #[arg(long, default_value_t = 0.0)]
@@ -963,6 +968,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         store,
         key: consensus_key,
         blocks_full,
+        da_pruned_to: 0,
         payloads,
         delta_pool: Default::default(),
         delta_scores: Default::default(),
@@ -979,6 +985,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             peers: args.peers.clone(),
             data_refs: args.data_refs.split(',')
                 .map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+            da_retain_blocks: args.da_retain_blocks,
         },
         topic,
         bridge_tx: bridge_cmd_tx,

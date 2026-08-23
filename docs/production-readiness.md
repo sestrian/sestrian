@@ -165,6 +165,12 @@ token-gated/disabled.
 
 ## Remaining — testnet-phase extensions (need a multi-party network)
 The single-operator devnet can't validate these; the testnet is their gate.
+- checkpoint sync: joining today replays every block from genesis, which is why
+  ARCHIVE nodes (--da-retain-blocks 0, the anchors) must retain every body's
+  shards forever. A verified state-snapshot join would let the whole network
+  prune deep history. Until then: anchors archive, home nodes prune
+  (--da-retain-blocks N deletes shard sets beyond the window — shard growth
+  filled a founder disk within a day of the first live quota rise).
 - gossip topic is `sestrian/v1` for every chain: a node on a DIFFERENT genesis
   (observed live: a devnet-1 straggler still mining the old chain) lands in the
   same mesh and its Head announcements trigger wasted sync pulls — validation

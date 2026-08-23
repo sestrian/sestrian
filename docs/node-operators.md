@@ -107,6 +107,15 @@ asserts byte-identical convergence at exit. Golden vectors
 | contabo-us-1 (public, relay) | `/ip4/13.140.32.27/udp/9800/quic-v1` | `http://13.140.32.27:8080/status` |
 | cluster (private net) | `/ip4/10.0.1.1/udp/30980/quic-v1` | `http://10.0.1.1:30981/status` |
 
+## Disk: pruned vs archive nodes
+
+Delta bodies are erasure-coded into shards so peers can fetch them; kept
+forever that is LINEAR disk growth. Home/miner nodes should run
+`--da-retain-blocks 1500` (shard sets for deeper blocks are deleted; the node
+still serves catch-up inside the window). Public anchors run the default
+`0` = archive — they keep everything so a fresh joiner can always replay from
+genesis. Do not prune an anchor.
+
 ## Production hardening
 
 **Two+ anchors (no single point of bootstrap/DA).** Run at least two seeds on

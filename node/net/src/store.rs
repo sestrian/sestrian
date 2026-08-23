@@ -353,6 +353,14 @@ impl Store {
         }
     }
 
+    /// DA retention: drop EVERYTHING held for a body — payload and the whole
+    /// shard dir. Used by pruned (non-archive) nodes once a block falls out of
+    /// the retention window. Never called for the genesis key.
+    pub fn delete_body_and_shards(&self, txid: &str) {
+        let _ = fs::remove_file(self.dir.join("payloads").join(format!("{txid}.json")));
+        let _ = fs::remove_dir_all(self.dir.join("da").join(txid));
+    }
+
     // ---- block log -------------------------------------------------------
     /// Append + fsync a block. fsync makes the record durable across power loss;
     /// the caller MUST treat an Err as fatal (a dropped write silently truncates
