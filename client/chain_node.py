@@ -99,7 +99,7 @@ def run_coordinator(port, n_miners, rounds, host="0.0.0.0", seed=0):
         accepted, bodies, works, admitted = [], {}, {}, 0
         for mid, (c, pub) in conns.items():
             m = recv_msg(c)
-            tx = BackpropTx(miner=pub, base_height=r, shard_id=mid,
+            tx = BackpropTx(miner=pub, base_height=r,
                             delta_hash=m["delta_hash"], da_pointer=m["da_pointer"])
             tx.sig = m["sig"]
             if not tx.verify():
@@ -176,7 +176,7 @@ def run_miner(host, port, miner_id, seed=0, withhold=False):
             # honest miner serves all shards with proofs; a withholder serves none
             served = {} if withhold else {i: (blob.shards[i], blob.proof(i))
                                           for i in range(DA_N)}
-            tx = BackpropTx(miner=key.pub, base_height=msg["height"], shard_id=miner_id,
+            tx = BackpropTx(miner=key.pub, base_height=msg["height"],
                             delta_hash=delta_hash(body), da_pointer=da.da_pointer(blob.root))
             send_msg(sock, {"type": "delta", "miner_id": miner_id, "sig": key.sign(tx.signing_bytes()),
                             "delta_hash": tx.delta_hash, "da_pointer": tx.da_pointer,

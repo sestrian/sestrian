@@ -29,7 +29,7 @@ def _block(tree, parent, height, miners, rng, work=1.0, tag=""):
     for i, k in enumerate(miners):
         body = quantize(rng.standard_normal(DIM) * 0.1)
         ptr = f"da://{tag}{height}/{i}"
-        tx = BackpropTx(miner=k.pub, base_height=height - 1, shard_id=i,
+        tx = BackpropTx(miner=k.pub, base_height=height - 1,
                         delta_hash=delta_hash(body.tobytes()), da_pointer=ptr,
                         data_refs=["genesis"]).signed(k)
         txs.append(tx); bodies[ptr] = body; works[tx.txid()] = work
@@ -81,7 +81,7 @@ def test_forged_signature_block_rejected():
     rng = np.random.default_rng(3)
     body = quantize(rng.standard_normal(DIM) * 0.1)
     ptr = "da://x"
-    tx = BackpropTx(miner=m[0].pub, base_height=0, shard_id=0,
+    tx = BackpropTx(miner=m[0].pub, base_height=0,
                     delta_hash=delta_hash(body.tobytes()), da_pointer=ptr,
                     data_refs=["genesis"])
     tx.sig = m[1].sign(tx.signing_bytes())            # wrong signer
@@ -96,7 +96,7 @@ def test_withheld_or_forged_body_rejected():
     rng = np.random.default_rng(4)
     body = quantize(rng.standard_normal(DIM) * 0.1)
     ptr = "da://y"
-    tx = BackpropTx(miner=m[0].pub, base_height=0, shard_id=0,
+    tx = BackpropTx(miner=m[0].pub, base_height=0,
                     delta_hash=delta_hash(body.tobytes()), da_pointer=ptr,
                     data_refs=["genesis"]).signed(m[0])
     wrong = quantize(rng.standard_normal(DIM) * 0.1)  # body doesn't match its hash

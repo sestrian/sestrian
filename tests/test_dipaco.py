@@ -11,9 +11,31 @@ import torch
 from client.dipaco import (
     DiPaCoConfig, DiPaCoGPT, PathMap, build_dipaco, coarse_route, make_path,
 )
-from client.moe import mask_delta, shard_aggregate
 from client.trainer import flat_params, set_flat_params
-from rig.chain import dequantize, quantize
+from rig.chain import dequantize, paged_transition, quantize
+
+
+def _runs(mask: np.ndarray):
+    """Contiguous (start, end) runs of a boolean mask — span-ifies a PathMap
+    holding so the v1 per-page consensus aggregation can be applied to it."""
+    idx = np.nonzero(mask)[0]
+    if idx.size == 0:
+        return []
+    brk = np.nonzero(np.diff(idx) > 1)[0]
+    starts = np.concatenate([[0], brk + 1])
+    ends = np.concatenate([brk + 1, [idx.size]])
+    return [(int(idx[s]), int(idx[e - 1]) + 1) for s, e in zip(starts, ends)]
+
+
+def _v1_aggregate(base_int, deltas, masks):
+    """The protocol-v1 replacement for the old shard_aggregate: express each
+    holder's mask as page spans + a claim set and run the CHAIN's per-page
+    transition (trimmed mean over actual claimants — k=1 applies in full,
+    k=2 plain mean), so these sims exercise the real consensus rule."""
+    spans = sorted({r for m in masks for r in _runs(m)})
+    claims = [[i for i, (s, e) in enumerate(spans) if m[s:e].all()]
+              for m in masks]
+    return paged_transition(base_int, deltas, claims, spans)
 
 
 CFG = DiPaCoConfig(n_layer=2, n_head=2, n_embd=32, block_size=16, n_modules=4)
@@ -98,7 +120,7 @@ def test_disjoint_domain_workers_compose_and_beat_misrouting():
         path = DISJOINT[coarse_route(d, N_DOMAINS)]
         deltas.append(_train_path(model, _domain_buf(d), path, base, seed=d))
         masks.append(pm.mask(path, include_backbone=True))
-    composed = dequantize(shard_aggregate(base_int, deltas, masks))
+    composed = dequantize(_v1_aggregate(base_int, deltas, masks))
 
     correct = np.mean([_loss(model, _domain_buf(d), DISJOINT[d], composed)
                        for d in range(N_DOMAINS)])
@@ -115,7 +137,7 @@ def test_disjoint_domain_workers_compose_and_beat_misrouting():
 def test_overlapping_paths_share_modules_and_average():
     """Paths that pick the SAME (level, module) share that page. A shared module
     is averaged over both worker-holders; a module only one path uses comes from
-    its owner in full — exactly shard_aggregate's per-holder rule (module-DiLoCo)."""
+    its owner in full — exactly the v1 per-page claimant rule (module-DiLoCo)."""
     model = DiPaCoGPT(CFG)
     pm = PathMap(model)
     pA = [0, 1]                                         # module 0 @ level 0, module 1 @ level 1
@@ -126,7 +148,7 @@ def test_overlapping_paths_share_modules_and_average():
     mA, mB = pm.mask(pA, include_backbone=False), pm.mask(pB, include_backbone=False)
     dA = np.full(n, 1000, dtype=np.int64)
     dB = np.full(n, 3000, dtype=np.int64)
-    out = shard_aggregate(base_int, [dA, dB], [mA, mB])
+    out = _v1_aggregate(base_int, [dA, dB], [mA, mB])
     s, e = pm.mod_span[(0, 0)]                          # shared page → averaged over 2 holders
     assert np.all(out[s:e] == 2000)                    # (1000+3000)/2
     s, e = pm.mod_span[(1, 2)]                          # only pB holds this → full value

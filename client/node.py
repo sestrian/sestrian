@@ -79,7 +79,7 @@ def run_coordinator(port, n_miners, rounds, host="0.0.0.0", seed=0):
             m = recv_msg(c)
             d = decompress(m["payload"])                          # compressed on the wire
             wire += payload_bytes(m["payload"])
-            tx = BackpropTx(miner=pub, base_height=r, shard_id=mid,
+            tx = BackpropTx(miner=pub, base_height=r,
                             delta_hash=delta_hash(d.tobytes()), da_pointer=f"da://{r}/{mid}")
             tx.sig = m["sig"]
             if tx.verify() and delta_hash(d.tobytes()) == tx.delta_hash:
@@ -134,7 +134,6 @@ def run_miner(host, port, miner_id, seed=0):
             payload = comp.compress(dequantize(delta))           # compress for the wire
             dense = decompress(payload)                          # what the chain commits to
             sig = key.sign(BackpropTx(miner=key.pub, base_height=msg["height"],
-                                      shard_id=miner_id,
                                       delta_hash=delta_hash(dense.tobytes()),
                                       da_pointer=f"da://{msg['height']}/{miner_id}"
                                       ).signing_bytes())

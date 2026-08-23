@@ -45,7 +45,7 @@ def test_slash_on_invalid_signature():
     k = Key.generate(b"m".ljust(32, b"0"))
     attacker_signed = Key.generate(b"x".ljust(32, b"0"))
     led.stake(k.pub, 100)
-    tx = BackpropTx(miner=k.pub, base_height=0, shard_id=0,
+    tx = BackpropTx(miner=k.pub, base_height=0,
                     delta_hash=delta_hash(b"BODY"), da_pointer="da://z")
     tx.sig = attacker_signed.sign(tx.signing_bytes())  # forged
     assert slash_on_invalid_tx(led, tx, None, "watcher")

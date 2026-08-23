@@ -31,7 +31,7 @@ def _tree():
 def _tx(k, rng, shard):
     body = quantize(rng.standard_normal(DIM) * 0.1)
     ptr = f"da://s{shard}"
-    tx = BackpropTx(miner=k.pub, base_height=0, shard_id=shard,
+    tx = BackpropTx(miner=k.pub, base_height=0,
                     delta_hash=delta_hash(body.tobytes()), da_pointer=ptr,
                     data_refs=["genesis"]).signed(k)
     return tx, ptr, body

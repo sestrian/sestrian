@@ -17,9 +17,13 @@
 # erasure-coded DA shards, so the download is not the only path.
 set -euo pipefail
 
-MODEL="${SESTRIAN_MODEL:-small}"
-SEED="${SESTRIAN_GENESIS_SEED:-1337}"
-EXPECT="${SESTRIAN_GENESIS_ID:-30ea20da27f1da0c94512d50a6291370a63a426b77dc425b9826ca17bd213c28}"
+MODEL="${SESTRIAN_MODEL:-small-moe}"
+SEED="${SESTRIAN_GENESIS_SEED:-20260822}"
+# devnet-genesis-2 (protocol v1): state_root is the PAGE-MERKLE root over the
+# consensus page table — the value node/net/src/main.rs bakes in. The default
+# below is the pre-ceremony PREVIEW; docs/genesis-ceremony.md requires the
+# ceremony to regenerate on BOTH founder machines and update it before publish.
+EXPECT="${SESTRIAN_GENESIS_ID:-a597316003dbf12122b7cc6f39226ce7c8f7a871e58e7ddf364e56b08102527b}"
 OUT="${1:-dist}"
 
 cd "$(dirname "$0")/.."
@@ -37,6 +41,7 @@ $RUN -m client.make_genesis --model "$MODEL" --seed "$SEED" \
      --out "$OUT/genesis.bin" | tee "$OUT/.genesis.log"
 
 ROOT=$(grep -o 'genesis_state_root: [0-9a-f]*' "$OUT/.genesis.log" | awk '{print $2}')
+MODEL_ROOT=$(grep -o 'genesis_model_root: [0-9a-f]*' "$OUT/.genesis.log" | awk '{print $2}')
 if [ -z "$ROOT" ]; then echo "could not read state_root from make_genesis"; exit 1; fi
 if [ -n "$EXPECT" ] && [ "$ROOT" != "$EXPECT" ]; then
   echo "FATAL: state_root $ROOT != expected $EXPECT — refusing to publish."
@@ -71,6 +76,7 @@ cat > "$OUT/genesis-manifest.json" <<JSON
   "seed": $SEED,
   "params": $((RAW_SIZE / 8)),
   "state_root": "$ROOT",
+  "model_root": "${MODEL_ROOT:-}",
   "raw": { "file": "genesis.bin", "bytes": $RAW_SIZE, "sha256": "$RAW_SHA" },
   "zstd": { "file": "genesis.bin.zst", "bytes": $ZST_SIZE, "sha256": $ZST_SHA },
   "reproduce": "python -m client.make_genesis --model $MODEL --seed $SEED --out genesis.bin"

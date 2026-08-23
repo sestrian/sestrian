@@ -80,21 +80,28 @@ fn ed25519_matches_reference() {
     }
 }
 
+fn tx_from(t: &Value) -> core::BackpropTx {
+    core::BackpropTx {
+        miner: t["miner"].as_str().unwrap().into(),
+        base_height: t["base_height"].as_u64().unwrap(),
+        delta_hash: t["delta_hash"].as_str().unwrap().into(),
+        da_pointer: t["da_pointer"].as_str().unwrap().into(),
+        bond: t["bond"].as_u64().unwrap_or(0),
+        pages: t["pages"].as_array().unwrap()
+            .iter().map(|x| x.as_u64().unwrap() as u32).collect(),
+        data_refs: t.get("data_refs").and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        sig: hex::decode(t["sig_hex"].as_str().unwrap()).unwrap(),
+    }
+}
+
 #[test]
 fn backprop_tx_matches_reference() {
+    // v1: shard_id is gone; the signed PAGE CLAIM SET is count-prefixed in the
+    // preimage between bond and data_refs.
     for case in vectors()["backprop_tx"].as_array().unwrap() {
-        let tx = core::BackpropTx {
-            miner: case["miner"].as_str().unwrap().into(),
-            base_height: case["base_height"].as_u64().unwrap(),
-            shard_id: case["shard_id"].as_u64().unwrap(),
-            delta_hash: case["delta_hash"].as_str().unwrap().into(),
-            da_pointer: case["da_pointer"].as_str().unwrap().into(),
-            bond: case["bond"].as_u64().unwrap_or(0),
-            data_refs: case.get("data_refs").and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-                .unwrap_or_default(),
-            sig: hex::decode(case["sig_hex"].as_str().unwrap()).unwrap(),
-        };
+        let tx = tx_from(case);
         assert_eq!(hex::encode(tx.signing_bytes()),
                    case["signing_bytes_hex"].as_str().unwrap());
         assert_eq!(tx.txid(), case["txid"].as_str().unwrap());
@@ -126,6 +133,9 @@ fn header_from(case: &Value) -> core::Header {
         vrf_proof: case["vrf_proof"].as_str().unwrap_or("").into(),
         score_root: case["score_root"].as_str().unwrap_or("").into(),
         sketch_root: case["sketch_root"].as_str().unwrap_or("").into(),
+        model_root: case["model_root"].as_str().unwrap_or("").into(),
+        vrf_attempt: case["vrf_attempt"].as_u64().unwrap_or(0),
+        version: case["version"].as_u64().unwrap_or(1),
     }
 }
 
@@ -368,39 +378,78 @@ fn data_lane_matches_reference() {
     }
 }
 
+fn spec_from(s: &Value) -> core::model_state::ModelSpec {
+    core::model_state::ModelSpec {
+        n_layers: s["n_layers"].as_u64().unwrap(),
+        d_model: s["d_model"].as_u64().unwrap(),
+        d_ff: s["d_ff"].as_u64().unwrap(),
+        n_experts_initial: s["n_experts_initial"].as_u64().unwrap(),
+        e_max: s["e_max"].as_u64().unwrap(),
+        backbone_params: s["backbone_params"].as_u64().unwrap(),
+    }
+}
+
+fn params_from(spec: core::model_state::ModelSpec, p: &Value) -> core::model_state::GenesisParams {
+    core::model_state::GenesisParams {
+        spec,
+        retarget_window: p["retarget_window"].as_u64().unwrap(),
+        target_deltas: p["target_deltas"].as_i64().unwrap(),
+        quota_min_4dp: p["quota_min_4dp"].as_i64().unwrap(),
+        quota_max_4dp: p["quota_max_4dp"].as_i64().unwrap(),
+        stale_ceiling_4dp: p["stale_ceiling_4dp"].as_i64().unwrap(),
+        k_sustain: p["k_sustain"].as_i64().unwrap(),
+        growth_bound: p["growth_bound"].as_i64().unwrap(),
+        announce_lead: p["announce_lead"].as_u64().unwrap(),
+    }
+}
+
+fn pages_from(v: &Value) -> Vec<core::model_state::Page> {
+    v.as_array().unwrap().iter().map(|p| {
+        let a = p.as_array().unwrap();
+        core::model_state::Page {
+            start: a[0].as_u64().unwrap(),
+            end: a[1].as_u64().unwrap(),
+            kind: a[2].as_str().unwrap().into(),
+            layer: a[3].as_i64().unwrap(),
+            expert: a[4].as_i64().unwrap(),
+            status: a[5].as_str().unwrap().into(),
+        }
+    }).collect()
+}
+
 #[test]
 fn full_chain_replay_matches_reference() {
+    // v1: a mini MoE chain with page-claimed deltas, eligibility attempts, a
+    // fork, transfers, a data submit, window rollovers, AND an on-chain growth
+    // activation with a post-growth block. Rust must rebuild every block,
+    // validate it completely, run fork choice, and land on the same head with
+    // the same roots — bit-exact ACROSS the dimension change.
     use sestrian_core::blocktree::{Block, BlockTree};
+    use sestrian_core::model_state::{fold, page_init, page_state_root, ModelState};
     use std::collections::HashMap;
     for case in vectors()["chain_replay"].as_array().unwrap() {
+        let spec = spec_from(&case["spec"]);
+        let params = params_from(spec.clone(), &case["params"]);
         let genesis_w = i64s(&case["genesis_w"]);
         let mut tree = BlockTree::new(
-            genesis_w, Some(case["data_contributor"].as_str().unwrap().into()));
+            genesis_w.clone(),
+            Some(case["data_contributor"].as_str().unwrap().into()),
+            params.clone());
         for b in case["blocks"].as_array().unwrap() {
             let header = header_from(&b["header"]);
             assert_eq!(header.block_hash(), b["hash"].as_str().unwrap(),
                        "header serialization drift");
-            let txs: Vec<core::BackpropTx> = b["txs"].as_array().unwrap().iter()
-                .map(|t| core::BackpropTx {
-                    miner: t["miner"].as_str().unwrap().into(),
-                    base_height: t["base_height"].as_u64().unwrap(),
-                    shard_id: t["shard_id"].as_u64().unwrap(),
-                    delta_hash: t["delta_hash"].as_str().unwrap().into(),
-                    da_pointer: t["da_pointer"].as_str().unwrap().into(),
-                    bond: t["bond"].as_u64().unwrap_or(0),
-                    data_refs: t.get("data_refs").and_then(|v| v.as_array())
-                        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-                        .unwrap_or_default(),
-                    sig: hex::decode(t["sig_hex"].as_str().unwrap()).unwrap(),
-                }).collect();
+            let txs: Vec<core::BackpropTx> =
+                b["txs"].as_array().unwrap().iter().map(tx_from).collect();
             let bodies: HashMap<String, Vec<i64>> = b["bodies"].as_object().unwrap()
                 .iter().map(|(k, v)| (k.clone(), i64s(v))).collect();
             let transfers = b["transfers"].as_array().unwrap()
                 .iter().map(transfer_from).collect();
             let data_txs = b["data_txs"].as_array().unwrap()
                 .iter().map(|t| data_tx_from("submit", t)).collect();
-            // full first-principles validation: sigs, DA hashes, state transition,
-            // txset/transfer/data/ledger roots — then fork choice
+            // full first-principles validation: sigs, DA hashes, page claims,
+            // quota, eligibility, per-page transition + growth activation,
+            // txset/score/sketch/transfer/data/ledger roots — then fork choice
             let scores: std::collections::BTreeMap<String, u64> =
                 b.get("scores").and_then(|v| v.as_object())
                     .map(|m| m.iter()
@@ -422,14 +471,186 @@ fn full_chain_replay_matches_reference() {
         }
         assert_eq!(tree.head, case["expected_head"].as_str().unwrap(),
                    "fork choice disagrees with reference");
-        assert_eq!(core::state_root(tree.head_state()),
+        assert_eq!(page_state_root(tree.head_state(), tree.head_model()),
                    case["expected_state_root"].as_str().unwrap());
+        assert_eq!(tree.head_model().model_root(),
+                   case["expected_model_root"].as_str().unwrap());
+        assert_eq!(tree.head_model().dim(), case["expected_dim"].as_u64().unwrap(),
+                   "growth must have extended the state");
+        assert_eq!(tree.head_model().pages.len(),
+                   case["expected_n_pages"].as_u64().unwrap() as usize);
         assert_eq!(tree.head_ledger().root(),
                    case["expected_ledger_root"].as_str().unwrap());
         assert_eq!(tree.head_ledger().supply(),
                    case["expected_supply"].as_u64().unwrap());
         assert_eq!(tree.blocks[&tree.head].height,
                    case["expected_head_height"].as_u64().unwrap());
+
+        // Independent full replay from genesis (§3.5): re-apply every head-chain
+        // block's per-page transitions AND the ModelState fold, including the
+        // growth activation (page append) — bit-exact across the dim change.
+        let by_hash: HashMap<&str, &Value> = case["blocks"].as_array().unwrap()
+            .iter().map(|b| (b["hash"].as_str().unwrap(), b)).collect();
+        let mut chain: Vec<&Value> = Vec::new();
+        let mut cur = case["expected_head"].as_str().unwrap();
+        while cur != tree.genesis_hash {
+            let b = by_hash[cur];
+            chain.push(b);
+            cur = b["parent"].as_str().unwrap();
+        }
+        chain.reverse();
+        let mut w = genesis_w.clone();
+        let mut model = ModelState::genesis(&params.spec);
+        for b in chain {
+            let txs: Vec<core::BackpropTx> =
+                b["txs"].as_array().unwrap().iter().map(tx_from).collect();
+            let bodies: Vec<Vec<i64>> = txs.iter()
+                .map(|t| i64s(&b["bodies"][&t.da_pointer])).collect();
+            let claims: Vec<Vec<u32>> = txs.iter().map(|t| t.canonical_pages()).collect();
+            let spans: Vec<(u64, u64)> =
+                model.pages.iter().map(|p| (p.start, p.end)).collect();
+            w = core::paged_transition(&w, &bodies, &claims, &spans);
+            let zero_scored = txs.iter()
+                .filter(|t| b["scores"][&t.txid()].as_u64().unwrap_or(0) == 0)
+                .count() as u64;
+            let h = &b["header"];
+            let (next, activations) = fold(&model, &params,
+                                           h["height"].as_u64().unwrap(),
+                                           txs.len() as u64, zero_scored,
+                                           h["prev_hash"].as_str().unwrap());
+            model = next;
+            for (page_id, _l, _e, trigger) in &activations {
+                w.extend(page_init(trigger, *page_id, &params.spec));
+            }
+        }
+        assert_eq!(page_state_root(&w, &model),
+                   case["replay_state_root"].as_str().unwrap(),
+                   "replay from genesis must be bit-exact across the dim change");
+    }
+}
+
+#[test]
+fn page_root_matches_reference() {
+    // v1 state commitment: domain-separated page-Merkle root over page bytes
+    // (0x00 leaf / 0x01 node, odd node promoted by hashing with itself).
+    use sestrian_core::model_state::{page_state_root, ModelState};
+    for case in vectors()["page_root"].as_array().unwrap() {
+        let w = i64s(&case["w"]);
+        let pages = pages_from(&case["pages"]);
+        if let Some(leaf0) = case.get("leaf0_hex").and_then(|x| x.as_str()) {
+            let p0 = &pages[0];
+            let bytes = core::int64_bytes(&w[p0.start as usize..p0.end as usize]);
+            assert_eq!(hex::encode(core::merkle::leaf_hash(&bytes)), leaf0,
+                       "leaf hash (0x00 domain separation)");
+        }
+        let st = ModelState {
+            pages,
+            quota_4dp: 10_000,
+            pinned_streak: 0,
+            slack_streak: 0,
+            pending_growth: vec![],
+            window_id: 0,
+            win_accepted: 0,
+            win_zero_scored: 0,
+            events_total: 0,
+        };
+        assert_eq!(page_state_root(&w, &st), case["root"].as_str().unwrap(),
+                   "page-Merkle root mismatch");
+    }
+}
+
+#[test]
+fn page_init_matches_reference() {
+    // v1 deterministic new-expert init: the SHA-256 hash-stream, byte-exact
+    // (big-endian u64 lanes; weight coords ±0.02 fixed point; biases zero).
+    use sestrian_core::model_state::{page_init, ModelSpec};
+    for case in vectors()["page_init"].as_array().unwrap() {
+        let spec = ModelSpec {
+            n_layers: 1,
+            d_model: case["d_model"].as_u64().unwrap(),
+            d_ff: case["d_ff"].as_u64().unwrap(),
+            n_experts_initial: 1, e_max: 2, backbone_params: 0,
+        };
+        assert_eq!(spec.expert_page_len(), case["page_len"].as_u64().unwrap());
+        let init = page_init(case["trigger"].as_str().unwrap(),
+                             case["page_id"].as_u64().unwrap(), &spec);
+        assert_eq!(init, i64s(&case["init"]), "page_init hash-stream mismatch");
+    }
+}
+
+#[test]
+fn model_state_matches_reference() {
+    // v1 ModelState commitment: canonical JSON must byte-match Python's
+    // json.dumps(sort_keys=True, separators=(",",":")); model_root = sha256 of
+    // it. Round-trip through the parsed form pins field handling.
+    use sestrian_core::model_state::ModelState;
+    for case in vectors()["model_state"].as_array().unwrap() {
+        let want_json = case["canonical_json"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(want_json).unwrap();
+        let st = ModelState::from_json_value(&parsed)
+            .expect("canonical JSON must parse into a ModelState");
+        assert_eq!(st.canonical_json(), want_json,
+                   "canonical JSON serialization drift");
+        assert_eq!(st.model_root(), case["root"].as_str().unwrap());
+    }
+}
+
+#[test]
+fn quota_matches_reference() {
+    // v1 work quota: required_nnz = claimed_params * quota_4dp // 1_000_000
+    // (floor, i128 intermediates). The spec is the controller_fold spec.
+    use sestrian_core::model_state::ModelState;
+    let v = vectors();
+    let spec = spec_from(&v["controller_fold"][0]["spec"]);
+    for case in v["quota"].as_array().unwrap() {
+        let mut st = ModelState::genesis(&spec);
+        assert_eq!(st.dim(), case["spec_dim"].as_u64().unwrap(),
+                   "quota family spec must match the controller_fold spec");
+        assert_eq!(spec.expert_page_len(),
+                   case["expert_page_len"].as_u64().unwrap());
+        let all: Vec<u32> = (0..st.pages.len() as u32).collect();
+        for row in case["rows"].as_array().unwrap() {
+            st.quota_4dp = row["quota_4dp"].as_i64().unwrap();
+            assert_eq!(st.required_nnz(&all), row["all_pages"].as_u64().unwrap());
+            assert_eq!(st.required_nnz(&[1]), row["one_expert"].as_u64().unwrap());
+            assert_eq!(st.required_nnz(&[0]), row["backbone"].as_u64().unwrap());
+        }
+    }
+}
+
+#[test]
+fn controller_fold_matches_reference() {
+    // v1 consensus fold: scripted per-block signals -> per-step model_root,
+    // activations (page appends), final dim + root. This pins the entire
+    // window machinery: retarget, schedule, activation, freeze, thaw.
+    use sestrian_core::model_state::{fold, ModelState};
+    for case in vectors()["controller_fold"].as_array().unwrap() {
+        let spec = spec_from(&case["spec"]);
+        let params = params_from(spec.clone(), &case["params"]);
+        let mut st = ModelState::genesis(&spec);
+        for step in case["steps"].as_array().unwrap() {
+            let (next, activations) = fold(
+                &st, &params,
+                step["height"].as_u64().unwrap(),
+                step["n_txs"].as_u64().unwrap(),
+                step["zero_scored"].as_u64().unwrap(),
+                step["prev_hash"].as_str().unwrap());
+            st = next;
+            let want_acts: Vec<Value> = step["activations"].as_array().unwrap().clone();
+            assert_eq!(activations.len(), want_acts.len(),
+                       "activation count @h{}", step["height"]);
+            for (got, want) in activations.iter().zip(&want_acts) {
+                let a = want.as_array().unwrap();
+                assert_eq!(got.0, a[0].as_u64().unwrap(), "activated page id");
+                assert_eq!(got.1, a[1].as_i64().unwrap(), "activated layer");
+                assert_eq!(got.2, a[2].as_i64().unwrap(), "activated expert idx");
+                assert_eq!(got.3, a[3].as_str().unwrap(), "activation trigger");
+            }
+            assert_eq!(st.model_root(), step["model_root"].as_str().unwrap(),
+                       "model_root diverged at height {}", step["height"]);
+        }
+        assert_eq!(st.dim(), case["final_dim"].as_u64().unwrap());
+        assert_eq!(st.model_root(), case["final_model_root"].as_str().unwrap());
     }
 }
 
@@ -479,50 +700,61 @@ fn da_matches_reference() {
 
 #[test]
 fn capacity_retarget_matches_reference() {
-    use sestrian_core::capacity::CapacityRetarget;
+    // v1: the INTEGER controller — every window event, including the derived
+    // accepted/staleness signals inside simulate, must reproduce exactly.
+    use sestrian_core::capacity::{simulate, CapacityRetarget};
     for case in vectors()["capacity"].as_array().unwrap() {
+        let fleet: Vec<i64> = i64s(&case["fleet_2dp"]);
+        let per_unit = case["per_unit"].as_i64().unwrap();
         let mut ctrl = CapacityRetarget::default();
-        for w in case["windows"].as_array().unwrap() {
-            let accepted = w["accepted"].as_u64().unwrap();
-            let staleness = w["staleness"].as_f64().unwrap();
-            let d = ctrl.observe_window(accepted, staleness);
-            // the consensus-relevant outputs (module counts + events) must match
-            // EXACTLY; the quota control signal within a tight epsilon.
+        let events = simulate(&mut ctrl, &fleet, per_unit);
+        let windows = case["windows"].as_array().unwrap();
+        assert_eq!(events.len(), windows.len());
+        for (d, w) in events.iter().zip(windows) {
             assert_eq!(d.window, w["window"].as_u64().unwrap());
-            assert_eq!(d.grew, w["grew"].as_u64().unwrap(), "grew @w{}", d.window);
-            assert_eq!(d.froze, w["froze"].as_u64().unwrap(), "froze @w{}", d.window);
-            assert_eq!(d.thawed, w["thawed"].as_u64().unwrap(), "thawed @w{}", d.window);
-            assert_eq!(d.total, w["total"].as_u64().unwrap(), "total @w{}", d.window);
-            assert_eq!(d.active, w["active"].as_u64().unwrap(), "active @w{}", d.window);
-            assert!((d.quota - w["quota"].as_f64().unwrap()).abs() < 1e-6,
-                    "quota @w{}: {} vs {}", d.window, d.quota, w["quota"]);
+            assert_eq!(d.grew, w["grew"].as_i64().unwrap(), "grew @w{}", d.window);
+            assert_eq!(d.froze, w["froze"].as_i64().unwrap(), "froze @w{}", d.window);
+            assert_eq!(d.thawed, w["thawed"].as_i64().unwrap(), "thawed @w{}", d.window);
+            assert_eq!(d.scheduled, w["scheduled"].as_i64().unwrap(),
+                       "scheduled @w{}", d.window);
+            assert_eq!(d.quota_4dp, w["quota_4dp"].as_i64().unwrap(),
+                       "quota_4dp @w{}", d.window);
+            assert_eq!(d.total, w["total"].as_i64().unwrap(), "total @w{}", d.window);
+            assert_eq!(d.active, w["active"].as_i64().unwrap(), "active @w{}", d.window);
         }
     }
 }
 
 #[test]
 fn lottery_matches_reference() {
+    // v1: attempt-widened sortition — cases cover a whale, dust, a widened
+    // attempt, zero stake, the cold start, and the ATTEMPT_MAX liveness floor.
     use sestrian_core::{lottery, Key};
     for case in vectors()["lottery"].as_array().unwrap() {
         let pub_hex = case["pub"].as_str().unwrap();
         let prev = case["prev_hash"].as_str().unwrap();
         let h = case["height"].as_u64().unwrap();
+        let attempt = case["attempt"].as_u64().unwrap();
         // reprove the VRF from the secret: Rust must produce the same proof
         let seed: [u8; 32] = hex::decode(case["seed_hex"].as_str().unwrap())
             .unwrap().try_into().unwrap();
         let key = Key::from_seed(seed);
-        let proof = lottery::vrf_prove(&key, prev, h);
+        let proof = lottery::vrf_prove(&key, prev, h, attempt);
         assert_eq!(hex::encode(&proof), case["proof_sig_hex"].as_str().unwrap(),
                    "VRF proof (deterministic Ed25519) must match");
         assert_eq!(hex::encode(lottery::vrf_output(&proof)),
                    case["vrf_output_hex"].as_str().unwrap(), "VRF output");
+        assert_eq!(lottery::attempt_work(&proof, attempt),
+                   case["work"].as_u64().unwrap(),
+                   "attempt-discounted work @attempt {attempt}");
         let stake = case["stake"].as_u64().unwrap();
         let total = case["total_stake"].as_u64().unwrap();
-        assert_eq!(lottery::eligible(pub_hex, &proof, prev, h, stake, total),
+        assert_eq!(lottery::eligible(pub_hex, &proof, prev, h, attempt, stake, total),
                    case["eligible"].as_bool().unwrap(),
-                   "stake-weighted eligibility (stake {stake}/{total})");
-        // a forged proof (wrong signer) is never eligible
-        assert!(!lottery::eligible("00".repeat(32).as_str(), &proof, prev, h, stake, total),
+                   "eligibility (stake {stake}/{total}, attempt {attempt})");
+        // a forged proof (wrong signer) is never eligible, even at ATTEMPT_MAX
+        assert!(!lottery::eligible("00".repeat(32).as_str(), &proof, prev, h,
+                                   attempt, stake, total),
                 "eligibility must reject a proof that doesn't verify");
     }
 }

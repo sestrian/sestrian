@@ -18,15 +18,18 @@ import numpy as np
 from rig.chain import quantize
 
 
-def compress(delta: np.ndarray, keep_frac: float = 0.02):
+def compress(delta: np.ndarray, keep_frac: float = 0.02, min_keep: int = 0):
     """Quantise a float delta and keep only its top-k components by magnitude.
 
     Returns a payload dict with uint32 indices + int32 values (the quantised
     delta clamps comfortably into int32). Ties broken by index → deterministic.
+    `min_keep` (protocol v1): the consensus WORK QUOTA is a floor on a delta's
+    nonzero coordinates, so the node passes its required_nnz here and the
+    compressor keeps at least that many components regardless of keep_frac.
     """
     q = quantize(delta)                                   # int64, deterministic
     n = q.size
-    k = max(1, int(n * keep_frac))
+    k = max(1, int(n * keep_frac), int(min_keep))
     if k >= n:
         idx = np.nonzero(q)[0].astype(np.uint32)
     else:
@@ -57,11 +60,12 @@ class Compressor:
         self.keep_frac = keep_frac
         self.residual = None            # float, same shape as the delta
 
-    def compress(self, delta: np.ndarray):
-        if self.residual is None:
+    def compress(self, delta: np.ndarray, min_keep: int = 0):
+        if self.residual is None or self.residual.shape != delta.shape:
+            # first round, or the model GREW (protocol v1): restart the residual
             self.residual = np.zeros_like(delta)
         full = delta + self.residual                 # this round + what we owe
-        payload = compress(full, self.keep_frac)
+        payload = compress(full, self.keep_frac, min_keep)
         sent = decompress(payload).astype(np.float64) / (1 << 16)  # what actually went
         self.residual = full - sent                  # carry the remainder forward
         return payload

@@ -52,20 +52,24 @@ const SYNC_INFLIGHT_TIMEOUT: f64 = 30.0;
 /// this many i64 at once, ~8MB for the default, vs K × the whole 86M state).
 const AGG_CHUNK: usize = 1 << 20;
 
-/// Chunked, bounded-memory aggregation over SPARSE delta payloads. Bit-identical
-/// to `core::trimmed_mean` over the full dense deltas (each coordinate's sort/
-/// trim/mean is unchanged), but never materializes more than AGG_CHUNK
-/// coordinates × K deltas at once — so a small peer can aggregate an 86M-param
-/// block without holding K × ~0.7GB of dense deltas.
-pub fn chunked_aggregate(payloads: &[&Payload], n: usize, chunk_size: usize) -> Vec<i64> {
-    let mut out = vec![0i64; n];
+/// Chunked, bounded-memory aggregation over SPARSE delta payloads for the
+/// coordinate range [lo, hi). Bit-identical to `core::trimmed_mean` over the
+/// same range of the full dense deltas (each coordinate's sort/trim/mean is
+/// unchanged), but never materializes more than AGG_CHUNK coordinates × K
+/// deltas at once — so a small peer can aggregate a 100M-param block without
+/// holding K × ~0.8GB of dense deltas. In protocol v1 this is applied PER
+/// PAGE over that page's claimants (build_candidate), mirroring
+/// `core::paged_transition` exactly.
+pub fn chunked_aggregate_range(payloads: &[&Payload], lo: usize, hi: usize,
+                               chunk_size: usize) -> Vec<i64> {
+    let mut out = vec![0i64; hi.saturating_sub(lo)];
     let step = chunk_size.max(1);
-    let mut c = 0;
-    while c < n {
-        let hi = (c + step).min(n);
-        let chunk: Vec<Vec<i64>> = payloads.iter().map(|p| p.dense_range(c, hi)).collect();
-        out[c..hi].copy_from_slice(&core::trimmed_mean(&chunk, 0.2));
-        c = hi;
+    let mut c = lo;
+    while c < hi {
+        let e = (c + step).min(hi);
+        let chunk: Vec<Vec<i64>> = payloads.iter().map(|p| p.dense_range(c, e)).collect();
+        out[c - lo..e - lo].copy_from_slice(&core::trimmed_mean(&chunk, 0.2));
+        c = e;
     }
     out
 }
@@ -124,9 +128,13 @@ mod mempool_bounds_tests {
         let refs: Vec<&Payload> = payloads.iter().collect();
         let dense_mean = core::trimmed_mean(&dense, 0.2);
         // a chunk size that divides the range unevenly, forcing several chunks
-        assert_eq!(chunked_aggregate(&refs, n, 1000), dense_mean, "chunk=1000");
-        assert_eq!(chunked_aggregate(&refs, n, 777), dense_mean, "uneven chunk");
-        assert_eq!(chunked_aggregate(&refs, n, n), dense_mean, "single chunk");
+        assert_eq!(chunked_aggregate_range(&refs, 0, n, 1000), dense_mean, "chunk=1000");
+        assert_eq!(chunked_aggregate_range(&refs, 0, n, 777), dense_mean, "uneven chunk");
+        assert_eq!(chunked_aggregate_range(&refs, 0, n, n), dense_mean, "single chunk");
+        // v1: a page-range aggregation equals the same slice of the dense mean
+        let (lo, hi) = (1234usize, 4321usize);
+        assert_eq!(chunked_aggregate_range(&refs, lo, hi, 500), dense_mean[lo..hi],
+                   "page range");
     }
 }
 
@@ -278,7 +286,6 @@ const TRAIN_TIMEOUT_SECS: f64 = 180.0;
 pub struct NodeConfig {
     pub produce: bool,
     pub interval: f64,
-    pub rotate: Option<(u64, u64)>, // (n, id): deterministic devnet rotation
     pub seconds: f64,               // 0 = run forever
     pub peers: String,              // configured peers — re-dialed when lost
     pub data_refs: Vec<String>,     // rev 5: staked corpora this miner names on its deltas
@@ -319,6 +326,9 @@ pub struct Node {
     pub t0: f64,
     pub last_proposed_round: i64,
     pub last_announced_round: i64,
+    /// once-per-round training dispatch (production is a separate, per-tick
+    /// eligibility ladder — see the run loop)
+    pub last_trained_round: i64,
     /// per-peer timestamp of the last sync we requested — heartbeat-triggered
     /// catch-up must not stack concurrent multi-hundred-MB transfers
     pub last_sync_req: HashMap<PeerId, f64>,
@@ -328,6 +338,10 @@ pub struct Node {
     /// consecutive deltas dropped as stale — a slow trainer mining for nothing.
     /// Surfaced in /status + /metrics so the failure is visible, not silent.
     pub stale_deltas: u64,
+    /// v1: deltas rejected for page-claim/quota violations (frozen-page claim,
+    /// stray coordinates, below required_nnz) — spam or a misconfigured miner;
+    /// visible in /status + /metrics, never silent.
+    pub quota_rejects: u64,
     /// per-peer rotation cursor for serving GENESIS shards one at a time, so a
     /// bootstrapping peer that keeps asking us collects K distinct shards.
     pub genesis_shard_cursor: HashMap<PeerId, usize>,
@@ -474,6 +488,46 @@ impl Node {
         if !delta_in_window(tx.base_height, self.head_height()) {
             return false;
         }
+        // v1 gate against the HEAD ModelState: canonical nonempty claim set,
+        // every claimed page active, body zero outside claims, and the work
+        // quota met — a delta that fails any of these can never be included,
+        // so the node must never hold or gossip it (doomed-delta hygiene).
+        {
+            let model = &self.tree.model[&self.tree.head];
+            let pages = tx.canonical_pages();
+            if pages.is_empty() || tx.pages != pages {
+                return false;
+            }
+            if pages.iter().any(|p| !model.is_active(*p as usize)) {
+                self.quota_rejects += 1; // visible: frozen/missing-page claim
+                return false;
+            }
+            if dense.len() as u64 != model.dim() {
+                return false;
+            }
+            let mut nnz: u64 = 0;
+            let mut outside = false;
+            let spans: Vec<(u64, u64)> = pages.iter()
+                .map(|p| model.page_span(*p as usize)).collect();
+            'coords: for (i, x) in dense.iter().enumerate() {
+                if *x == 0 {
+                    continue;
+                }
+                let i = i as u64;
+                for (s, e) in &spans {
+                    if i >= *s && i < *e {
+                        nnz += 1;
+                        continue 'coords;
+                    }
+                }
+                outside = true;
+                break;
+            }
+            if outside || nnz < model.required_nnz(&pages) {
+                self.quota_rejects += 1; // visible: below-quota / stray coords
+                return false;
+            }
+        }
         self.mark_seen(txid.clone());
         self.store.put_payload(&txid, &payload);
         self.payloads.insert(txid.clone(), payload);
@@ -504,9 +558,11 @@ impl Node {
     }
 
     // ---- block production ------------------------------------------------
-    fn build_candidate(&self) -> Option<(StoredBlock, sestrian_core::blocktree::Block)> {
+    fn build_candidate(&self, attempt: u64)
+        -> Option<(StoredBlock, sestrian_core::blocktree::Block)> {
         let head = self.tree.head.clone();
         let hh = self.head_height();
+        let parent_model = &self.tree.model[&head];
         // rev 5: a delta that names no staked/active corpus would invalidate the
         // whole block (provenance required) — never build on one.
         let active_hashes: std::collections::BTreeSet<String> =
@@ -514,9 +570,27 @@ impl Node {
                 .filter(|e| e["status"] == "active")
                 .filter_map(|e| e["data_hash"].as_str().map(|s| s.to_string()))
                 .collect();
+        // v1: never build on a delta the validator would reject — claims must
+        // be canonical + active, and the work quota must hold against the
+        // PARENT ModelState (the quota may have risen at a window boundary
+        // since the delta entered the pool).
+        let quota_ok = |t: &core::BackpropTx| -> bool {
+            let pages = t.canonical_pages();
+            if pages.is_empty() || t.pages != pages
+                || pages.iter().any(|p| !parent_model.is_active(*p as usize)) {
+                return false;
+            }
+            let Some(p) = self.payloads.get(&t.txid()) else { return false };
+            let Some(val) = crate::proto::unb64(&p.val) else { return false };
+            let nnz = val.chunks_exact(4)
+                .filter(|c| i32::from_le_bytes((*c).try_into().unwrap()) != 0)
+                .count() as u64;
+            nnz >= parent_model.required_nnz(&pages)
+        };
         let mut cands: Vec<&core::BackpropTx> = self.delta_pool.values()
             .filter(|t| t.base_height == hh)
             .filter(|t| t.canonical_refs().iter().any(|r| active_hashes.contains(r)))
+            .filter(|t| quota_ok(t))
             .collect();
         if cands.is_empty() {
             return None;
@@ -532,16 +606,27 @@ impl Node {
                 }
             }
         }
-        // weight-state transition
+        // weight-state transition (v1): PER-PAGE trimmed mean over each page's
+        // actual claimants, chunked within pages for bounded memory — bit-
+        // identical to core::paged_transition over the full dense bodies, so
+        // the committed state_root reproduces on any validator.
         let parent_w = &self.tree.state[&head];
-        // chunked aggregation over the sparse payloads — bounded memory, but
-        // bit-identical to core::trimmed_mean over the full dense deltas, so the
-        // committed state_root reproduces on any validator.
-        let payload_refs: Vec<&Payload> =
-            chosen.iter().map(|t| &self.payloads[&t.txid()]).collect();
-        let mean = chunked_aggregate(&payload_refs, parent_w.len(), AGG_CHUNK);
+        let mut mean = vec![0i64; parent_w.len()];
+        for (pid, page) in parent_model.pages.iter().enumerate() {
+            let claimants: Vec<&Payload> = chosen.iter()
+                .filter(|t| t.canonical_pages().contains(&(pid as u32)))
+                .map(|t| &self.payloads[&t.txid()])
+                .collect();
+            if claimants.is_empty() {
+                continue;
+            }
+            let (s, e) = (page.start as usize, page.end as usize);
+            mean[s..e].copy_from_slice(
+                &chunked_aggregate_range(&claimants, s, e, AGG_CHUNK));
+        }
         // wrapping_add mirrors numpy int64 (matches validate_block exactly)
-        let w: Vec<i64> = parent_w.iter().zip(&mean).map(|(a, b)| a.wrapping_add(*b)).collect();
+        let mut w: Vec<i64> = parent_w.iter().zip(&mean)
+            .map(|(a, b)| a.wrapping_add(*b)).collect();
         // account lanes: dry-run in the validator's exact order (blocktree::apply)
         let mut scratch = self.tree.ledger[&head].clone();
         scratch.resolve_expired_challenges(hh + 1);
@@ -655,17 +740,32 @@ impl Node {
             }).collect();
         let core_data: Vec<AccountTx> = data_txs.iter()
             .filter_map(account_tx_from_json).collect();
-        // proposer lottery: sign the VRF proof over this height's seed; work is
-        // the non-forgeable weight derived from it.
-        let vrf_proof = core::lottery::vrf_prove(&self.key, &head, hh + 1);
+        // v1 MODEL FOLD: the ModelState transition, then any growth activation
+        // due THIS block appends its deterministically-initialized expert page
+        // AFTER aggregation and BEFORE the root — the exact validate_block
+        // order (one ordering slip here forks the chain at the first growth).
+        let zero_scored = chosen.iter()
+            .filter(|t| blk_scores[&t.txid()] == 0).count() as u64;
+        let (post_model, activations) = core::model_state::fold(
+            parent_model, &self.tree.params, hh + 1,
+            chosen.len() as u64, zero_scored, &head);
+        for (page_id, layer, _expert, trigger) in &activations {
+            info!(height = hh + 1, page_id, layer,
+                  "GROWTH EVENT activates in our candidate block");
+            w.extend(core::model_state::page_init(
+                trigger, *page_id, &self.tree.params.spec));
+        }
+        // proposer lottery (v1): the proof binds to (height, ATTEMPT); work is
+        // the attempt-discounted non-forgeable weight derived from it.
+        let vrf_proof = core::lottery::vrf_prove(&self.key, &head, hh + 1, attempt);
         let header = core::Header {
             height: hh + 1,
             prev_hash: head.clone(),
-            state_root: core::state_root(&w),
+            state_root: core::model_state::page_state_root(&w, &post_model),
             txset_root: core::txset_root(
                 &chosen.iter().map(|t| t.txid()).collect::<Vec<_>>()),
             n_txs: chosen.len() as u64,
-            work: core::lottery::vrf_work(&vrf_proof),
+            work: core::lottery::attempt_work(&vrf_proof, attempt),
             proposer: self.key.pub_hex(),
             transfer_root: sestrian_core::token::transfer_root(&core_transfers),
             ledger_root: scratch.root(),
@@ -673,6 +773,9 @@ impl Node {
             vrf_proof: hex::encode(&vrf_proof),
             score_root: core::blocktree::scores_root(&blk_scores),
             sketch_root: core::blocktree::sketch_root(&blk_sketches),
+            model_root: post_model.model_root(),
+            vrf_attempt: attempt,
+            version: core::expected_version(hh + 1),
         };
         let stored = StoredBlock {
             header: WireHeader::from_core(&header),
@@ -831,24 +934,61 @@ impl Node {
         let h = self.head_height();
         info!(height = h, head = &self.tree.head[..10],
               supply = self.tree.head_ledger().supply(), "head advanced");
-        // keep the bridge synced with a sparse state diff
+        // keep the bridge synced with a sparse state diff — or, across a v1
+        // GROWTH boundary, an explicit Grow message. (The old zip silently
+        // TRUNCATED on a length change, which would have desynced the trainer
+        // exactly at the first growth event.)
         if self.bridge_synced {
-            if let (Some(new_w), Some(old_w)) =
-                (self.tree.state.get(&self.tree.head), self.tree.state.get(old_head))
-            {
-                let diff: Vec<i64> = new_w.iter().zip(old_w)
-                    .map(|(a, b)| a - b).collect();
-                let sparse = Payload::from_dense_i64(&diff);
-                let _ = self.bridge_tx.try_send(ToBridge::Advance { height: h, sparse });
-            } else {
-                // reorg past pruned state — bridge must resync from scratch
-                self.send_bridge_state();
+            match (self.tree.state.get(&self.tree.head), self.tree.state.get(old_head)) {
+                (Some(new_w), Some(old_w)) if new_w.len() == old_w.len() => {
+                    let diff: Vec<i64> = new_w.iter().zip(old_w)
+                        .map(|(a, b)| a - b).collect();
+                    let sparse = Payload::from_dense_i64(&diff);
+                    let _ = self.bridge_tx.try_send(ToBridge::Advance {
+                        height: h, dim: new_w.len() as u64, sparse });
+                }
+                (Some(new_w), Some(old_w)) => {
+                    // dimension changed: single-page growth gets the fast path
+                    // (advance over the old span, then Grow with the appended
+                    // page init); anything stranger falls back to full resync.
+                    let old_model = self.tree.model.get(old_head);
+                    let new_model = &self.tree.model[&self.tree.head];
+                    let grew_one = old_model.map(|m|
+                        new_model.pages.len() == m.pages.len() + 1
+                        && new_w.len() > old_w.len()).unwrap_or(false);
+                    if grew_one {
+                        let diff: Vec<i64> = new_w[..old_w.len()].iter().zip(old_w)
+                            .map(|(a, b)| a - b).collect();
+                        let sparse = Payload::from_dense_i64(&diff);
+                        let _ = self.bridge_tx.try_send(ToBridge::Advance {
+                            height: h, dim: old_w.len() as u64, sparse });
+                        let page = new_model.pages.last().unwrap();
+                        info!(height = h, page_id = new_model.pages.len() - 1,
+                              layer = page.layer,
+                              "GROWTH: syncing the new expert page to the trainer");
+                        let _ = self.bridge_tx.try_send(ToBridge::Grow {
+                            height: h,
+                            new_dim: new_w.len() as u64,
+                            page_id: (new_model.pages.len() - 1) as u64,
+                            layer: page.layer,
+                            expert: page.expert,
+                            init: new_w[old_w.len()..].to_vec(),
+                        });
+                    } else {
+                        self.send_bridge_state();
+                    }
+                }
+                _ => {
+                    // reorg past pruned state — bridge must resync from scratch
+                    self.send_bridge_state();
+                }
             }
         }
         if h % SNAPSHOT_EVERY == 0 {
             self.store.write_snapshot(&self.tree.head, h,
                                       &self.tree.state[&self.tree.head],
-                                      self.tree.head_ledger());
+                                      self.tree.head_ledger(),
+                                      &self.tree.model[&self.tree.head]);
         }
         // the head moved: prune mempools + pending against it
         self.evict_delta_pool();
@@ -906,9 +1046,39 @@ impl Node {
     fn send_bridge_state(&mut self) {
         let h = self.head_height();
         let state = self.tree.state[&self.tree.head].clone();
-        if self.bridge_tx.try_send(ToBridge::State { height: h, state }).is_ok() {
+        let model = &self.tree.model[&self.tree.head];
+        // v1: per-layer expert counts so the trainer builds the exact (possibly
+        // grown, ragged) architecture before loading the chain-order state.
+        let n_layers = self.tree.params.spec.n_layers;
+        let mut epl = vec![0u64; n_layers as usize];
+        for p in &model.pages {
+            if p.kind == "expert" && p.layer >= 0 {
+                epl[p.layer as usize] += 1;
+            }
+        }
+        if self.bridge_tx.try_send(ToBridge::State {
+            height: h, state, experts_per_layer: epl,
+        }).is_ok() {
             self.bridge_synced = true;
         }
+    }
+
+    /// v1 producer sortition: the lowest attempt (0..=max_allowed, widening
+    /// with time inside the round) at which OUR key is eligible for the next
+    /// height — None if none yet. Deterministic per (head, height, attempt).
+    fn eligible_attempt(&self, max_allowed: u64) -> Option<u64> {
+        let led = self.tree.head_ledger();
+        let stake = led.balance(&core::token::address(&self.key.pub_hex()));
+        let total = led.supply();
+        let h = self.head_height() + 1;
+        for a in 0..=max_allowed.min(core::lottery::ATTEMPT_MAX) {
+            let proof = core::lottery::vrf_prove(&self.key, &self.tree.head, h, a);
+            if core::lottery::eligible(&self.key.pub_hex(), &proof,
+                                       &self.tree.head, h, a, stake, total) {
+                return Some(a);
+            }
+        }
+        None
     }
 
     // ---- api -------------------------------------------------------------
@@ -928,6 +1098,23 @@ impl Node {
             // >0 means this node is training but its deltas keep missing the
             // block window — mining for nothing. Visible, not silent.
             "stale_deltas": self.stale_deltas,
+            "quota_rejects": self.quota_rejects,
+            // v1 capacity telemetry: the model's shape + controller state, so
+            // the retarget is observable ("the network grew its brain at block
+            // N" must be visible before it's ever exciting).
+            "model": {
+                "model_root": self.tree.model[&self.tree.head].model_root(),
+                "dim": self.tree.model[&self.tree.head].dim(),
+                "pages_total": self.tree.model[&self.tree.head].pages.len(),
+                "expert_pages": self.tree.model[&self.tree.head].n_expert_pages(),
+                "expert_pages_active":
+                    self.tree.model[&self.tree.head].n_active_expert_pages(),
+                "quota_4dp": self.tree.model[&self.tree.head].quota_4dp,
+                "window_id": self.tree.model[&self.tree.head].window_id,
+                "pending_growth":
+                    self.tree.model[&self.tree.head].pending_growth.len(),
+                "growth_events": self.tree.model[&self.tree.head].events_total,
+            },
         })
     }
 
@@ -960,6 +1147,26 @@ impl Node {
             g("gossiped deltas omitted from foreign blocks (censorship \
                suspicion; #114 observable half)", "omitted_deltas_total",
               self.omitted_deltas.values().sum::<u64>()),
+            g("deltas rejected for page-claim/quota violations (v1)",
+              "quota_rejects", self.quota_rejects),
+            g("model dimension (total parameters)", "model_dim",
+              self.tree.model[&self.tree.head].dim()),
+            g("total pages in the model's page table", "model_pages",
+              self.tree.model[&self.tree.head].pages.len() as u64),
+            g("ACTIVE expert pages (frozen ones serve but reject deltas)",
+              "model_expert_pages_active",
+              self.tree.model[&self.tree.head].n_active_expert_pages() as u64),
+            g("capacity work quota in 1e-4 units (10000 = 1.0)",
+              "capacity_quota_4dp",
+              self.tree.model[&self.tree.head].quota_4dp.max(0) as u64),
+            g("retarget window id", "capacity_window",
+              self.tree.model[&self.tree.head].window_id),
+            g("growth events scheduled on this chain (ratchet count)",
+              "capacity_growth_events",
+              self.tree.model[&self.tree.head].events_total),
+            g("growth events announced, awaiting activation",
+              "capacity_pending_growth",
+              self.tree.model[&self.tree.head].pending_growth.len() as u64),
         ].concat()
     }
 
@@ -1130,8 +1337,8 @@ pub async fn run(
                         dial_peers(&mut swarm, &node.cfg.peers.clone());
                     }
                 }
-                if node.cfg.produce && round >= 0 && round != node.last_proposed_round {
-                    node.last_proposed_round = round;
+                if node.cfg.produce && round >= 0 && round != node.last_trained_round {
+                    node.last_trained_round = round;
                     // republish unconfirmed deltas for the current height: a
                     // publish can silently fail before the gossip mesh forms
                     // (InsufficientPeers), so retry each round until included
@@ -1144,11 +1351,15 @@ pub async fn run(
                     for (tx, payload) in resend {
                         node.publish(&mut swarm, &Gossip::Dtx { tx, payload });
                     }
-                    // train EVERY round (the delta gossips to whoever proposes);
-                    // proposing itself may rotate (devnet) or be open (mainnet)
+                    // train EVERY round (the delta gossips to whoever proposes)
                     if node.bridge_synced && !node.train_inflight {
                         node.train_inflight = true;
                         node.train_deadline = now() + TRAIN_TIMEOUT_SECS;
+                        let model = &node.tree.model[&node.tree.head];
+                        let active_pages: Vec<u32> = model.pages.iter().enumerate()
+                            .filter(|(_, p)| p.status == "A")
+                            .map(|(i, _)| i as u32).collect();
+                        let min_nnz = model.required_nnz(&active_pages);
                         let _ = node.bridge_tx.try_send(ToBridge::Train {
                             height: node.head_height(),
                             seed: round as u64,
@@ -1157,14 +1368,26 @@ pub async fn run(
                             // gossip, so the delta lands while it's still
                             // includable rather than arriving stale.
                             budget_s: node.cfg.interval * 0.6,
+                            min_nnz,
+                            active_pages,
                         });
                     }
-                    let my_turn = match node.cfg.rotate {
-                        Some((n, id)) => (round as u64) % n == id,
-                        None => true,                   // open proposing; fork choice settles
-                    };
-                    if my_turn {
-                        if let Some((stored, block)) = node.build_candidate() {
+                }
+                // v1 PROPOSING (replaces devnet rotation): checked EVERY tick,
+                // once per round — the eligibility ladder widens with time
+                // inside the round (attempt a usable after a·interval/8 s of
+                // politeness), so a prompt eligible proposer publishes early
+                // and dominates fork choice, while ATTEMPT_MAX guarantees a
+                // 2-miner fleet can never stall.
+                if node.cfg.produce && round >= 0 && round != node.last_proposed_round {
+                    let elapsed_in_round =
+                        (now() - node.t0 - jitter) - round as f64 * node.cfg.interval;
+                    let max_allowed =
+                        (elapsed_in_round / (node.cfg.interval / 8.0)).floor()
+                            .max(0.0) as u64;
+                    if let Some(attempt) = node.eligible_attempt(max_allowed) {
+                        node.last_proposed_round = round;
+                        if let Some((stored, block)) = node.build_candidate(attempt) {
                             let bh = stored.hash();
                             match node.tree.add_block(block) {
                                 Ok(_) => {
@@ -1242,7 +1465,7 @@ pub async fn run(
                         }
                     }
                 }
-                FromBridge::Delta { height, loss, payload } => {
+                FromBridge::Delta { height, loss, pages, payload } => {
                     node.train_inflight = false;
                     if height != node.head_height() {
                         // A delta is includable only at base_height == head, so a
@@ -1264,13 +1487,19 @@ pub async fn run(
                         node.stale_deltas = 0;
                         let dense = payload.dense().unwrap_or_default();
                         let dh = core::delta_hash(&core::int64_bytes(&dense));
+                        // v1: canonicalize the trainer's claim set (sorted,
+                        // deduped) — the signed tx must carry the exact form
+                        // validation requires.
+                        let mut claim: Vec<u32> = pages.clone();
+                        claim.sort_unstable();
+                        claim.dedup();
                         let mut tx = core::BackpropTx {
                             miner: node.key.pub_hex(),
                             base_height: height,
-                            shard_id: 0,
                             delta_hash: dh.clone(),
                             da_pointer: format!("da://{dh}"),
                             bond: 0, // bootstrap: no bond; a bonded-miner policy is config
+                            pages: claim,
                             // rev 5: name the staked corpora this miner trains on so
                             // the delta is provenanced and the data share pays their owners
                             data_refs: node.cfg.data_refs.clone(),
@@ -1584,7 +1813,9 @@ pub async fn run(
     // final report + snapshot
     let h = node.head_height();
     node.store.write_snapshot(&node.tree.head, h,
-                              &node.tree.state[&node.tree.head], node.tree.head_ledger());
+                              &node.tree.state[&node.tree.head],
+                              node.tree.head_ledger(),
+                              &node.tree.model[&node.tree.head]);
     let mut lineage = Vec::new();
     let mut cur = node.tree.head.clone();
     while cur != node.tree.genesis_hash {

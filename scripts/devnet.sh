@@ -8,21 +8,21 @@ S=${1:-90}
 FOUNDER=${FOUNDER:-3432d48fd6878b4f2e7a1e40cc15e112c512fae7}
 rm -rf /tmp/devnet0 /tmp/devnet1
 uv run --with torch --with numpy --with pynacl python -m client.make_genesis \
-    --model toy --seed 1337 --out /tmp/devnet_genesis.bin
+    --model toy-moe --seed 1337 --out /tmp/devnet_genesis.bin
 $B --network local --data-dir /tmp/devnet0 --key-seed $(printf 'a%.0s' {1..64} | head -c 64) \
-   --genesis-file /tmp/devnet_genesis.bin --port 7900 --api-port 8190 \
-   --bridge-port 7999 --produce --data-refs genesis --interval 6 --rotate 2,0 --seconds $S \
+   --genesis-file /tmp/devnet_genesis.bin --port 7930 --api-port 8390 \
+   --bridge-port 7969 --produce --data-refs genesis --interval 6 --seconds $S \
    --data-contributor $FOUNDER > /tmp/devnet0.log 2>&1 &
 $B --network local --data-dir /tmp/devnet1 --key-seed $(printf 'b%.0s' {1..64} | head -c 64) \
-   --genesis-file /tmp/devnet_genesis.bin --port 7901 --api-port 8191 \
-   --bridge-port 7998 --produce --data-refs genesis --interval 6 --rotate 2,1 --seconds $S \
-   --peers /ip4/127.0.0.1/udp/7900/quic-v1 \
+   --genesis-file /tmp/devnet_genesis.bin --port 7931 --api-port 8391 \
+   --bridge-port 7968 --produce --data-refs genesis --interval 6 --seconds $S \
+   --peers /ip4/127.0.0.1/udp/7930/quic-v1 \
    --data-contributor $FOUNDER > /tmp/devnet1.log 2>&1 &
 sleep 3
 uv run --with torch --with numpy --with pynacl python -m client.miner_bridge \
-    --node-port 7999 --model toy --inner 10 --batch 16 --device cpu > /tmp/devnetb0.log 2>&1 &
+    --node-port 7969 --model toy-moe --inner 10 --batch 16 --device cpu > /tmp/devnetb0.log 2>&1 &
 uv run --with torch --with numpy --with pynacl python -m client.miner_bridge \
-    --node-port 7998 --model toy --inner 10 --batch 16 --device cpu > /tmp/devnetb1.log 2>&1 &
+    --node-port 7968 --model toy-moe --inner 10 --batch 16 --device cpu > /tmp/devnetb1.log 2>&1 &
 wait %1 %2 || true
 kill %3 %4 2>/dev/null || true
 L0=$(grep LINEAGE /tmp/devnet0.log); L1=$(grep LINEAGE /tmp/devnet1.log)

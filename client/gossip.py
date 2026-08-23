@@ -44,8 +44,31 @@ from .trainer import DiLoCoMiner, flat_params, set_flat_params
 KEEP_FRAC = 0.02             # top-k delta compression (50x on the wire)
 
 GOSSIP_CFG = GPTConfig(n_layer=2, n_head=4, n_embd=64, block_size=64)   # toy: light gossip
-SMALL_CFG = GPTConfig(n_layer=12, n_head=12, n_embd=768, block_size=256)  # the real 86M
-MODEL_PRESETS = {"toy": GOSSIP_CFG, "small": SMALL_CFG}
+SMALL_CFG = GPTConfig(n_layer=12, n_head=12, n_embd=768, block_size=256)  # dense 86M (devnet-1)
+# PROTOCOL v1 (devnet-genesis-2): MoE presets — the network model. e_max router
+# columns are preallocated in the backbone so on-chain growth events add expert
+# pages without touching backbone shapes. These numbers are CONSENSUS-frozen at
+# genesis (they define the page table); see docs/genesis-ceremony.md.
+from .moe import MoEGPTConfig, build_moe  # noqa: E402  (after GPTConfig import)
+TOY_MOE_CFG = MoEGPTConfig(n_layer=2, n_head=4, n_embd=64, block_size=64,
+                           n_experts=4, e_max=8, top_k=2)
+SMALL_MOE_CFG = MoEGPTConfig(n_layer=6, n_head=8, n_embd=512, block_size=256,
+                             n_experts=8, e_max=16, top_k=2)   # ≈107.5M total
+MODEL_PRESETS = {"toy": GOSSIP_CFG, "small": SMALL_CFG,
+                 "toy-moe": TOY_MOE_CFG, "small-moe": SMALL_MOE_CFG}
+
+
+def build_preset(name: str, device: str = None, seed: int = None,
+                 experts_per_layer: list[int] | None = None):
+    """Build a preset by name — dense presets via gpt.build, MoE presets via
+    moe.build_moe (optionally with a ragged per-layer expert count, e.g. after
+    on-chain growth). Returns (model, device)."""
+    cfg = MODEL_PRESETS[name]
+    if isinstance(cfg, MoEGPTConfig):
+        return build_moe(cfg, device=device, seed=seed,
+                         experts_per_layer=experts_per_layer)
+    from .gpt import build as _build
+    return _build(cfg, device=device, seed=seed)
 
 # module config — set by CLI flags before nodes are built (watch.py shares these)
 MODEL_CFG = GOSSIP_CFG
@@ -160,7 +183,7 @@ class RealCore:
         led = self.tree.ledger[self.tree.head]
         refs = sorted({e["data_hash"] for e in led.registry.values()
                        if e["status"] == "active"}) or ["genesis"]
-        tx = BackpropTx(miner=self.key.pub, base_height=hh, shard_id=self.node_id,
+        tx = BackpropTx(miner=self.key.pub, base_height=hh,
                         delta_hash=dh, da_pointer=ptr,
                         data_refs=refs).signed(self.key)
         if tx.txid() not in self.seen_tx:
@@ -173,11 +196,11 @@ class RealCore:
         if tx.txid() in self.seen_tx:
             return
         if not tx.verify():
-            _dbg(self.node_id, f"tx from shard{tx.shard_id} REJECT (bad sig)")
+            _dbg(self.node_id, f"tx from {tx.miner[:8]} REJECT (bad sig)")
             return
         dense = decompress(payload)                           # transient — hash check only
         if delta_hash(dense.tobytes()) != tx.delta_hash:
-            _dbg(self.node_id, f"tx from shard{tx.shard_id} REJECT (hash mismatch)")
+            _dbg(self.node_id, f"tx from {tx.miner[:8]} REJECT (hash mismatch)")
             return
         del dense
         self.seen_tx.add(tx.txid())

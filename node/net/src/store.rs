@@ -415,30 +415,51 @@ impl Store {
     /// rename) so a crash mid-write can't leave a torn snapshot the fast path
     /// would trust. The state goes to a binary blob; hash/height/ledger to JSON.
     pub fn write_snapshot(&self, block_hash: &str, height: u64, state: &[i64],
-                          ledger: &TokenLedger) {
+                          ledger: &TokenLedger,
+                          model: &sestrian_core::model_state::ModelState) {
         let bin_tmp = self.dir.join("snapshot.bin.tmp");
         if fs::write(&bin_tmp, sestrian_core::int64_bytes(state)).is_err() {
             return;
         }
         let _ = fs::rename(&bin_tmp, self.dir.join("snapshot.bin"));
-        let meta = serde_json::json!({"hash": block_hash, "height": height,
-                                      "ledger": ledger.to_value()});
+        // format 2 (protocol v1): the ModelState rides as its CANONICAL JSON
+        // string, so the fast-boot seed is byte-identical to what model_root
+        // committed — a divergent fold can never sneak in through a snapshot.
+        let meta = serde_json::json!({"format": 2, "hash": block_hash,
+                                      "height": height,
+                                      "ledger": ledger.to_value(),
+                                      "model_state": model.canonical_json()});
         let json_tmp = self.dir.join("snapshot.json.tmp");
         if fs::write(&json_tmp, meta.to_string()).is_ok() {
             let _ = fs::rename(&json_tmp, self.dir.join("snapshot.json"));
         }
     }
 
-    pub fn read_snapshot(&self) -> Option<(String, u64, Vec<i64>, TokenLedger)> {
+    pub fn read_snapshot(&self)
+        -> Option<(String, u64, Vec<i64>, TokenLedger,
+                   sestrian_core::model_state::ModelState)> {
         let meta: serde_json::Value = serde_json::from_slice(
             &fs::read(self.dir.join("snapshot.json")).ok()?).ok()?;
-        // reject pre-ledger snapshots (older format) — seeding an empty ledger
-        // would corrupt balances, and fast_replay would NOT fall back since it
-        // "succeeded". No ledger field => None => full validated replay.
+        // reject pre-v1 snapshots (format < 2 / no model_state): seeding
+        // without a ModelState would fork the fold; full replay instead.
+        if meta["format"].as_u64() != Some(2) {
+            warn!("snapshot is not format 2 (pre-v1) — ignoring, will full-replay");
+            return None;
+        }
         if !meta["ledger"].is_object() {
             warn!("snapshot has no ledger (old format) — ignoring, will full-replay");
             return None;
         }
+        let model_json: serde_json::Value =
+            serde_json::from_str(meta["model_state"].as_str()?).ok()?;
+        let model = match sestrian_core::model_state::ModelState::from_json_value(
+                &model_json) {
+            Some(m) => m,
+            None => {
+                warn!("snapshot model_state malformed — ignoring, will full-replay");
+                return None;
+            }
+        };
         let raw = fs::read(self.dir.join("snapshot.bin")).ok()?;
         let state = raw.chunks_exact(8)
             .map(|c| i64::from_le_bytes(c.try_into().unwrap())).collect();
@@ -450,25 +471,28 @@ impl Store {
                 return None;
             }
         };
-        Some((meta["hash"].as_str()?.to_string(), meta["height"].as_u64()?, state, ledger))
+        Some((meta["hash"].as_str()?.to_string(), meta["height"].as_u64()?, state,
+              ledger, model))
     }
 
     /// Rebuild the tree + indices from disk. Tries FAST-BOOT from the newest
     /// snapshot (trust the checkpointed state/ledger, validate only the blocks
     /// after it); any problem falls back to full validated replay from genesis.
-    pub fn replay(&self, data_contributor: Option<String>, prune_depth: u64)
+    pub fn replay(&self, data_contributor: Option<String>, prune_depth: u64,
+                  params: &sestrian_core::model_state::GenesisParams)
         -> Option<Rebuilt>
     {
         let genesis = self.read_genesis()?;
         let blocks = self.read_blocks();
-        if let Some((h, height, state, ledger)) = self.read_snapshot() {
+        if let Some((h, height, state, ledger, model)) = self.read_snapshot() {
             if let Some(r) = self.fast_replay(&genesis, &blocks, &data_contributor,
-                                              prune_depth, &h, height, state, ledger) {
+                                              prune_depth, &h, height, state,
+                                              ledger, model, params) {
                 return Some(r);
             }
             warn!("fast-boot unusable — falling back to full validated replay");
         }
-        self.full_replay(genesis, &blocks, data_contributor, prune_depth)
+        self.full_replay(genesis, &blocks, data_contributor, prune_depth, params)
     }
 
     /// Fast path: seed the tree with the snapshot's TRUSTED state+ledger at its
@@ -478,10 +502,12 @@ impl Store {
     #[allow(clippy::too_many_arguments)]
     fn fast_replay(&self, genesis: &[i64], blocks: &[StoredBlock],
                    dc: &Option<String>, prune_depth: u64, snap_hash: &str,
-                   snap_h: u64, snap_state: Vec<i64>, snap_ledger: TokenLedger)
+                   snap_h: u64, snap_state: Vec<i64>, snap_ledger: TokenLedger,
+                   snap_model: sestrian_core::model_state::ModelState,
+                   params: &sestrian_core::model_state::GenesisParams)
         -> Option<Rebuilt>
     {
-        let mut tree = BlockTree::new(genesis.to_vec(), dc.clone());
+        let mut tree = BlockTree::new(genesis.to_vec(), dc.clone(), params.clone());
         tree.prune_depth = Some(prune_depth);
 
         // 1. headers + cum_work for every block up to the snapshot height, in
@@ -502,9 +528,12 @@ impl Store {
         if !tree.blocks.contains_key(snap_hash) {
             return None; // snapshot block not on disk — can't trust it
         }
-        // 2. seed the checkpointed state + ledger at the snapshot block
+        // 2. seed the checkpointed state + ledger + MODEL STATE at the
+        //    snapshot block (v1: forward validation folds from this — the
+        //    model_root commitment makes a divergent seed a loud failure)
         tree.state.insert(snap_hash.to_string(), snap_state);
         tree.ledger.insert(snap_hash.to_string(), snap_ledger);
+        tree.model.insert(snap_hash.to_string(), snap_model);
         tree.head = snap_hash.to_string();
 
         // 3. index every stored block so we can still serve old ones; validate
@@ -540,8 +569,10 @@ impl Store {
     }
 
     fn full_replay(&self, genesis: Vec<i64>, blocks: &[StoredBlock],
-                   dc: Option<String>, prune_depth: u64) -> Option<Rebuilt> {
-        let mut tree = BlockTree::new(genesis, dc);
+                   dc: Option<String>, prune_depth: u64,
+                   params: &sestrian_core::model_state::GenesisParams)
+        -> Option<Rebuilt> {
+        let mut tree = BlockTree::new(genesis, dc, params.clone());
         tree.prune_depth = Some(prune_depth);
         let mut index = HashMap::new();
         let mut cache = HashMap::new();
@@ -586,11 +617,26 @@ mod store_tests {
     }
 
     fn block_line(height: u64) -> String {
+        // v1 wire form: every header field present — a line missing any of
+        // them is a pre-fork artifact and read_blocks must NOT parse it.
         let hdr = format!(
             "{{\"height\":{height},\"prev_hash\":\"00\",\"state_root\":\"aa\",\
 \"txset_root\":\"bb\",\"n_txs\":0,\"work\":1,\"proposer\":\"p\",\
-\"transfer_root\":\"\",\"ledger_root\":\"\",\"data_root\":\"\"}}");
+\"transfer_root\":\"\",\"ledger_root\":\"\",\"data_root\":\"\",\
+\"vrf_proof\":\"\",\"score_root\":\"\",\"sketch_root\":\"\",\
+\"model_root\":\"cc\",\"vrf_attempt\":0,\"version\":1}}");
         format!("{{\"header\":{hdr},\"txs\":[],\"transfers\":[],\"data_txs\":[]}}")
+    }
+
+    #[test]
+    fn pre_v1_block_lines_fail_loudly() {
+        // the old (defaulted) wire format must not half-parse into a block
+        let legacy = "{\"header\":{\"height\":1,\"prev_hash\":\"00\",\
+\"state_root\":\"aa\",\"txset_root\":\"bb\",\"n_txs\":0,\"work\":1,\
+\"proposer\":\"p\",\"transfer_root\":\"\",\"ledger_root\":\"\",\
+\"data_root\":\"\"},\"txs\":[],\"transfers\":[],\"data_txs\":[]}";
+        assert!(serde_json::from_str::<StoredBlock>(legacy).is_err(),
+                "pre-v1 stored blocks must be rejected, not defaulted");
     }
 
     #[test]

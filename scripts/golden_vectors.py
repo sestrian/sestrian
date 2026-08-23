@@ -104,14 +104,17 @@ def main():
     v["ed25519"] = [{"seed_hex": key.sk.hex(), "pub_hex": key.pub,
                      "msg_hex": msg.hex(), "sig_hex": key.sign(msg).hex()}]
 
-    # --- BackpropTx: signing bytes / txid / signature (with a bond) -----------
-    tx = BackpropTx(miner=key.pub, base_height=7, shard_id=3,
+    # --- BackpropTx (v1): signing bytes / txid / sig — pages claim set, no
+    #     shard_id; pages canonicalized (sorted, deduped) like data_refs -------
+    tx = BackpropTx(miner=key.pub, base_height=7,
                     delta_hash=delta_hash(d.tobytes()),
                     da_pointer=f"da://{delta_hash(d.tobytes())}", bond=5_000_000,
+                    pages=[4, 0, 4, 2],                       # unsorted + dup
                     data_refs=["bb" * 32, "aa" * 32, "aa" * 32]).signed(key)  # rev 5: unsorted+dup
     v["backprop_tx"] = [{
-        "miner": tx.miner, "base_height": tx.base_height, "shard_id": tx.shard_id,
+        "miner": tx.miner, "base_height": tx.base_height,
         "delta_hash": tx.delta_hash, "da_pointer": tx.da_pointer, "bond": tx.bond,
+        "pages": tx.canonical_pages(),
         "data_refs": tx.canonical_refs(),
         "signing_bytes_hex": tx.signing_bytes().hex(),
         "txid": tx.txid(), "sig_hex": tx.sig.hex(), "verifies": tx.verify(),
@@ -121,24 +124,27 @@ def main():
     txs = []
     for i in range(3):
         di = quantize(rng.standard_normal(8) * 0.01)
-        txs.append(BackpropTx(miner=key.pub, base_height=1, shard_id=i,
+        txs.append(BackpropTx(miner=key.pub, base_height=1, pages=[i],
                               delta_hash=delta_hash(di.tobytes()),
                               da_pointer=f"da://{delta_hash(di.tobytes())}").signed(key))
     v["txset_root"] = [{"txids": [t.txid() for t in txs], "root": txset_root(txs)}]
 
-    # --- header hash: python json.dumps(sort_keys=True) byte format -----------
+    # --- header hash (v1): python json.dumps(sort_keys=True) byte format, now
+    #     including model_root, vrf_attempt and version --------------------------
     h = Header(height=5, prev_hash="ab" * 32, state_root="cd" * 32,
                txset_root="ef" * 32, n_txs=2, work=1500, proposer=key.pub,
                transfer_root="12" * 32, ledger_root="34" * 32,
                data_root="56" * 32, vrf_proof="ab" * 32, score_root="77" * 32,
-               sketch_root="88" * 32)
+               sketch_root="88" * 32, model_root="99" * 32, vrf_attempt=3,
+               version=1)
     v["header"] = [{
         "height": h.height, "prev_hash": h.prev_hash, "state_root": h.state_root,
         "txset_root": h.txset_root, "n_txs": h.n_txs, "work": h.work,
         "proposer": h.proposer, "transfer_root": h.transfer_root,
         "ledger_root": h.ledger_root, "data_root": h.data_root,
         "vrf_proof": h.vrf_proof, "score_root": h.score_root,
-        "sketch_root": h.sketch_root,
+        "sketch_root": h.sketch_root, "model_root": h.model_root,
+        "vrf_attempt": h.vrf_attempt, "version": h.version,
         "canonical_json": json.dumps(h.__dict__, sort_keys=True),
         "hash": h.block_hash(),
     }]
@@ -408,66 +414,185 @@ def main():
         "proof": [[side, sib.hex()] for side, sib in pf],
     }]
 
-    # --- proposer lottery (§7.4 interim): verifiable stake-weighted sortition -
+    # --- proposer lottery (v1): verifiable stake-weighted sortition, ENFORCED,
+    #     with attempt widening, the cold-start rule and the ATTEMPT_MAX floor -
     from rig import lottery as _lot
     lot_prev, lot_h = "ab" * 32, 42
     lot_cases = []
-    for stake, total in [(1_000_000_000, 1_000_000_000), (1, 10**18)]:
-        proof = _lot.vrf_prove(key, lot_prev, lot_h)
+    for stake, total, attempt in [
+            (1_000_000_000, 1_000_000_000, 0),   # whale, first attempt
+            (1, 10**18, 0),                      # dust, first attempt
+            (1, 10**18, 8),                      # dust, widened 2^8
+            (0, 10**18, 0),                      # zero stake
+            (0, 0, 0),                           # COLD START: empty ledger
+            (0, 0, 1),                           # cold start only at attempt 0
+            (1, 10**18, _lot.ATTEMPT_MAX),       # the liveness floor
+    ]:
+        proof = _lot.vrf_prove(key, lot_prev, lot_h, attempt)
         lot_cases.append({
             "pub": key.pub, "seed_hex": key.sk.hex(),
-            "prev_hash": lot_prev, "height": lot_h,
+            "prev_hash": lot_prev, "height": lot_h, "attempt": attempt,
             "stake": stake, "total_stake": total,
             "proof_sig_hex": proof.hex(),
             "vrf_output_hex": _lot.vrf_output(proof).to_bytes(32, "big").hex(),
-            "eligible": _lot.eligible(key.pub, proof, lot_prev, lot_h, stake, total),
+            "work": _lot.attempt_work(proof, attempt),
+            "eligible": _lot.eligible(key.pub, proof, lot_prev, lot_h, attempt,
+                                      stake, total),
         })
     v["lottery"] = lot_cases
 
-    # --- capacity retarget (§9.4a): the deterministic decision trace ----------
-    from rig.capacity import CapacityRetarget
+    # --- capacity retarget (§9.4a, INTEGER): the deterministic decision trace -
+    from rig.capacity import CapacityRetarget, simulate as _cap_sim
     ctrl = CapacityRetarget()
-    fleet = [1.0, 1.2, 1.5, 2.0, 2.0, 2.0, 2.0, 2.0, 0.5, 0.3, 0.3, 0.3, 1.0, 1.5, 2.0]
-    mpfu, per_unit = 4.0, 8.0
-    cap_windows = []
-    for f in fleet:
-        capacity = f * per_unit
-        accepted = int(capacity / max(ctrl.quota, 1e-9))
-        load = ctrl.active_modules / (mpfu * max(f, 1e-9))
-        staleness = max(0.0, min(1.0, load - 1.0))
-        accepted = int(accepted * (1.0 - staleness))
-        dec = ctrl.observe_window(accepted, staleness)
-        cap_windows.append({"accepted": accepted, "staleness": staleness, **dec})
-    v["capacity"] = [{"windows": cap_windows}]
+    fleet_2dp = [100, 120, 150, 200, 200, 200, 200, 200, 5000, 5000, 5000,
+                 5000, 5000, 5000, 50, 30, 30, 30, 100, 150, 5000, 5000]
+    cap_windows = _cap_sim(ctrl, fleet_2dp)
+    v["capacity"] = [{"fleet_2dp": fleet_2dp, "per_unit": 8,
+                      "windows": cap_windows}]
 
-    # --- FULL-CHAIN REPLAY: a mini chain with a fork and settled transfers ----
-    # Rust must rebuild every block, validate it completely (sigs, state
-    # transition, txset/transfer/ledger roots), run fork choice, and land on the
-    # same head with the same roots.
-    dim = 16
-    genesis_w = quantize(rng.standard_normal(dim))
-    m0, m1 = Key.generate(b"chain-miner-0" + b"0" * 19), Key.generate(b"chain-miner-1" + b"0" * 19)
+    # --- v1 PAGE-MERKLE state root: domain-separated tree over page bytes -----
+    from rig import merkle as _mk
+    from rig.model_state import (GenesisParams as _GP, ModelSpec as _MS,
+                                 ModelState as _MSt, fold as _fold,
+                                 page_init as _pinit, page_state_root as _psr)
+    spec = _MS(n_layers=2, d_model=4, d_ff=8, n_experts_initial=2, e_max=4,
+               backbone_params=100)
+    st0 = _MSt.genesis(spec)
+    wv = quantize(rng.standard_normal(st0.dim()) * 0.5)
+    one_page = _MSt([[0, 8, "backbone", -1, -1, "A"]])
+    w8 = quantize(rng.standard_normal(8))
+    three = _MSt([[0, 3, "backbone", -1, -1, "A"],
+                  [3, 6, "expert", 0, 0, "A"],
+                  [6, 9, "expert", 0, 1, "F"]])        # odd count + a frozen page
+    w9 = quantize(rng.standard_normal(9))
+    v["page_root"] = [
+        {"pages": one_page.pages, "w": w8.tolist(),
+         "leaf0_hex": _mk.leaf_hash(w8.tobytes()).hex(),
+         "root": _psr(w8, one_page)},
+        {"pages": three.pages, "w": w9.tolist(), "root": _psr(w9, three)},
+        {"pages": st0.pages, "w": wv.tolist(), "root": _psr(wv, st0)},
+    ]
+
+    # --- v1 deterministic page init: hash-stream, byte-exact ------------------
+    tiny = _MS(n_layers=1, d_model=2, d_ff=3, n_experts_initial=1, e_max=2,
+               backbone_params=10)
+    pi = _pinit("ee" * 32, 5, tiny)
+    v["page_init"] = [{
+        "trigger": "ee" * 32, "page_id": 5,
+        "d_model": tiny.d_model, "d_ff": tiny.d_ff,
+        "page_len": tiny.expert_page_len,
+        "init": pi.tolist(),
+    }]
+
+    # --- v1 ModelState: canonical JSON + model_root ---------------------------
+    st_m = st0.copy()
+    st_m.quota_4dp = 12_345
+    st_m.pending_growth = [[7, 1, "cc" * 32]]
+    st_m.window_id, st_m.win_accepted, st_m.win_zero_scored = 6, 3, 1
+    st_m.events_total = 1
+    st_m.pages[2][5] = "F"
+    v["model_state"] = [
+        {"canonical_json": st0.canonical_json(), "root": st0.model_root()},
+        {"canonical_json": st_m.canonical_json(), "root": st_m.model_root()},
+    ]
+
+    # --- v1 work quota: required_nnz(claimed, quota_4dp) ----------------------
+    quota_rows = []
+    for q in (2_500, 10_000, 20_000, 80_000):
+        stq = st0.copy(); stq.quota_4dp = q
+        quota_rows.append({"quota_4dp": q,
+                           "all_pages": stq.required_nnz(list(range(len(st0.pages)))),
+                           "one_expert": stq.required_nnz([1]),
+                           "backbone": stq.required_nnz([0])})
+    v["quota"] = [{"spec_dim": st0.dim(),
+                   "expert_page_len": spec.expert_page_len,
+                   "rows": quota_rows}]
+
+    # --- v1 controller fold: scripted per-block signals -> ModelState roots ---
+    fparams = _GP(spec=spec, retarget_window=2, target_deltas=4,
+                  quota_max_4dp=20_000, k_sustain=2, announce_lead=1)
+    fst = _MSt.genesis(spec)
+    fold_steps = []
+    for fh in range(1, 17):
+        n_txs = 6 if fh <= 12 else 0            # surplus then collapse
+        fst, facts = _fold(fst, fparams, fh, n_txs, 0, f"{fh:02x}" * 32)
+        fold_steps.append({"height": fh, "n_txs": n_txs, "zero_scored": 0,
+                           "prev_hash": f"{fh:02x}" * 32,
+                           "activations": [[p, l, e, t] for p, l, e, t in facts],
+                           "model_root": fst.model_root()})
+    v["controller_fold"] = [{
+        "spec": {"n_layers": spec.n_layers, "d_model": spec.d_model,
+                 "d_ff": spec.d_ff, "n_experts_initial": spec.n_experts_initial,
+                 "e_max": spec.e_max, "backbone_params": spec.backbone_params},
+        "params": {"retarget_window": fparams.retarget_window,
+                   "target_deltas": fparams.target_deltas,
+                   "quota_min_4dp": fparams.quota_min_4dp,
+                   "quota_max_4dp": fparams.quota_max_4dp,
+                   "stale_ceiling_4dp": fparams.stale_ceiling_4dp,
+                   "k_sustain": fparams.k_sustain,
+                   "growth_bound": fparams.growth_bound,
+                   "announce_lead": fparams.announce_lead},
+        "steps": fold_steps,
+        "final_dim": fst.dim(),
+        "final_model_root": fst.model_root(),
+    }]
+
+    # --- FULL-CHAIN REPLAY (v1): a mini MoE chain with page-claimed deltas,
+    # eligibility attempts, a fork, settled transfers, a data submit, window
+    # rollovers, AND an on-chain growth event with a post-growth block. Rust
+    # must rebuild every block, validate it completely, run fork choice, and
+    # land on the same head with the same roots — bit-exact ACROSS the
+    # dimension change.
+    cr_params = _GP(spec=spec, retarget_window=2, target_deltas=4,
+                    quota_max_4dp=20_000, k_sustain=2, announce_lead=1)
+    genesis_w = quantize(rng.standard_normal(_MSt.genesis(spec).dim()) * 0.1)
+    m0, m1, m2 = (Key.generate(b"chain-miner-0" + b"0" * 19),
+                  Key.generate(b"chain-miner-1" + b"0" * 19),
+                  Key.generate(b"chain-miner-2" + b"0" * 19))
     founder = address(Key.generate(b"chain-founder" + b"0" * 19).pub)
-    tree = BlockTree(genesis_w, data_contributor=founder)
+    tree = BlockTree(genesis_w, data_contributor=founder, params=cr_params)
 
-    def mk_tx(miner_key, height, shard, delta):
+    def elig_attempt(parent, k):
+        led = tree.ledger[parent]
+        hh = tree.blocks[parent].header.height + 1
+        stake, total = led.balance(address(k.pub)), led.supply()
+        for a in range(_lot.ATTEMPT_MAX + 1):
+            pr = _lot.vrf_prove(k, parent, hh, a)
+            if _lot.eligible(k.pub, pr, parent, hh, a, stake, total):
+                return a
+        raise AssertionError("ATTEMPT_MAX must be eligible")
+
+    def mk_body(model, pages):
+        b = np.zeros(model.dim(), dtype=np.int64)
+        for p in pages:
+            s, e = model.page_span(p)
+            b[s:e] = quantize(rng.standard_normal(e - s) * 0.1)
+            if not b[s:e].any():
+                b[s] = 1
+        return b
+
+    def mk_tx(miner_key, height, pages, delta):
         dh = delta_hash(delta.tobytes())
         # rev 5: name the always-active genesis corpus so the delta is provenanced
-        return BackpropTx(miner=miner_key.pub, base_height=height, shard_id=shard,
-                          delta_hash=dh, da_pointer=f"da://{dh}",
+        return BackpropTx(miner=miner_key.pub, base_height=height,
+                          delta_hash=dh, da_pointer=f"da://{dh}", pages=pages,
                           data_refs=["genesis"]).signed(miner_key)
 
     blocks_out = []
 
-    def add(parent, miner_keys, proposer_key, transfers=(), data_txs=()):
+    def add(parent, miner_keys, proposer_key, transfers=(), data_txs=(),
+            pages=None):
         hh = tree.blocks[parent].header.height
+        model = tree.model[parent]
+        claim = pages if pages is not None else \
+            [i for i in range(len(model.pages)) if model.is_active(i)]
         txs, bodies = [], {}
-        for s, mk in enumerate(miner_keys):
-            d = quantize(rng.standard_normal(dim) * 0.1)
-            tx = mk_tx(mk, hh, s, d)
+        for mk in miner_keys:
+            d = mk_body(model, claim)
+            tx = mk_tx(mk, hh, list(claim), d)
             txs.append(tx); bodies[tx.da_pointer] = d
-        # rev 7: distinct nonzero committed scores lock score_root + the
-        # score-weighted miner split + score-weighted data credits
+        # rev 7: distinct NONZERO committed scores lock score_root, the
+        # score-weighted split, and keep the fold's staleness proxy at 0
         scr = {t.txid(): 100_000 * (i + 1) for i, t in enumerate(txs)}
         # rev 8: real sketches of the delta bodies lock sketch_root + accrual
         from rig.sketch import sketch_dense as _skd
@@ -475,14 +600,16 @@ def main():
         blk = build_block(tree, parent, txs, bodies,
                           {t.txid(): 1.0 for t in txs}, proposer_key,
                           transfers=list(transfers), data_txs=list(data_txs),
-                          scores=scr, sketches=skt)
+                          scores=scr, sketches=skt,
+                          attempt=elig_attempt(parent, proposer_key))
         tree.add_block(blk)
         blocks_out.append({
             "parent": parent, "hash": blk.hash,
             "header": dict(blk.header.__dict__),
             "txs": [{"miner": t.miner, "base_height": t.base_height,
-                     "shard_id": t.shard_id, "delta_hash": t.delta_hash,
+                     "delta_hash": t.delta_hash,
                      "da_pointer": t.da_pointer, "bond": t.bond,
+                     "pages": t.canonical_pages(),
                      "data_refs": t.canonical_refs(), "sig_hex": t.sig.hex()}
                     for t in txs],
             "scores": blk.scores,
@@ -498,30 +625,56 @@ def main():
         })
         return blk.hash
 
-    b1 = add(tree.genesis.hash, [m0, m1], m0)          # height 1: both mine
+    b1 = add(tree.genesis.hash, [m0, m1, m2], m0)      # height 1: all mine
     # fund check: m0 has miner+proposer share now; send some to m1 in block 2
     pay = TransferTx(from_pub=m0.pub, to_addr=address(m1.pub),
                      amount=tree.ledger[b1].balance(address(m0.pub)) // 4,
                      nonce=0).signed(m0)
-    b2 = add(b1, [m0], m1, transfers=[pay])            # height 2: transfer settles
-    b2f = add(b1, [m1], m1)                            # FORK at height 2
+    b2 = add(b1, [m0, m1, m2], m1, transfers=[pay])    # transfer settles
+    add(b1, [m1], m1)                                  # FORK at height 2
     sub3 = DataSubmitTx(owner_pub=m0.pub, data_hash="bb" * 32, size_bytes=777,
                         media_type="image",
                         stake=tree.ledger[b2].balance(address(m0.pub)) // 3,
                         nonce=1).signed(m0)
-    b3 = add(b2, [m0, m1], m0, data_txs=[sub3])        # heaviest chain + data lane
+    add(b2, [m0, m1, m2], m0, data_txs=[sub3])         # heaviest chain + data lane
+    # drive full blocks until a growth event ACTIVATES, then one post-growth
+    # block that claims (and trains) the new page — the dim-change replay case
+    base_dim = _MSt.genesis(spec).dim()
+    guard = 0
+    while tree.head_model().dim() == base_dim:
+        guard += 1
+        assert guard < 80, "growth must activate under sustained surplus"
+        add(tree.head, [m0, m1, m2], (m0, m1, m2)[guard % 3])
+    add(tree.head, [m0, m1, m2], m1)                   # post-growth block
     v["chain_replay"] = [{
+        "spec": v["controller_fold"][0]["spec"],
+        "params": {"retarget_window": cr_params.retarget_window,
+                   "target_deltas": cr_params.target_deltas,
+                   "quota_min_4dp": cr_params.quota_min_4dp,
+                   "quota_max_4dp": cr_params.quota_max_4dp,
+                   "stale_ceiling_4dp": cr_params.stale_ceiling_4dp,
+                   "k_sustain": cr_params.k_sustain,
+                   "growth_bound": cr_params.growth_bound,
+                   "announce_lead": cr_params.announce_lead},
         "genesis_w": genesis_w.tolist(),
         "data_contributor": founder,
         "blocks": blocks_out,
         "expected_head": tree.head,
         "expected_head_height": tree.blocks[tree.head].header.height,
-        "expected_state_root": state_root(tree.head_state()),
+        "expected_state_root": tree.blocks[tree.head].header.state_root,
+        "expected_model_root": tree.head_model().model_root(),
+        "expected_dim": tree.head_model().dim(),
+        "expected_n_pages": len(tree.head_model().pages),
         "expected_ledger_root": tree.head_ledger().root(),
         "expected_supply": tree.head_ledger().supply(),
+        "replay_state_root": __import__("rig.model_state", fromlist=["page_state_root"]
+                                        ).page_state_root(tree.replay_head(),
+                                                          tree.head_model()),
     }]
-    # the head is now whichever chain fork choice (cumulative vrf_work) selects;
-    # it is recorded above as expected_head and the Rust node must reproduce it.
+    assert v["chain_replay"][0]["replay_state_root"] == \
+        v["chain_replay"][0]["expected_state_root"], "replay must be bit-exact"
+    # the head is whichever chain fork choice (cumulative attempt-discounted
+    # vrf_work) selects; recorded as expected_head for the Rust node.
 
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w") as f:

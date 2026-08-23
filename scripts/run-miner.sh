@@ -43,7 +43,7 @@ if ! curl -s -m 3 "http://127.0.0.1:$API/status" > /dev/null; then
 fi
 
 setsid nohup "$PY" -m client.miner_bridge \
-  --node-port "$BRIDGE" --model small --data "$DATA" \
+  --node-port "$BRIDGE" --model "${SESTRIAN_MODEL:-small-moe}" --data "$DATA" \
   --inner "$INNER" --batch "$BATCH" --device "$DEVICE" \
   > /tmp/sestrian-bridge.log 2>&1 < /dev/null &
 sleep 3

@@ -2,35 +2,53 @@
 //!
 //! These pin the structural guards added for the production-readiness audit —
 //! height linkage (task 90), n_txs / height-0 (task 95), and delta body length
-//! (task 91). Each guard closes a concrete break: an unconstrained height lets a
-//! miner mint the height-keyed reward forever; a mismatched-length delta panics
-//! `trimmed_mean` on every validator (remote chain-halt). The positive path is
-//! covered by the golden vectors; this file covers rejection.
+//! (task 91) — plus the protocol-v1 rules: the version schedule, sortition
+//! eligibility, page claims (frozen / zero-outside / quota), and the
+//! model_root commitment. Each guard closes a concrete break: an unconstrained
+//! height lets a miner mint the height-keyed reward forever; a
+//! mismatched-length delta panics `trimmed_mean` on every validator (remote
+//! chain-halt); an unenforced page claim makes a non-claimant's zero a vote
+//! for zero. The positive path is covered by the golden vectors; this file
+//! covers rejection.
 
 use sestrian_core as core;
 use sestrian_core::blocktree::{Block, BlockTree};
+use sestrian_core::model_state::{GenesisParams, ModelSpec};
 use std::collections::HashMap;
 
+// toy v1 model: backbone (4 params) + one expert page (2*2 + 2 + 2*2 + 2 = 12)
 const DIM: usize = 16;
 
+fn test_params() -> GenesisParams {
+    GenesisParams::new(ModelSpec {
+        n_layers: 1,
+        d_model: 2,
+        d_ff: 2,
+        n_experts_initial: 1,
+        e_max: 2,
+        backbone_params: 4,
+    })
+}
+
 fn genesis_tree() -> BlockTree {
-    BlockTree::new(vec![0i64; DIM], None)
+    BlockTree::new(vec![0i64; DIM], None, test_params())
 }
 
 /// A header whose roots are left blank but which carries a VALID proposer VRF
-/// proof + matching work, so validation passes the lottery gate and reaches the
-/// specific guard under test (height / n_txs / body length).
+/// proof at attempt 0 (eligible under the cold-start rule: the genesis ledger
+/// is empty) + matching work, so validation passes the lottery gate and
+/// reaches the specific guard under test.
 fn header(tree: &BlockTree, height: u64, n_txs: u64) -> core::Header {
     let key = core::Key::from_seed([9u8; 32]);
     let prev = tree.genesis_hash.clone();
-    let proof = core::lottery::vrf_prove(&key, &prev, height);
+    let proof = core::lottery::vrf_prove(&key, &prev, height, 0);
     core::Header {
         height,
         prev_hash: prev,
         state_root: String::new(),
         txset_root: String::new(),
         n_txs,
-        work: core::lottery::vrf_work(&proof),
+        work: core::lottery::attempt_work(&proof, 0),
         proposer: key.pub_hex(),
         transfer_root: String::new(),
         ledger_root: String::new(),
@@ -38,12 +56,49 @@ fn header(tree: &BlockTree, height: u64, n_txs: u64) -> core::Header {
         vrf_proof: hex::encode(&proof),
         score_root: String::new(),
         sketch_root: String::new(),
+        model_root: String::new(),
+        vrf_attempt: 0,
+        version: 1,
     }
 }
 
 fn empty_block(header: core::Header) -> Block {
     Block { header, txs: vec![], bodies: HashMap::new(), transfers: vec![], data_txs: vec![],
             scores: Default::default(), sketches: Default::default() }
+}
+
+/// A correctly-signed page-claiming delta tx over `body` (hash matches).
+fn page_tx(key: &core::Key, pages: Vec<u32>, body: &[i64]) -> core::BackpropTx {
+    let dh = core::delta_hash(&core::int64_bytes(body));
+    let mut tx = core::BackpropTx {
+        miner: key.pub_hex(),
+        base_height: 0,
+        delta_hash: dh.clone(),
+        da_pointer: format!("da://{dh}"),
+        bond: 0,
+        pages,
+        data_refs: vec![],
+        sig: vec![],
+    };
+    tx.sig = key.sign(&tx.signing_bytes());
+    assert!(tx.verify());
+    tx
+}
+
+/// A height-1 block carrying exactly `tx` with its DA body, blank roots (the
+/// guards under test fire in the per-tx loop, before any root check).
+fn tx_block(tree: &BlockTree, tx: core::BackpropTx, body: Vec<i64>) -> Block {
+    let mut bodies = HashMap::new();
+    bodies.insert(tx.da_pointer.clone(), body);
+    Block {
+        header: header(tree, 1, 1),
+        txs: vec![tx],
+        bodies,
+        transfers: vec![],
+        data_txs: vec![],
+        scores: Default::default(),
+        sketches: Default::default(),
+    }
 }
 
 #[test]
@@ -78,7 +133,8 @@ fn rejects_invalid_vrf_proof() {
     let mut h = header(&tree, 1, 0);
     h.vrf_proof = "00".repeat(64); // not a valid signature by the proposer
     let e = tree.add_block(empty_block(h)).unwrap_err();
-    assert!(e.0.contains("invalid proposer VRF proof"), "got: {}", e.0);
+    // v1: an unverifiable proof is simply never eligible
+    assert!(e.0.contains("not eligible"), "got: {}", e.0);
 }
 
 #[test]
@@ -96,32 +152,133 @@ fn rejects_wrong_length_delta_body() {
     // a correctly-signed, correctly-hashed delta whose body is the WRONG
     // dimension (3, not DIM=16) — this is exactly what would panic trimmed_mean.
     let body: Vec<i64> = vec![1, 2, 3];
-    let dh = core::delta_hash(&core::int64_bytes(&body));
-    let mut tx = core::BackpropTx {
-        miner: key.pub_hex(),
-        base_height: 0,
-        shard_id: 0,
-        delta_hash: dh.clone(),
-        da_pointer: format!("da://{dh}"),
-        bond: 0,
-        data_refs: vec![],
-        sig: vec![],
-    };
-    tx.sig = key.sign(&tx.signing_bytes());
-    assert!(tx.verify(), "test tx must be a valid signature to reach the length check");
-    let mut bodies = HashMap::new();
-    bodies.insert(tx.da_pointer.clone(), body);
-    let blk = Block {
-        header: header(&tree, 1, 1), // height + n_txs both valid; only length is wrong
-        txs: vec![tx],
-        bodies,
-        transfers: vec![],
-        data_txs: vec![],
-        scores: Default::default(),
-        sketches: Default::default(),
-    };
-    let e = tree.add_block(blk).unwrap_err();
+    let tx = page_tx(&key, vec![0], &body);
+    let e = tree.add_block(tx_block(&tree, tx, body)).unwrap_err();
     assert!(e.0.contains("delta body length"), "got: {}", e.0);
+}
+
+// --- protocol v1: version, eligibility, page claims, quota, model_root ------
+
+#[test]
+fn rejects_wrong_version() {
+    let mut tree = genesis_tree();
+    let mut h = header(&tree, 1, 0);
+    h.version = 2; // not the scheduled version for this height
+    let e = tree.add_block(empty_block(h)).unwrap_err();
+    assert!(e.0.contains("header version"), "got: {}", e.0);
+}
+
+#[test]
+fn rejects_attempt_out_of_range() {
+    let mut tree = genesis_tree();
+    let mut h = header(&tree, 1, 0);
+    h.vrf_attempt = core::lottery::ATTEMPT_MAX + 1;
+    let e = tree.add_block(empty_block(h)).unwrap_err();
+    assert!(e.0.contains("vrf_attempt out of range"), "got: {}", e.0);
+}
+
+#[test]
+fn rejects_ineligible_attempt() {
+    // cold start (empty genesis ledger, supply 0): ONLY attempt 0 is eligible.
+    // A valid proof at attempt 1 must be rejected — the widening ladder does
+    // not apply before any stake exists.
+    let mut tree = genesis_tree();
+    let key = core::Key::from_seed([9u8; 32]);
+    let prev = tree.genesis_hash.clone();
+    let proof = core::lottery::vrf_prove(&key, &prev, 1, 1);
+    let mut h = header(&tree, 1, 0);
+    h.vrf_attempt = 1;
+    h.vrf_proof = hex::encode(&proof);
+    h.work = core::lottery::attempt_work(&proof, 1);
+    let e = tree.add_block(empty_block(h)).unwrap_err();
+    assert!(e.0.contains("not eligible"), "got: {}", e.0);
+}
+
+#[test]
+fn rejects_frozen_page_claim() {
+    let mut tree = genesis_tree();
+    // freeze the expert page in the parent ModelState; a delta claiming it is
+    // invalid (frozen pages reject deltas but keep serving)
+    let g = tree.genesis_hash.clone();
+    tree.model.get_mut(&g).unwrap().pages[1].status = "F".into();
+    let key = core::Key::from_seed([7u8; 32]);
+    let mut body = vec![0i64; DIM];
+    body[5] = 1; // inside the expert page span (4..16)
+    let tx = page_tx(&key, vec![1], &body);
+    let e = tree.add_block(tx_block(&tree, tx, body)).unwrap_err();
+    assert!(e.0.contains("missing/frozen page"), "got: {}", e.0);
+}
+
+#[test]
+fn rejects_missing_page_claim() {
+    let mut tree = genesis_tree();
+    let key = core::Key::from_seed([7u8; 32]);
+    let mut body = vec![0i64; DIM];
+    body[0] = 1;
+    let tx = page_tx(&key, vec![0, 99], &body); // page 99 does not exist
+    let e = tree.add_block(tx_block(&tree, tx, body)).unwrap_err();
+    assert!(e.0.contains("missing/frozen page"), "got: {}", e.0);
+}
+
+#[test]
+fn rejects_nonzero_outside_claims() {
+    let mut tree = genesis_tree();
+    let key = core::Key::from_seed([7u8; 32]);
+    // claims only the expert page (span 4..16) but writes into the backbone —
+    // a non-claimant's coordinate must be absence, not a vote
+    let mut body = vec![0i64; DIM];
+    body[5] = 1; // legitimately inside the claim
+    body[0] = 7; // outside it
+    let tx = page_tx(&key, vec![1], &body);
+    let e = tree.add_block(tx_block(&tree, tx, body)).unwrap_err();
+    assert!(e.0.contains("nonzero outside claimed pages"), "got: {}", e.0);
+}
+
+#[test]
+fn rejects_below_quota() {
+    let mut tree = genesis_tree();
+    // raise the parent quota so the expert page (12 params) requires 12 nonzero
+    // coordinates; a 1-nnz delta is below the work quota
+    let g = tree.genesis_hash.clone();
+    tree.model.get_mut(&g).unwrap().quota_4dp = 1_000_000;
+    let key = core::Key::from_seed([7u8; 32]);
+    let mut body = vec![0i64; DIM];
+    body[5] = 1;
+    let tx = page_tx(&key, vec![1], &body);
+    let e = tree.add_block(tx_block(&tree, tx, body)).unwrap_err();
+    assert!(e.0.contains("below work quota"), "got: {}", e.0);
+}
+
+#[test]
+fn rejects_noncanonical_page_claims() {
+    let mut tree = genesis_tree();
+    let key = core::Key::from_seed([7u8; 32]);
+    let mut body = vec![0i64; DIM];
+    body[0] = 1;
+    body[5] = 1;
+    // unsorted claim set: the signed form is canonical, the carried form is not
+    let tx = page_tx(&key, vec![1, 0], &body);
+    let e = tree.add_block(tx_block(&tree, tx, body)).unwrap_err();
+    assert!(e.0.contains("canonical"), "got: {}", e.0);
+}
+
+#[test]
+fn rejects_wrong_model_root() {
+    use sestrian_core::blocktree::{scores_root, sketch_root};
+    use sestrian_core::model_state::page_state_root;
+    let mut tree = genesis_tree();
+    // an empty block whose state_root is CORRECT (no txs, no window boundary —
+    // the post state equals the parent) but whose model_root is wrong: the fold
+    // commitment must be validated independently of the weight commitment
+    let mut h = header(&tree, 1, 0);
+    let g = tree.genesis_hash.clone();
+    h.state_root = page_state_root(&tree.state[&g], &tree.model[&g]);
+    h.txset_root = core::txset_root(&[]);
+    h.score_root = scores_root(&Default::default());
+    h.sketch_root = sketch_root(&Default::default());
+    h.model_root = "11".repeat(32);
+    let e = tree.add_block(empty_block(h)).unwrap_err();
+    assert!(e.0.contains("model_root does not reproduce"), "got: {}", e.0);
 }
 
 // --- data-challenge market: quorum + disinterested jurors (task 93) ---------

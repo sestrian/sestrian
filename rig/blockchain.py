@@ -23,15 +23,34 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .chain import dequantize, quantize, state_root, trimmed_mean_int
+from .chain import (dequantize, paged_transition, quantize, state_root,
+                    trimmed_mean_int)
 from .crypto import BackpropTx, verify
-from .token import (PROPOSER_LOOKBACK, TokenLedger, TransferTx,
+from .model_state import (GenesisParams, ModelState, fold as model_fold,
+                          page_init, page_state_root)
+from .token import (PROPOSER_LOOKBACK, TokenLedger, TransferTx, address,
                     canonical_account_txs, data_root as dta_root,
                     transfer_root as xfer_root)
 
 
 def _sha(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
+
+
+# ── PROTOCOL VERSION (v1) ─────────────────────────────────────────────────
+# The entire upgrade mechanism, deliberately minimal: the header commits a
+# version, and validation requires it to equal the scheduled version for its
+# height. A future upgrade appends (activation_height, version) here; nodes
+# that don't know a version reject its blocks with "upgrade your node".
+VERSION_SCHEDULE: tuple = ((0, 1),)
+
+
+def expected_version(height: int) -> int:
+    v = VERSION_SCHEDULE[0][1]
+    for h0, ver in VERSION_SCHEDULE:
+        if height >= h0:
+            v = ver
+    return v
 
 
 def txset_root(txs: list[BackpropTx]) -> str:
@@ -65,6 +84,16 @@ class Header:
     # projection — the corpus-attribution primitive (§8). Same committed-inputs
     # trust tier as scores; recomputable from the DA delta body + public seed.
     sketch_root: str = ""
+    # PROTOCOL v1: the ModelState commitment (page table + capacity fold) AFTER
+    # this block. Recomputed AND committed, so a fold divergence is a loud
+    # validation error instead of a silent fork.
+    model_root: str = ""
+    # PROTOCOL v1: the proposer's sortition attempt (0..ATTEMPT_MAX). The seed
+    # binds to it; header.work = attempt_work(proof, attempt) — low attempts
+    # strictly tend to dominate fork choice.
+    vrf_attempt: int = 0
+    # PROTOCOL v1: header version, checked against the VERSION_SCHEDULE.
+    version: int = 1
 
     def block_hash(self) -> str:
         return _sha(json.dumps(self.__dict__, sort_keys=True).encode())
@@ -221,16 +250,32 @@ def apply_ledger(parent_ledger: TokenLedger, block: Block,
 def validate_block(block: Block, parent_w_int: np.ndarray, parent_height: int,
                    parent_ledger: TokenLedger | None = None,
                    data_contributor: str | None = None,
-                   recent_proposers: set[str] = frozenset()):
+                   recent_proposers: set[str] = frozenset(),
+                   parent_model: ModelState | None = None,
+                   params: GenesisParams | None = None):
     """Validate a block from first principles against its parent state.
 
-    Returns (post-state weights, post-ledger) if valid; raises ValidationError
-    otherwise. Any node can run this — no trust in the proposer required (§5).
-    `parent_ledger=None` skips ledger validation (legacy callers only; the live
-    protocol always validates the ledger)."""
+    Returns (post-state weights, post-ledger, post-model) if valid; raises
+    ValidationError otherwise. Any node can run this — no trust in the proposer
+    required (§5).
+
+    PROTOCOL v1 (parent_model + params given — the live protocol): enforces the
+    header version, proposer ELIGIBILITY (stake-weighted VRF sortition with the
+    attempt-widening liveness fallback), page claims (existence, active status,
+    body zero outside claims), the WORK QUOTA, the per-page state transition,
+    growth activation, and the ModelState fold + model_root commitment.
+
+    Legacy mode (parent_model=None) preserves the pre-v1 dense rules for older
+    rig callers only; `parent_ledger=None` likewise skips ledger validation."""
     h = block.header
+    v1 = parent_model is not None
     dim = int(parent_w_int.shape[0])
     # 0. STRUCTURAL invariants that bind the header to its parent and body.
+    #    v1: the version must be the scheduled version for this height — the
+    #    whole upgrade mechanism (unknown-to-us versions fail loudly upstream).
+    if v1 and h.version != expected_version(h.height):
+        raise ValidationError(
+            f"header version {h.version} != scheduled {expected_version(h.height)}")
     #    height must advance by exactly one — otherwise a miner could pin a low
     #    height on every block and mint the height-keyed reward forever (the
     #    halving/sunset are only meaningful if height is monotone), and a
@@ -241,22 +286,43 @@ def validate_block(block: Block, parent_w_int: np.ndarray, parent_height: int,
     #    a mismatch means the header misrepresents the block).
     if h.n_txs != len(block.txs):
         raise ValidationError("n_txs does not match tx count")
-    #    PROPOSER LOTTERY (rev 4): the VRF proof must be a valid signature by the
-    #    proposer over this height's seed, and header.work must be the
-    #    vrf_work derived from it — so work is NON-FORGEABLE (a peer can't claim
-    #    an arbitrary weight; it is bounded by its one VRF per height). Genesis is
-    #    constructed directly and exempt. (Stake-weighted eligibility gating —
-    #    lottery.eligible — is the fuller lottery, enforced at the testnet phase.)
+    #    PROPOSER LOTTERY: the VRF proof must be a valid signature by the
+    #    proposer over this (height, attempt) seed, and header.work must be the
+    #    attempt-discounted weight derived from it — so work is NON-FORGEABLE.
+    #    v1 ADDS the eligibility gate itself: the proof must clear the
+    #    stake-weighted threshold for its attempt (cold-start and ATTEMPT_MAX
+    #    rules inside lottery.eligible). Genesis is constructed and exempt.
     from . import lottery
     if h.proposer != "genesis":
         proof = bytes.fromhex(h.vrf_proof) if h.vrf_proof else b""
-        if not verify(h.proposer, lottery.seed(h.prev_hash, h.height), proof):
-            raise ValidationError("invalid proposer VRF proof")
-        if h.work != lottery.vrf_work(proof):
-            raise ValidationError("header.work is not the VRF-derived weight")
+        if v1:
+            if not 0 <= h.vrf_attempt <= lottery.ATTEMPT_MAX:
+                raise ValidationError("vrf_attempt out of range")
+            if parent_ledger is not None:
+                stake = parent_ledger.balance(address(h.proposer))
+                total = parent_ledger.supply()
+                if not lottery.eligible(h.proposer, proof, h.prev_hash, h.height,
+                                        h.vrf_attempt, stake, total):
+                    raise ValidationError("proposer not eligible at this attempt")
+            elif not verify(h.proposer,
+                            lottery.seed(h.prev_hash, h.height, h.vrf_attempt),
+                            proof):
+                raise ValidationError("invalid proposer VRF proof")
+            if h.work != lottery.attempt_work(proof, h.vrf_attempt):
+                raise ValidationError("header.work is not the VRF-derived weight")
+        else:
+            if not verify(h.proposer, lottery.seed(h.prev_hash, h.height), proof):
+                raise ValidationError("invalid proposer VRF proof")
+            if h.work != lottery.vrf_work(proof):
+                raise ValidationError("header.work is not the VRF-derived weight")
     # 1. every tx is well-formed and correctly signed; its delta body must have
     #    the model dimension so aggregation cannot be made to panic/diverge by a
     #    short or long body (all bodies share `dim`, checked here before use).
+    #    v1 ADDS the page-claim rules: the claim set is canonical and nonempty,
+    #    every claimed page exists and is ACTIVE (frozen pages reject deltas),
+    #    the body is EXACTLY ZERO outside the claimed spans (a non-claimant's
+    #    zero is absence, not a vote for zero), and the claimed region carries
+    #    at least the quota's worth of nonzero work (required_nnz).
     for tx in block.txs:
         if not tx.verify():
             raise ValidationError(f"bad signature on tx {tx.txid()[:8]}")
@@ -269,6 +335,23 @@ def validate_block(block: Block, parent_w_int: np.ndarray, parent_height: int,
             raise ValidationError("delta body length != model dimension")
         if _sha(body.tobytes()) != tx.delta_hash:
             raise ValidationError("delta body hash mismatch (DA withholding/forgery)")
+        if v1:
+            pages = tx.canonical_pages()
+            if not pages or list(tx.pages) != pages:
+                raise ValidationError("tx pages must be canonical and nonempty")
+            for p in pages:
+                if not parent_model.is_active(p):
+                    raise ValidationError(
+                        f"tx claims missing/frozen page {p}")
+            mask = np.zeros(dim, dtype=bool)
+            for p in pages:
+                s, e = parent_model.page_span(p)
+                mask[s:e] = True
+            if np.any(body[~mask] != 0):
+                raise ValidationError("delta body nonzero outside claimed pages")
+            nnz = int(np.count_nonzero(body))
+            if nnz < parent_model.required_nnz(pages):
+                raise ValidationError("delta below work quota")
     # 2. tx-set root matches
     if txset_root(block.txs) != h.txset_root:
         raise ValidationError("txset_root mismatch")
@@ -298,10 +381,34 @@ def validate_block(block: Block, parent_w_int: np.ndarray, parent_height: int,
     if sketch_root(block.sketches) != h.sketch_root:
         raise ValidationError("sketch_root mismatch")
     # 3. the state transition reproduces the committed root (deterministic, §3.4)
-    deltas = [block.bodies[tx.da_pointer] for tx in block.txs]
-    w = parent_w_int + trimmed_mean_int(deltas) if deltas else parent_w_int.copy()
-    if state_root(w) != h.state_root:
-        raise ValidationError("state_root does not reproduce from txs")
+    if v1:
+        # v1: per-page trimmed mean over each page's actual claimants, computed
+        # against the PARENT page table; then the ModelState fold — any growth
+        # event due this block appends its deterministically-initialized expert
+        # page(s) AFTER aggregation and BEFORE the root; state_root commits the
+        # page-Merkle root over the (possibly extended) page set. THE ORDER OF
+        # THESE THREE STEPS IS CONSENSUS — the Rust mirror must match exactly.
+        bodies = [block.bodies[tx.da_pointer] for tx in block.txs]
+        claims = [tx.canonical_pages() for tx in block.txs]
+        spans = [(p[0], p[1]) for p in parent_model.pages]
+        w = paged_transition(parent_w_int, bodies, claims, spans)
+        zero_scored = sum(1 for t in block.txs
+                          if int(block.scores.get(t.txid(), 0)) == 0)
+        post_model, activations = model_fold(parent_model, params, h.height,
+                                             len(block.txs), zero_scored,
+                                             h.prev_hash)
+        for page_id, _layer, _expert, trigger in activations:
+            w = np.concatenate([w, page_init(trigger, page_id, params.spec)])
+        if page_state_root(w, post_model) != h.state_root:
+            raise ValidationError("state_root does not reproduce from txs")
+        if post_model.model_root() != h.model_root:
+            raise ValidationError("model_root does not reproduce (fold divergence)")
+    else:
+        deltas = [block.bodies[tx.da_pointer] for tx in block.txs]
+        w = parent_w_int + trimmed_mean_int(deltas) if deltas else parent_w_int.copy()
+        if state_root(w) != h.state_root:
+            raise ValidationError("state_root does not reproduce from txs")
+        post_model = None
     # 4. the TRANSFER + DATA LANES: set roots + full token-ledger transition
     led = None
     if parent_ledger is not None:
@@ -312,19 +419,36 @@ def validate_block(block: Block, parent_w_int: np.ndarray, parent_height: int,
         led = apply_ledger(parent_ledger, block, data_contributor, recent_proposers)
         if led.root() != h.ledger_root:
             raise ValidationError("ledger_root does not reproduce from block")
-    return w, led
+    return w, led, post_model
 
 
 class BlockTree:
     """All known blocks, with heaviest-valid-chain selection (Nakamoto fork choice)."""
 
     def __init__(self, genesis_w_int: np.ndarray, prune_depth: int | None = None,
-                 data_contributor: str | None = None):
+                 data_contributor: str | None = None,
+                 params: GenesisParams | None = None):
         self.genesis_w = genesis_w_int.copy()
-        gh = Header(0, "0" * 64, state_root(genesis_w_int), _sha(b""), 0, 0, "genesis")
+        # PROTOCOL v1 iff genesis params (the ModelSpec + retarget constants)
+        # are supplied: the state commitment is the page-Merkle root and the
+        # header carries the ModelState commitment from block 0.
+        self.params = params
+        if params is not None:
+            model0 = ModelState.genesis(params.spec)
+            assert model0.dim() == int(genesis_w_int.shape[0]), \
+                "genesis weight length must equal the ModelSpec page table"
+            groot = page_state_root(genesis_w_int, model0)
+            gh = Header(0, "0" * 64, groot, _sha(b""), 0, 0, "genesis",
+                        model_root=model0.model_root())
+        else:
+            model0 = None
+            gh = Header(0, "0" * 64, state_root(genesis_w_int), _sha(b""), 0, 0,
+                        "genesis")
         self.genesis = Block(gh, [], {})
         self.blocks = {self.genesis.hash: self.genesis}
         self.state = {self.genesis.hash: genesis_w_int.copy()}     # per-block post-state
+        # per-block ModelState (v1) — small, kept forever like ledgers/headers
+        self.model = {self.genesis.hash: model0}
         # the token ledger is chain state too: EMPTY balances at genesis (fair
         # launch), advanced deterministically by every block. data_contributor
         # is a GENESIS PARAMETER (identical on every node): the founding corpus
@@ -356,10 +480,13 @@ class BlockTree:
         parent_led = self.ledger.get(parent) if block.header.ledger_root else None
         juror_pubs = self.recent_proposers(parent)
         parent_height = self.blocks[parent].header.height
-        w, led = validate_block(block, self.state[parent], parent_height,
-                                parent_led, self.data_contributor, juror_pubs)  # may raise
+        w, led, model = validate_block(block, self.state[parent], parent_height,
+                                       parent_led, self.data_contributor,
+                                       juror_pubs, self.model.get(parent),
+                                       self.params)  # may raise
         self.blocks[block.hash] = block
         self.state[block.hash] = w
+        self.model[block.hash] = model
         if led is not None:
             self.ledger[block.hash] = led
         else:                                                      # legacy: rewards only
@@ -395,6 +522,9 @@ class BlockTree:
     def head_ledger(self) -> TokenLedger:
         return self.ledger[self.head]
 
+    def head_model(self) -> ModelState | None:
+        return self.model.get(self.head)
+
     def recent_proposers(self, tip: str) -> set[str]:
         """Proposer pubkeys of the last PROPOSER_LOOKBACK blocks ending at `tip`
         — the deterministic juror set for data-challenge votes."""
@@ -417,12 +547,30 @@ class BlockTree:
         return list(reversed(out))
 
     def replay_head(self) -> np.ndarray:
-        """Independently reconstruct head state from genesis + block bodies (§3.5)."""
+        """Independently reconstruct head state from genesis + block bodies (§3.5).
+        v1: replays the per-page transitions AND the ModelState fold, including
+        growth activations (page appends) — bit-exact across dimension changes."""
         w = self.genesis_w.copy()
+        if self.params is None:
+            for b in self.chain_from_genesis():
+                deltas = [b.bodies[tx.da_pointer] for tx in b.txs]
+                if deltas:
+                    w = w + trimmed_mean_int(deltas)
+            return w
+        model = ModelState.genesis(self.params.spec)
         for b in self.chain_from_genesis():
-            deltas = [b.bodies[tx.da_pointer] for tx in b.txs]
-            if deltas:
-                w = w + trimmed_mean_int(deltas)
+            h = b.header
+            bodies = [b.bodies[tx.da_pointer] for tx in b.txs]
+            claims = [tx.canonical_pages() for tx in b.txs]
+            spans = [(p[0], p[1]) for p in model.pages]
+            w = paged_transition(w, bodies, claims, spans)
+            zero_scored = sum(1 for t in b.txs
+                              if int(b.scores.get(t.txid(), 0)) == 0)
+            model, activations = model_fold(model, self.params, h.height,
+                                            len(b.txs), zero_scored, h.prev_hash)
+            for page_id, _l, _e, trigger in activations:
+                w = np.concatenate([w, page_init(trigger, page_id,
+                                                 self.params.spec)])
         return w
 
 
@@ -430,31 +578,56 @@ def build_block(tree: BlockTree, parent_hash: str, accepted: list, bodies: dict,
                 works: dict, proposer_key, transfers: list | None = None,
                 data_txs: list | None = None,
                 scores: dict | None = None,
-                sketches: dict | None = None) -> Block:
+                sketches: dict | None = None,
+                attempt: int = 0) -> Block:
     """Assemble a valid block extending `parent_hash` from accepted txs, plus the
-    transfer lane (rev 2), the data lane (rev 3), the proposer's VRF proof
-    (rev 4), and the proposer's committed delta scores (rev 7 — omitted scores
-    default to zero, which reward-weights uniformly). `proposer_key` signs the
-    VRF proof; header.work is the non-forgeable vrf_work derived from it."""
+    transfer lane (rev 2), the data lane (rev 3), the proposer's VRF proof and
+    sortition attempt (v1), and the proposer's committed delta scores (rev 7 —
+    omitted scores default to zero, which reward-weights uniformly).
+
+    PRODUCER/VALIDATOR SYMMETRY: this function must mirror validate_block's
+    transition EXACTLY (per-page aggregation, fold, activation, roots) — a
+    producer that diverges builds blocks it then rejects itself."""
     from . import lottery
     parent_w = tree.state[parent_hash]
+    parent_model = tree.model.get(parent_hash)
     transfers = list(transfers or [])
     data_txs = list(data_txs or [])
     height = tree.blocks[parent_hash].header.height + 1
-    deltas = [bodies[tx.da_pointer] for tx in accepted]
-    w = parent_w + trimmed_mean_int(deltas) if deltas else parent_w.copy()
-    vrf_proof = lottery.vrf_prove(proposer_key, parent_hash, height)
     blk_scores = {t.txid(): int((scores or {}).get(t.txid(), 0)) for t in accepted}
     blk_sketches = {t.txid(): [int(x) for x in
                                (sketches or {}).get(t.txid(), [0] * SKETCH_DIM)]
                     for t in accepted}
+    if parent_model is not None:                       # PROTOCOL v1
+        body_list = [bodies[tx.da_pointer] for tx in accepted]
+        claims = [tx.canonical_pages() for tx in accepted]
+        spans = [(p[0], p[1]) for p in parent_model.pages]
+        w = paged_transition(parent_w, body_list, claims, spans)
+        zero_scored = sum(1 for t in accepted if blk_scores[t.txid()] == 0)
+        post_model, activations = model_fold(parent_model, tree.params, height,
+                                             len(accepted), zero_scored,
+                                             parent_hash)
+        for page_id, _l, _e, trigger in activations:
+            w = np.concatenate([w, page_init(trigger, page_id,
+                                             tree.params.spec)])
+        s_root, m_root = page_state_root(w, post_model), post_model.model_root()
+        vrf_proof = lottery.vrf_prove(proposer_key, parent_hash, height, attempt)
+        work = lottery.attempt_work(vrf_proof, attempt)
+    else:                                              # legacy dense path
+        deltas = [bodies[tx.da_pointer] for tx in accepted]
+        w = parent_w + trimmed_mean_int(deltas) if deltas else parent_w.copy()
+        s_root, m_root = state_root(w), ""
+        vrf_proof = lottery.vrf_prove(proposer_key, parent_hash, height)
+        work = lottery.vrf_work(vrf_proof)
     header = Header(
         height=height,
-        prev_hash=parent_hash, state_root=state_root(w),
+        prev_hash=parent_hash, state_root=s_root,
         txset_root=txset_root(accepted), n_txs=len(accepted),
-        work=lottery.vrf_work(vrf_proof), proposer=proposer_key.pub,
+        work=work, proposer=proposer_key.pub,
         vrf_proof=vrf_proof.hex(), score_root=scores_root(blk_scores),
-        sketch_root=sketch_root(blk_sketches))
+        sketch_root=sketch_root(blk_sketches),
+        model_root=m_root, vrf_attempt=attempt,
+        version=expected_version(height))
     block = Block(header, accepted,
                   {t.da_pointer: bodies[t.da_pointer] for t in accepted},
                   transfers, data_txs, blk_scores, blk_sketches)

@@ -21,7 +21,7 @@ def _key(seed: bytes) -> Key:
 
 def _delta_tx(miner: Key, height: int, shard: int, data_refs) -> BackpropTx:
     d = np.zeros(8, dtype=np.int64)
-    return BackpropTx(miner=miner.pub, base_height=height, shard_id=shard,
+    return BackpropTx(miner=miner.pub, base_height=height,
                       delta_hash=delta_hash(d.tobytes()),
                       da_pointer=f"da://{shard}", data_refs=list(data_refs)).signed(miner)
 

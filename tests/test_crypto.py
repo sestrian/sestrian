@@ -20,7 +20,7 @@ def test_distinct_seeds_give_distinct_keys():
 
 def test_backprop_tx_signature():
     k = Key.generate(b"miner".ljust(32, b"0"))
-    tx = BackpropTx(miner=k.pub, base_height=3, shard_id=1,
+    tx = BackpropTx(miner=k.pub, base_height=3,
                     delta_hash=delta_hash(b"BODY"), da_pointer="da://x").signed(k)
     assert tx.verify()
     assert len(tx.txid()) == 64
@@ -29,7 +29,7 @@ def test_backprop_tx_signature():
 def test_forged_signature_rejected():
     k = Key.generate(b"miner".ljust(32, b"0"))
     attacker = Key.generate(b"attacker".ljust(32, b"0"))
-    tx = BackpropTx(miner=k.pub, base_height=3, shard_id=1,
+    tx = BackpropTx(miner=k.pub, base_height=3,
                     delta_hash=delta_hash(b"BODY"), da_pointer="da://x")
     tx.sig = attacker.sign(tx.signing_bytes())        # wrong key signs
     assert not tx.verify()

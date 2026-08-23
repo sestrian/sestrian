@@ -63,7 +63,7 @@ class GossipNode:
             v = MODEL.train_step(v, MODEL.sample_batch(rng, SHARD_BATCH), lr=LR, steps=1)
         body = quantize(v - w)
         ptr = f"da://{self.key.pub[:8]}/{h}/{self.node_id}"
-        tx = BackpropTx(miner=self.key.pub, base_height=h, shard_id=self.node_id,
+        tx = BackpropTx(miner=self.key.pub, base_height=h,
                         delta_hash=delta_hash(body.tobytes()), da_pointer=ptr,
                         data_refs=["genesis"]).signed(self.key)
         return tx, body

@@ -11,7 +11,7 @@
 //!       --port 7900 --api-port 8090 --relay-server
 //!
 //! Genesis: --genesis-file <raw i64-LE .bin> (the ceremony artifact from
-//! client/make_genesis.py), or --toy-dim N for a deterministic toy vector.
+//! client/make_genesis.py), or fetched from peers against the published id.
 //! The wallet key IS the miner identity; encrypted wallets are decrypted with
 //! $SESTRIAN_WALLET_PASSPHRASE (argon2id + XSalsa20-Poly1305, the exact
 //! pynacl construction).
@@ -63,17 +63,58 @@ struct NetworkParams {
     /// network so a joiner cannot get it wrong by accident (the old 10s default
     /// against this 180s network gave a 6-second training budget).
     block_interval: f64,
+    /// PROTOCOL v1: the consensus ModelSpec — the page table is a pure function
+    /// of these + on-chain growth events, so they are chainparams exactly like
+    /// the genesis root. (n_layers, d_model, d_ff, n_experts_initial, e_max,
+    /// backbone_params); client/gossip.py's preset of the same name must agree.
+    spec: (u64, u64, u64, u64, u64, u64),
+    /// Blocks per capacity-retarget window (§9.4a). Consensus.
+    retarget_window: u64,
 }
 
+/// The network's GenesisParams — handed to every BlockTree/replay/validation.
+///
+/// LOCAL-ONLY overrides: on `--network local` the retarget constants may be
+/// tightened via env vars so a growth event fires inside a bounded test run
+/// (scripts/growth-proof.sh — verification-matrix item 9). These are consensus
+/// parameters, so every node of the local chain must set the SAME values; they
+/// are deliberately ignored on any named network.
+fn genesis_params(net: &NetworkParams) -> core::model_state::GenesisParams {
+    let (n_layers, d_model, d_ff, n_experts_initial, e_max, backbone_params) = net.spec;
+    let spec = core::model_state::ModelSpec {
+        n_layers, d_model, d_ff, n_experts_initial, e_max, backbone_params,
+    };
+    let mut gp = core::model_state::GenesisParams::new(spec);
+    gp.retarget_window = net.retarget_window;
+    if net.name == "local" {
+        let env_u64 = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u64>().ok());
+        let env_i64 = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<i64>().ok());
+        if let Some(v) = env_u64("SESTRIAN_LOCAL_RETARGET_WINDOW") { gp.retarget_window = v; }
+        if let Some(v) = env_i64("SESTRIAN_LOCAL_TARGET_DELTAS") { gp.target_deltas = v; }
+        if let Some(v) = env_i64("SESTRIAN_LOCAL_QUOTA_MAX_4DP") { gp.quota_max_4dp = v; }
+        if let Some(v) = env_i64("SESTRIAN_LOCAL_K_SUSTAIN") { gp.k_sustain = v; }
+        if let Some(v) = env_u64("SESTRIAN_LOCAL_ANNOUNCE_LEAD") { gp.announce_lead = v; }
+    }
+    gp
+}
+
+// devnet-genesis-2 (protocol v1): the ~107.4M-param MoE model, page-Merkle
+// state commitment. CEREMONY NOTE: genesis_state_root below is the PREVIEW
+// value from the pre-release build — docs/genesis-ceremony.md requires it to be
+// regenerated and cross-verified on BOTH founder machines (MPS + CUDA) against
+// the final tagged code before the release is published; scripts/release-genesis.sh
+// refuses to publish on any mismatch.
 const DEVNET: NetworkParams = NetworkParams {
     name: "devnet",
-    genesis_state_root: "30ea20da27f1da0c94512d50a6291370a63a426b77dc425b9826ca17bd213c28",
+    genesis_state_root: "a597316003dbf12122b7cc6f39226ce7c8f7a871e58e7ddf364e56b08102527b",
     data_contributor: "3432d48fd6878b4f2e7a1e40cc15e112c512fae7",
-    genesis_model: "small",
-    genesis_seed: 1337,
-    genesis_url: "https://github.com/sestrian/sestrian/releases/download/devnet-genesis-1/genesis.bin.zst",
-    bootstrap: "/ip4/169.58.211.248/tcp/9800",
+    genesis_model: "small-moe",
+    genesis_seed: 20260822,
+    genesis_url: "https://github.com/sestrian/sestrian/releases/download/devnet-genesis-2/genesis.bin.zst",
+    bootstrap: "/ip4/169.58.211.248/udp/9800/quic-v1",
     block_interval: 180.0,
+    spec: (6, 512, 2048, 8, 16, 6_628_352),   // == client SMALL_MOE_CFG
+    retarget_window: 16,
 };
 
 /// A private/local chain: nothing is baked, everything is explicit. This is the
@@ -83,11 +124,13 @@ const LOCAL: NetworkParams = NetworkParams {
     name: "local",
     genesis_state_root: "",
     data_contributor: "",
-    genesis_model: "toy",
+    genesis_model: "toy-moe",
     genesis_seed: 1337,
     genesis_url: "",
     bootstrap: "",
     block_interval: 10.0,
+    spec: (2, 64, 256, 4, 8, 67_712),         // == client TOY_MOE_CFG
+    retarget_window: 16,
 };
 
 /// Every way to obtain a network's genesis — printed on every genesis failure
@@ -180,8 +223,6 @@ struct Args {
     #[arg(long, default_value = "")]
     genesis_hash: String,    // published genesis id; a fresh node fetches +
                              // verifies the genesis from a peer against this
-    #[arg(long, default_value_t = 0)]
-    toy_dim: usize,          // devnet: deterministic toy genesis of this size
     #[arg(long, default_value_t = 7900)]
     port: u16,
     #[arg(long, default_value_t = 8090)]
@@ -202,8 +243,6 @@ struct Args {
     /// cadence — see NetworkParams::block_interval. Override only if you know why.
     #[arg(long, default_value_t = 0.0)]
     interval: f64,
-    #[arg(long, default_value = "")]
-    rotate: String,          // "n,id" — deterministic devnet leader rotation
     #[arg(long, default_value_t = 0.0)]
     seconds: f64,            // 0 = run forever
     #[arg(long, default_value = "")]
@@ -224,8 +263,8 @@ struct Args {
     external_address: String, // advertise a known public multiaddr
     #[arg(long, default_value_t = 8)]
     prune_depth: u64,
-    /// shared round-clock origin (epoch seconds) — REQUIRED for --rotate to
-    /// align leader slots across machines; 0 = process start time
+    /// shared round-clock origin (epoch seconds) — aligns round timing (and
+    /// the sortition politeness ladder) across machines; 0 = process start
     #[arg(long, default_value_t = 0.0)]
     t0: f64,
 }
@@ -429,7 +468,8 @@ fn load_identity(args: &Args) -> [u8; 32] {
 /// The genesis is public + self-verifying, so a fresh node bootstraps from a
 /// single peer address plus the (tiny) published genesis id.
 async fn resolve_genesis(args: &Args, store: &store::Store,
-                         swarm: &mut libp2p::Swarm<node::Behaviour>) -> Vec<i64> {
+                         swarm: &mut libp2p::Swarm<node::Behaviour>,
+                         gp: &core::model_state::GenesisParams) -> Vec<i64> {
     if let Some(g) = store.read_genesis() {
         ensure_genesis_dispersed(store, &g);
         return g; // durable once written
@@ -437,17 +477,15 @@ async fn resolve_genesis(args: &Args, store: &store::Store,
     let g: Vec<i64> = if !args.genesis_file.is_empty() {
         let raw = std::fs::read(&args.genesis_file).expect("genesis file unreadable");
         raw.chunks_exact(8).map(|c| i64::from_le_bytes(c.try_into().unwrap())).collect()
-    } else if args.toy_dim > 0 {
-        (0..args.toy_dim as i64).map(|i| i * 100).collect()
     } else if !args.genesis_hash.is_empty() {
         info!(id = %args.genesis_hash, "no local genesis — fetching it from the network");
         // DA shards first: the only path that works at production scale, since
         // shards are fetched individually and never hit the sync response cap.
         // Falls back to the whole-genesis sync fetch (fine for toy/small chains).
         let fetched = match fetch_genesis_shards(swarm, store, &args.peers,
-                                                 &args.genesis_hash).await {
+                                                 &args.genesis_hash, gp).await {
             Some(g) => Some(g),
-            None => fetch_genesis(swarm, &args.genesis_hash, &args.peers).await,
+            None => fetch_genesis(swarm, gp, &args.genesis_hash, &args.peers).await,
         };
         match fetched {
             Some(g) => g,
@@ -465,7 +503,8 @@ async fn resolve_genesis(args: &Args, store: &store::Store,
                 "is trustless, and usually faster than fetching it:",
                 "",
                 "  uv run --with torch --with numpy --with pynacl \\",
-                "      python -m client.make_genesis --model small --seed 1337 --out genesis.bin",
+                "      python -m client.make_genesis --model <network model> --seed <network seed> \\",
+                "      --out genesis.bin   # exact values: see the startup banner / docs/joining.md",
                 "",
                 "then re-run with --genesis-file genesis.bin (the printed",
                 "genesis_state_root must equal the published genesis id).",
@@ -482,12 +521,20 @@ async fn resolve_genesis(args: &Args, store: &store::Store,
         ].join("\n"));
     };
     // Whatever the source, the weights must hash to the network's baked-in
-    // state_root. This is the check that makes a wrong --genesis-file a startup
-    // error instead of a node that quietly can't validate anything.
+    // state_root — in protocol v1 that is the PAGE-MERKLE root over the
+    // network ModelSpec's page table (what client/make_genesis.py prints).
+    // This is the check that makes a wrong --genesis-file a startup error
+    // instead of a node that quietly can't validate anything.
     if !args.genesis_hash.is_empty() {
-        let got = core::state_root(&g);
+        let model0 = core::model_state::ModelState::genesis(&gp.spec);
+        if g.len() as u64 != model0.dim() {
+            panic!("genesis length {} != the network ModelSpec's dimension {}\n\
+                    (wrong model preset?)\n{}",
+                   g.len(), model0.dim(), genesis_recipe(&args.network));
+        }
+        let got = core::model_state::page_state_root(&g, &model0);
         if got != args.genesis_hash
-            && core::blocktree::genesis_block_hash(&g) != args.genesis_hash {
+            && core::blocktree::genesis_block_hash(&g, gp) != args.genesis_hash {
             panic!("genesis does not match this network.\n  expected {}\n  got      {}\n\n\
                     Regenerate it, or pass --network local to run your own chain:\n{}",
                    args.genesis_hash, got, genesis_recipe(&args.network));
@@ -530,7 +577,9 @@ fn ensure_genesis_dispersed(store: &store::Store, g: &[i64]) {
 /// at worst waste our time, never seed us a different chain.
 async fn fetch_genesis_shards(swarm: &mut libp2p::Swarm<node::Behaviour>,
                               store: &store::Store, peers: &str,
-                              expected_hash: &str) -> Option<Vec<i64>> {
+                              expected_hash: &str,
+                              gp: &core::model_state::GenesisParams)
+                              -> Option<Vec<i64>> {
     use futures::StreamExt;
     use libp2p::{request_response, swarm::SwarmEvent};
     let key = store::Store::GENESIS_DA_KEY.to_string();
@@ -569,8 +618,13 @@ async fn fetch_genesis_shards(swarm: &mut libp2p::Swarm<node::Behaviour>,
                     }
                     if got {
                         if let Some(g) = store.reconstruct_genesis() {
-                            if core::state_root(&g) == expected_hash
-                                || core::blocktree::genesis_block_hash(&g) == expected_hash {
+                            let model0 =
+                                core::model_state::ModelState::genesis(&gp.spec);
+                            if (g.len() as u64 == model0.dim()
+                                && core::model_state::page_state_root(&g, &model0)
+                                    == expected_hash)
+                                || core::blocktree::genesis_block_hash(&g, gp)
+                                    == expected_hash {
                                 info!(params = g.len(),
                                       "genesis reconstructed from DA shards");
                                 return Some(g);
@@ -598,6 +652,7 @@ async fn fetch_genesis_shards(swarm: &mut libp2p::Swarm<node::Behaviour>,
 /// FAIL with the concrete remedy — this exists because the failure modes here are
 /// silent by nature (a too-slow trainer mines forever and earns nothing).
 async fn preflight(args: &Args, key: &core::Key, store: &store::Store,
+                   gp: &core::model_state::GenesisParams,
                    swarm: &mut libp2p::Swarm<node::Behaviour>)
                    -> Result<(), Box<dyn std::error::Error>> {
     use futures::StreamExt;
@@ -654,9 +709,15 @@ async fn preflight(args: &Args, key: &core::Key, store: &store::Store,
     });
     match (&local_genesis, args.genesis_hash.is_empty()) {
         (Some(g), false) => {
-            let root = core::state_root(g);
+            let model0 = core::model_state::ModelState::genesis(&gp.spec);
+            let root = if g.len() as u64 == model0.dim() {
+                core::model_state::page_state_root(g, &model0)
+            } else {
+                format!("<wrong dimension: {} != {}>", g.len(), model0.dim())
+            };
             if root == args.genesis_hash
-                || core::blocktree::genesis_block_hash(g) == args.genesis_hash {
+                || (g.len() as u64 == model0.dim()
+                    && core::blocktree::genesis_block_hash(g, gp) == args.genesis_hash) {
                 pass(format!("genesis matches this network ({} params)", g.len()));
             } else {
                 println!("  \x1b[31mFAIL\x1b[0m  your genesis does NOT match this network.");
@@ -669,8 +730,6 @@ async fn preflight(args: &Args, key: &core::Key, store: &store::Store,
         }
         (Some(g), true) => pass(format!("genesis present ({} params); this network \
                                          publishes no id to check it against", g.len())),
-        (None, _) if args.toy_dim > 0 =>
-            pass(format!("toy genesis of {} params (local chain)", args.toy_dim)),
         (None, _) => {
             println!("  \x1b[31mFAIL\x1b[0m  no genesis weights — the node cannot \
                       validate anything without them.");
@@ -735,6 +794,7 @@ async fn preflight(args: &Args, key: &core::Key, store: &store::Store,
 }
 
 async fn fetch_genesis(swarm: &mut libp2p::Swarm<node::Behaviour>,
+                       gp: &core::model_state::GenesisParams,
                        expected_hash: &str, peers: &str) -> Option<Vec<i64>> {
     use futures::StreamExt;
     use libp2p::{request_response, swarm::SwarmEvent};
@@ -763,11 +823,13 @@ async fn fetch_genesis(swarm: &mut libp2p::Swarm<node::Behaviour>,
                     if let Some(w) = response.genesis {
                         // Accept either published form of the genesis id: the
                         // genesis block hash (header-format dependent) or the
-                        // genesis state_root (sha256 of the raw weight bytes —
-                        // what make_genesis prints and the docs publish, stable
-                        // across header revisions). Both pin the same weights.
-                        if core::blocktree::genesis_block_hash(&w) == expected_hash
-                            || core::state_root(&w) == expected_hash {
+                        // v1 page-Merkle state root (what make_genesis prints
+                        // and the docs publish). Both pin the same weights.
+                        let model0 = core::model_state::ModelState::genesis(&gp.spec);
+                        if w.len() as u64 == model0.dim()
+                            && (core::blocktree::genesis_block_hash(&w, gp) == expected_hash
+                                || core::model_state::page_state_root(&w, &model0)
+                                    == expected_hash) {
                             info!(dim = w.len(), "fetched + verified genesis from a peer");
                             return Some(w);
                         }
@@ -788,6 +850,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = Args::parse();
     let net = apply_network(&mut args);
     let args = args;
+    let gp = genesis_params(net);
     info!(network = net.name, "consensus parameters from the baked-in network");
 
     let seed = load_identity(&args);
@@ -840,17 +903,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     node::dial_peers(&mut swarm, &args.peers);
 
     if args.check {
-        return preflight(&args, &consensus_key, &store, &mut swarm).await;
+        return preflight(&args, &consensus_key, &store, &gp, &mut swarm).await;
     }
 
     // genesis: local disk -> --genesis-file -> --toy-dim -> FETCH from a peer,
     // verified against the published --genesis-hash. The genesis is public and
     // self-verifying, so a fresh node bootstraps from one peer + the id.
-    resolve_genesis(&args, &store, &mut swarm).await;
+    resolve_genesis(&args, &store, &mut swarm, &gp).await;
 
     // replay any existing chain from disk (validated)
     let (tree, blocks_full, payloads) = store
-        .replay(dc.clone(), args.prune_depth)
+        .replay(dc.clone(), args.prune_depth, &gp)
         .expect("chain replay failed");
 
     // Guarantee a current-format snapshot at the replayed head, so the NEXT
@@ -859,7 +922,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !matches!(store.read_snapshot(), Some((h, ..)) if h == tree.head) {
         let head = tree.head.clone();
         let height = tree.blocks[&head].height;
-        store.write_snapshot(&head, height, &tree.state[&head], tree.head_ledger());
+        store.write_snapshot(&head, height, &tree.state[&head], tree.head_ledger(),
+                             &tree.model[&head]);
         info!(height, "wrote boot snapshot for fast-boot");
     }
 
@@ -871,10 +935,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(api::run(args.api_bind.clone(), args.api_port, api_token, api_tx));
     tokio::spawn(bridge::run(args.bridge_port, bridge_cmd_rx, bridge_ev_tx));
 
-    let rotate = (!args.rotate.is_empty()).then(|| {
-        let (n, id) = args.rotate.split_once(',').expect("--rotate n,id");
-        (n.parse().unwrap(), id.parse().unwrap())
-    });
     let n = node::Node {
         tree,
         store,
@@ -892,7 +952,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg: node::NodeConfig {
             produce: args.produce,
             interval: args.interval,
-            rotate,
             seconds: args.seconds,
             peers: args.peers.clone(),
             data_refs: args.data_refs.split(',')
@@ -909,11 +968,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         last_proposed_round: -1,
         last_announced_round: -1,
+        last_trained_round: -1,
         last_sync_req: Default::default(),
         peers_connected: 0,
         chat_pending: Vec::new(),
         chat_inflight: false,
         stale_deltas: 0,
+        quota_rejects: 0,
         genesis_shard_cursor: Default::default(),
     };
     node::run(n, swarm, api_rx, bridge_ev_rx).await;

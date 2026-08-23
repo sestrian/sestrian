@@ -1,43 +1,43 @@
-"""Real (PyTorch) mixture-of-experts GPT with page-sharded hold/train/serve.
+"""Real (PyTorch) mixture-of-experts GPT — the protocol-v1 network model.
 
-The data-parallel client (client/gpt.py) makes every node hold the WHOLE model —
-so the biggest model the network can train is the biggest that fits on its
-smallest GPU. This lifts that ceiling: most parameters live in EXPERTS, the
-model's weights are addressed as PAGES, and a node may hold only a SUBSET of the
-pages (a shard). It trains the experts it holds and serves the tokens routed to
-them; it never needs the whole model in memory.
+The chain's state layout (rig/model_state.py) is the source of truth:
 
-Two things make this fit the chain unchanged:
+    [ backbone | expert(layer 0, e 0) | expert(0,1) | … | grown experts ]
 
-  * flat_params / set_flat_params already flatten an nn.Module in parameter
-    order, so the MoE model speaks the same flat vector the chain aggregates. A
-    node that holds only some pages simply MASKS its pseudo-gradient to those
-    pages (PageMap.mask) — every other coordinate is zero, so the chain's
-    trimmed-mean aggregation combines disjoint contributions with no special
-    case. Consensus is untouched; sharding is purely who-computes-which-page.
+Each expert page is that expert's parameters in module order — fc.weight,
+fc.bias, proj.weight, proj.bias — which is exactly the consensus page-init
+layout (W1 row-major, b1, W2, b2). The backbone page is every non-expert
+parameter in named_parameters() order. `ChainLayout` computes the permutation
+between torch's flat order (client/trainer.flat_params) and the chain order;
+consensus never sees torch order.
 
-  * the weights are paged exactly as rig/moe.py commits them (a backbone page +
-    one page per (layer, expert)), so sparse serving loads backbone + the routed
-    experts and can prove those pages against the committed Merkle root.
+v1 architecture invariants:
+  * positions are ROTARY (RoPE, reusing client/gpt.CausalSelfAttention) — no
+    learned position table, per the whitepaper invariant; context is a runtime
+    choice, not a weight shape.
+  * the router is preallocated to E_MAX columns per layer (a consensus genesis
+    parameter), so growth events add expert pages WITHOUT touching backbone
+    shapes. Routing masks non-instantiated columns to -inf.
+  * different layers may hold different expert counts (growth is per-layer,
+    round-robin), so the model is built from an explicit per-layer count.
+  * `add_expert(layer, init)` appends one expert whose weights come from the
+    chain's deterministic page-init — the client-side half of a growth event.
 
-"Split even smaller if required": PageMap's granularity is a knob. At
-granularity="expert" a page is a whole expert; subdivide(max_page=s) chops every
-page into ≤ s-parameter sub-pages, down to s=1 — one page per individual weight.
-So the same machinery shards experts across big GPUs OR lets one node train a
-handful of individual weights at ultimate fidelity. Holding a slice for TRAINING
-still needs the backbone to run the forward/backward for those weights (gradients
-aren't local); true hold-only-a-slice across the depth is pipeline parallelism,
-the next step up. MoE experts are the self-contained, internet-friendly middle.
+Sharding note (v1): the old `mask_delta`/`shard_aggregate` are GONE. Under
+protocol v1 a delta TX carries an explicit page-claim set and consensus
+aggregates per page over actual claimants (rig/chain.paged_transition), so
+"zero a coordinate you don't hold" is no longer a transport hack that dilutes
+aggregation — it is the validated tx format itself.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .gpt import pick_device
+from .gpt import CausalSelfAttention, GPTConfig, apply_genesis, pick_device
 
 
 @dataclass
@@ -47,7 +47,8 @@ class MoEGPTConfig:
     n_head: int = 4
     n_embd: int = 128
     block_size: int = 128
-    n_experts: int = 8
+    n_experts: int = 4             # experts per layer at genesis
+    e_max: int = 8                 # router columns preallocated (growth headroom)
     top_k: int = 2
     dropout: float = 0.0
 
@@ -55,10 +56,16 @@ class MoEGPTConfig:
     def d_ff(self):
         return 4 * self.n_embd
 
+    def attn_cfg(self) -> GPTConfig:
+        return GPTConfig(vocab_size=self.vocab_size, block_size=self.block_size,
+                         n_layer=self.n_layer, n_head=self.n_head,
+                         n_embd=self.n_embd, dropout=self.dropout)
+
 
 class Expert(nn.Module):
-    """One FFN expert: the unit of sharding. Self-contained (no cross-expert
-    state), so a node can hold, train, and serve any subset of experts."""
+    """One FFN expert: the unit of sharding AND the chain's growth unit. Its
+    parameter order (fc.weight, fc.bias, proj.weight, proj.bias) IS the
+    consensus expert-page layout — do not reorder."""
 
     def __init__(self, cfg: MoEGPTConfig):
         super().__init__()
@@ -68,25 +75,42 @@ class Expert(nn.Module):
     def forward(self, x):
         return self.proj(F.gelu(self.fc(x)))
 
+    @torch.no_grad()
+    def load_page(self, page_f64: np.ndarray):
+        """Load this expert from a chain page (dequantized float64, chain page
+        layout: W1 row-major, b1, W2, b2)."""
+        d, f = self.fc.in_features, self.fc.out_features
+        w1, rest = page_f64[:d * f], page_f64[d * f:]
+        b1, rest = rest[:f], rest[f:]
+        w2, b2 = rest[:f * d], rest[f * d:]
+        self.fc.weight.copy_(torch.from_numpy(w1.reshape(f, d)).to(self.fc.weight))
+        self.fc.bias.copy_(torch.from_numpy(b1).to(self.fc.bias))
+        self.proj.weight.copy_(torch.from_numpy(w2.reshape(d, f)).to(self.proj.weight))
+        self.proj.bias.copy_(torch.from_numpy(b2).to(self.proj.bias))
+
 
 class MoEFeedForward(nn.Module):
-    """Top-k routed mixture of experts. Training computes all experts but gates
-    every token to its top-k (others get zero weight), so the result is IDENTICAL
-    to sparse serving that evaluates only the selected experts — which is what
-    makes skipping them at inference sound (rig/moe_transformer.py)."""
+    """Top-k routed mixture over the layer's INSTANTIATED experts. The router is
+    E_MAX wide (consensus backbone shape); columns without an expert — and any
+    the caller masks (frozen-for-training is a delta-level concern, but serving
+    can also exclude) — are -inf before the topk, so they get exactly 0 gate."""
 
-    def __init__(self, cfg: MoEGPTConfig):
+    def __init__(self, cfg: MoEGPTConfig, n_experts: int):
         super().__init__()
         self.cfg = cfg
-        self.router = nn.Linear(cfg.n_embd, cfg.n_experts, bias=False)
-        self.experts = nn.ModuleList([Expert(cfg) for _ in range(cfg.n_experts)])
+        self.router = nn.Linear(cfg.n_embd, cfg.e_max, bias=False)
+        self.experts = nn.ModuleList([Expert(cfg) for _ in range(n_experts)])
 
     def _gates(self, x):
-        """Top-k softmax gates per token; non-selected experts are exactly 0."""
-        logits = self.router(x)                                   # (..., E)
-        topv, topi = logits.topk(self.cfg.top_k, dim=-1)
+        logits = self.router(x)                                   # (..., E_MAX)
+        n = len(self.experts)
+        if n < self.cfg.e_max:
+            fill = torch.full_like(logits[..., n:], float("-inf"))
+            logits = torch.cat([logits[..., :n], fill], dim=-1)
+        k = min(self.cfg.top_k, n)
+        topv, topi = logits.topk(k, dim=-1)
         w = torch.zeros_like(logits).scatter_(-1, topi, F.softmax(topv, dim=-1))
-        return w                                                  # (..., E), k non-zeros
+        return w                                                  # k non-zeros/token
 
     def forward(self, x):
         w = self._gates(x)
@@ -106,192 +130,193 @@ class MoEFeedForward(nn.Module):
         touched = set()
         for e, expert in enumerate(self.experts):
             we = w[..., e:e + 1]
-            sel = torch.any(we > 0)
-            if sel and (held is None or e in held):
+            if torch.any(we > 0) and (held is None or e in held):
                 out = out + we * expert(x)
                 touched.add(e)
         return out, touched
 
 
 class MoEBlock(nn.Module):
-    def __init__(self, cfg: MoEGPTConfig):
+    def __init__(self, cfg: MoEGPTConfig, n_experts: int):
         super().__init__()
         self.ln1 = nn.LayerNorm(cfg.n_embd)
-        self.attn = nn.MultiheadAttention(cfg.n_embd, cfg.n_head,
-                                          dropout=cfg.dropout, batch_first=True)
+        self.attn = CausalSelfAttention(cfg.attn_cfg())           # RoPE, fused
         self.ln2 = nn.LayerNorm(cfg.n_embd)
-        self.moe = MoEFeedForward(cfg)                            # experts live here
-        self.register_buffer("mask", torch.triu(
-            torch.ones(cfg.block_size, cfg.block_size) * float("-inf"), diagonal=1))
+        self.moe = MoEFeedForward(cfg, n_experts)                 # experts live here
 
     def forward(self, x):
-        h = self.ln1(x)
-        T = x.size(1)
-        a, _ = self.attn(h, h, h, attn_mask=self.mask[:T, :T], need_weights=False)
-        x = x + a
+        x = x + self.attn(self.ln1(x))
         x = x + self.moe(self.ln2(x))
         return x
 
 
 class MoEGPT(nn.Module):
-    """A byte-level GPT whose FFNs are mixtures of experts. Ordinary nn.Module, so
-    it plugs into client/trainer.py (flat_params/DiLoCo) and the chain unchanged."""
+    """A byte-level RoPE GPT whose FFNs are mixtures of experts. Ordinary
+    nn.Module, so it plugs into client/trainer.py (flat_params/DiLoCo)
+    unchanged; ChainLayout maps it onto the chain's page layout."""
 
-    def __init__(self, cfg: MoEGPTConfig):
+    def __init__(self, cfg: MoEGPTConfig, experts_per_layer: list[int] | None = None):
         super().__init__()
         self.cfg = cfg
+        epl = list(experts_per_layer if experts_per_layer is not None
+                   else [cfg.n_experts] * cfg.n_layer)
+        assert len(epl) == cfg.n_layer and all(0 < e <= cfg.e_max for e in epl)
         self.tok = nn.Embedding(cfg.vocab_size, cfg.n_embd)
-        self.pos = nn.Embedding(cfg.block_size, cfg.n_embd)
+        # no position embedding — positions are rotary (RoPE), inside attention
         self.drop = nn.Dropout(cfg.dropout)
-        self.blocks = nn.ModuleList([MoEBlock(cfg) for _ in range(cfg.n_layer)])
+        self.blocks = nn.ModuleList([MoEBlock(cfg, e) for e in epl])
         self.lnf = nn.LayerNorm(cfg.n_embd)
         self.head = nn.Linear(cfg.n_embd, cfg.vocab_size, bias=False)
 
+    @property
+    def experts_per_layer(self) -> list[int]:
+        return [len(b.moe.experts) for b in self.blocks]
+
     def forward(self, idx, targets=None):
-        B, T = idx.shape
-        pos = torch.arange(T, device=idx.device)
-        x = self.drop(self.tok(idx) + self.pos(pos))
+        x = self.drop(self.tok(idx))
         for b in self.blocks:
             x = b(x)
         logits = self.head(self.lnf(x))
         loss = None
         if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+            loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)),
+                                   targets.reshape(-1))
         return logits, loss
+
+    @torch.no_grad()
+    def generate(self, idx, n_new, temperature=1.0):
+        for _ in range(n_new):
+            idx_c = idx[:, -self.cfg.block_size:]
+            logits, _ = self(idx_c)
+            probs = F.softmax(logits[:, -1, :] / temperature, dim=-1)
+            idx = torch.cat([idx, torch.multinomial(probs, 1)], dim=1)
+        return idx
+
+    def add_expert(self, layer: int, page_f64: np.ndarray | None = None) -> int:
+        """The client half of a growth event: append one expert to `layer`,
+        loading its weights from the chain's deterministic page init. Returns
+        the new expert's index within the layer. The caller must rebuild its
+        ChainLayout afterwards — the flat dimensions changed."""
+        moe = self.blocks[layer].moe
+        assert len(moe.experts) < self.cfg.e_max, "router headroom exhausted"
+        ex = Expert(self.cfg).to(next(self.parameters()).device)
+        if page_f64 is not None:
+            ex.load_page(page_f64)
+        moe.experts.append(ex)
+        return len(moe.experts) - 1
 
     def num_params(self):
         return sum(p.numel() for p in self.parameters())
 
 
-def build_moe(cfg: MoEGPTConfig = None, device: str = None, seed: int = None):
-    from .gpt import apply_genesis
+def build_moe(cfg: MoEGPTConfig = None, device: str = None, seed: int = None,
+              experts_per_layer: list[int] | None = None):
     cfg = cfg or MoEGPTConfig()
     device = device or pick_device()
-    model = MoEGPT(cfg).to(device)
+    model = MoEGPT(cfg, experts_per_layer).to(device)
     if seed is not None:                                          # shared genesis
         apply_genesis(model, seed)
     return model, device
 
 
 # --------------------------------------------------------------------------
-# PageMap — address the flat parameter vector as pages, at any granularity
+# ChainLayout — the torch↔chain permutation (consensus page table is truth)
 # --------------------------------------------------------------------------
-class PageMap:
-    """Maps an MoEGPT's flat parameter vector (client/trainer.flat_params order)
-    into PAGES so a node can hold/train a subset. A page is a contiguous slice of
-    the flat vector; experts fall on contiguous slices because each expert's
-    parameters are registered together. Two page kinds:
+class ChainLayout:
+    """Maps between torch's flat parameter vector (client/trainer.flat_params —
+    named_parameters() order, experts interleaved inside their layers) and the
+    CHAIN order (backbone first, then expert pages in (layer, expert) order).
 
-        ("backbone",)              — embeddings, attention, router, norms, head
-        ("expert", layer, expert)  — one FFN expert (the shard unit)
+    chain_vec = torch_vec[to_chain];  torch_vec = chain_vec[to_torch]
 
-    subdivide(max_page) chops every page into ≤ max_page-parameter sub-pages, so
-    the same shard machinery scales from whole-expert down to per-weight pages.
-    """
+    Also exposes the consensus page table view this model implies: page 0 =
+    backbone span [0, backbone_params); page 1.. = expert pages in (layer,
+    expert) order, each of expert_page_len — matching rig/model_state.py
+    exactly (assert against the node's ModelState before trusting a sync)."""
 
     def __init__(self, model: MoEGPT):
         self.n = model.num_params()
-        self.pages = {}                       # page-key -> (start, end)
-        self.expert_of = {}                   # (layer, e) -> page-key
-        i = 0
-        cur_expert, cur_start = None, None
+        d, f = model.cfg.n_embd, model.cfg.d_ff
+        self.expert_page_len = d * f + f + f * d + d
+        offs, i = [], 0
         for name, p in model.named_parameters():
-            sz = p.numel()
-            ex = self._expert_key(name)       # (layer, e) or None
-            if ex != cur_expert:
-                if cur_expert is not None:
-                    self.pages[("expert", *cur_expert)] = (cur_start, i)
-                cur_expert = ex
-                cur_start = i if ex is not None else None
-            i += sz
-        if cur_expert is not None:
-            self.pages[("expert", *cur_expert)] = (cur_start, i)
-        # backbone = every index not covered by an expert page
-        covered = np.zeros(self.n, dtype=bool)
-        for (start, end) in self.pages.values():
-            covered[start:end] = True
-        self.backbone_idx = np.nonzero(~covered)[0]
-        for key in list(self.pages):
-            if key[0] == "expert":
-                self.expert_of[(key[1], key[2])] = key
+            offs.append((name, i, i + p.numel()))
+            i += p.numel()
+        assert i == self.n
 
-    @staticmethod
-    def _expert_key(name: str):
-        # names like "blocks.0.moe.experts.3.fc.weight"
-        parts = name.split(".")
-        if "experts" in parts and "blocks" in parts:
-            layer = int(parts[parts.index("blocks") + 1])
-            e = int(parts[parts.index("experts") + 1])
-            return (layer, e)
-        return None
+        def expert_key(name):
+            parts = name.split(".")
+            if "experts" in parts and "blocks" in parts:
+                return (int(parts[parts.index("blocks") + 1]),
+                        int(parts[parts.index("experts") + 1]))
+            return None
 
-    @property
-    def experts(self):
-        return sorted(self.expert_of)                 # list of (layer, e)
+        backbone_runs = [(s, e) for name, s, e in offs if expert_key(name) is None]
+        expert_runs: dict = {}
+        for name, s, e in offs:
+            k = expert_key(name)
+            if k is not None:
+                expert_runs.setdefault(k, []).append((s, e))
+        self.backbone_params = sum(e - s for s, e in backbone_runs)
+        self.experts = sorted(expert_runs)                 # [(layer, e), ...]
+        for k in self.experts:
+            assert sum(e - s for s, e in expert_runs[k]) == self.expert_page_len
 
-    def expert_indices(self, expert_keys) -> np.ndarray:
-        """Flat indices covered by the given (layer, e) experts."""
+        # to_chain: torch indices in chain order
+        pieces = [np.arange(s, e) for s, e in backbone_runs]
+        self.page_spans = [(0, self.backbone_params)]
+        pos = self.backbone_params
+        for k in self.experts:
+            for s, e in expert_runs[k]:
+                pieces.append(np.arange(s, e))
+            self.page_spans.append((pos, pos + self.expert_page_len))
+            pos += self.expert_page_len
+        self.to_chain = np.concatenate(pieces)
+        assert self.to_chain.size == self.n
+        self.to_torch = np.empty(self.n, dtype=np.int64)
+        self.to_torch[self.to_chain] = np.arange(self.n)
+
+    # ---- conversions -----------------------------------------------------
+    def chain_of(self, torch_vec: np.ndarray) -> np.ndarray:
+        return np.ascontiguousarray(torch_vec[self.to_chain])
+
+    def torch_of(self, chain_vec: np.ndarray) -> np.ndarray:
+        # to_torch[torch_index] = chain_position, so this inverts chain_of
+        return np.ascontiguousarray(chain_vec[self.to_torch])
+
+    # ---- page queries (chain-order coordinates) --------------------------
+    def n_pages(self) -> int:
+        return len(self.page_spans)
+
+    def page_span(self, page_id: int) -> tuple[int, int]:
+        return self.page_spans[page_id]
+
+    def page_of_expert(self, layer: int, e: int) -> int:
+        return 1 + self.experts.index((layer, e))
+
+    def pages_touched(self, chain_delta: np.ndarray) -> list[int]:
+        """Which pages a (chain-order) delta actually touches — the claim set."""
         out = []
-        for k in expert_keys:
-            s, e = self.pages[self.expert_of[k]]
-            out.append(np.arange(s, e))
-        return np.concatenate(out) if out else np.array([], dtype=int)
+        for pid, (s, e) in enumerate(self.page_spans):
+            if np.any(chain_delta[s:e] != 0):
+                out.append(pid)
+        return out
 
-    def mask(self, expert_keys, include_backbone=True) -> np.ndarray:
-        """Boolean mask over the flat vector for a node that HOLDS these experts
-        (plus the backbone, which every trainer needs to run the forward pass)."""
-        m = np.zeros(self.n, dtype=bool)
-        if include_backbone:
-            m[self.backbone_idx] = True
-        idx = self.expert_indices(expert_keys)
-        if idx.size:
-            m[idx] = True
-        return m
-
-    def subdivide(self, max_page: int):
-        """Every page split into contiguous sub-pages of ≤ max_page params. At
-        max_page=1 each parameter is its own page — the finest possible shard,
-        the 'train individual weights' granularity. Returns list of (start, end)."""
-        spans = [(s, e) for (s, e) in self.pages.values()]
-        if self.backbone_idx.size:                    # backbone as contiguous runs
-            b = self.backbone_idx
-            brk = np.nonzero(np.diff(b) > 1)[0]
-            starts = np.concatenate([[0], brk + 1])
-            ends = np.concatenate([brk + 1, [b.size]])
-            spans += [(int(b[s]), int(b[e - 1]) + 1) for s, e in zip(starts, ends)]
-        out = []
-        for s, e in sorted(spans):
-            for a in range(s, e, max_page):
-                out.append((a, min(a + max_page, e)))
+    def zero_outside(self, chain_delta: np.ndarray, pages: list[int]) -> np.ndarray:
+        """Enforce the v1 tx rule client-side: zero everything outside the
+        claimed pages (so the tx can never be rejected for stray coordinates)."""
+        keep = np.zeros(self.n, dtype=bool)
+        for p in pages:
+            s, e = self.page_spans[p]
+            keep[s:e] = True
+        out = chain_delta.copy()
+        out[~keep] = 0
         return out
 
 
-def mask_delta(delta: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    """Keep only the components a node is responsible for; zero the rest. The
-    chain aggregates the result unchanged — untouched pages simply get no
-    contribution from this node."""
-    out = delta.copy()
-    out[~mask] = 0
-    return out
-
-
-def shard_aggregate(base_int: np.ndarray, deltas_int, masks) -> np.ndarray:
-    """The sharded DiLoCo outer step: each coordinate is averaged over the nodes
-    that HOLD it, not over all nodes. A page trained by one node is applied in
-    full (not halved by absent nodes); the shared backbone is averaged over
-    everyone. Deterministic integer math, like the chain's trimmed_mean_int — so
-    this is the page-aware generalization of trainer.outer_apply."""
-    stacked = np.stack([mask_delta(d, m) for d, m in zip(deltas_int, masks)])
-    holders = np.stack(masks).sum(axis=0)               # per-coordinate holder count
-    summed = stacked.sum(axis=0)
-    out = base_int.copy()
-    nz = holders > 0
-    out[nz] = base_int[nz] + summed[nz] // holders[nz]  # integer mean over holders
-    return out
-
-
-def load_fraction(pagemap: PageMap, held_experts) -> float:
-    """Fraction of parameters a node loads if it holds `held_experts` + backbone —
-    the memory win of sharding vs holding the whole model."""
-    m = pagemap.mask(held_experts, include_backbone=True)
-    return float(m.sum()) / pagemap.n
+def load_fraction(layout: ChainLayout, held_pages: list[int]) -> float:
+    """Fraction of parameters a node loads holding `held_pages` (page 0 =
+    backbone, which every trainer needs) — the memory win of sharding."""
+    total = sum(layout.page_span(p)[1] - layout.page_span(p)[0]
+                for p in held_pages)
+    return float(total) / layout.n

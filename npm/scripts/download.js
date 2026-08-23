@@ -159,7 +159,7 @@ async function ensureBinary() {
 // genesis state root — checking the download IS checking the chain identity,
 // not merely that a file arrived intact.
 
-const GENESIS_TAG = process.env.SESTRIAN_GENESIS_TAG || 'devnet-genesis-1';
+const GENESIS_TAG = process.env.SESTRIAN_GENESIS_TAG || 'devnet-genesis-2';
 
 function human(n) {
   return n >= 1 << 30 ? `${(n / 2 ** 30).toFixed(2)}GB` : `${Math.round(n / 2 ** 20)}MB`;
@@ -280,8 +280,12 @@ async function ensureGenesis(dest) {
         `  expected: ${wantZst}\n  got:      ${gotZst}`
       );
     }
-    // The decisive check: these bytes hash to the genesis state root, so a pass
-    // here means we hold the same chain everyone else does.
+    // Artifact-integrity check: the raw bytes match the manifest's sha256.
+    // NOTE (protocol v1): this is the FILE hash, not the chain's state root —
+    // the state root is a page-Merkle commitment the NODE recomputes and
+    // checks against its baked-in network id at startup (the decisive,
+    // identity-establishing check). This layer proves integrity of the
+    // download; identity is proven by the binary.
     if (gotRaw !== wantRaw) {
       throw new Error(
         `GENESIS CHECKSUM MISMATCH (weights) — refusing to install.\n` +
@@ -289,7 +293,9 @@ async function ensureGenesis(dest) {
       );
     }
     fs.renameSync(part, dest);
-    process.stderr.write(`sestrian: verified genesis state_root ${gotRaw}\n`);
+    process.stderr.write(
+      `sestrian: genesis file sha256 verified (${gotRaw.slice(0, 16)}…); ` +
+      `the node will verify the chain state root at startup\n`);
     return dest;
   } catch (e) {
     cleanup();

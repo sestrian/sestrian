@@ -21,12 +21,24 @@ use tracing::{info, warn};
 
 #[derive(Debug)]
 pub enum ToBridge {
-    State { height: u64, state: Vec<i64> },
+    /// v1: `experts_per_layer` lets the trainer build the exact (possibly
+    /// grown, ragged) architecture before loading the chain-order state.
+    State { height: u64, state: Vec<i64>, experts_per_layer: Vec<u64> },
     /// `budget_s`: how long the trainer may spend before its delta goes stale
     /// (derived from the node's block interval) — the trainer auto-fits its
     /// inner steps to it, so a slow GPU still lands includable deltas.
-    Train { height: u64, seed: u64, budget_s: f64 },
-    Advance { height: u64, sparse: SparseI64 },
+    /// v1: `min_nnz` is the consensus work quota's floor on nonzero
+    /// coordinates (the compressor keeps at least this many), and
+    /// `active_pages` is the claimable set — deltas must be zero on frozen
+    /// pages or validation rejects them.
+    Train { height: u64, seed: u64, budget_s: f64, min_nnz: u64,
+            active_pages: Vec<u32> },
+    Advance { height: u64, dim: u64, sparse: SparseI64 },
+    /// v1 GROWTH EVENT: the chain appended one expert page; the bridge appends
+    /// the deterministic init to its state, instantiates the expert, and
+    /// rebuilds its layout. `init` rides as a raw i64 frame after the JSON.
+    Grow { height: u64, new_dim: u64, page_id: u64, layer: i64, expert: i64,
+           init: Vec<i64> },
     Generate { prompt: String, n: u64 },
     /// rev 7: score candidate deltas on a held-out batch (seeded from block
     /// context). Each delta rides as a full-i64 sparse vector the trainer adds
@@ -37,7 +49,8 @@ pub enum ToBridge {
 #[derive(Debug)]
 pub enum FromBridge {
     Connected,
-    Delta { height: u64, loss: f64, payload: Payload },
+    /// v1: `pages` is the trainer's claim set for this delta.
+    Delta { height: u64, loss: f64, pages: Vec<u32>, payload: Payload },
     NeedState,
     Generated { text: String, height: u64 },
     /// rev 7: micro-nat held-out-loss improvements per txid.
@@ -87,9 +100,15 @@ async fn serve_one(
                 Some("delta") => {
                     let payload: Payload = serde_json::from_value(v["payload"].clone())
                         .map_err(std::io::Error::other)?;
+                    let pages: Vec<u32> = v["pages"].as_array()
+                        .map(|a| a.iter()
+                            .filter_map(|x| x.as_u64().map(|p| p as u32))
+                            .collect())
+                        .unwrap_or_default();
                     let _ = ev.send(FromBridge::Delta {
                         height: v["height"].as_u64().unwrap_or(0),
                         loss: v["loss"].as_f64().unwrap_or(0.0),
+                        pages,
                         payload,
                     }).await;
                 }
@@ -138,23 +157,39 @@ async fn serve_one(
             cmd = cmds.recv() => {
                 let Some(cmd) = cmd else { break Ok(()) };
                 let r = match cmd {
-                    ToBridge::State { height, state } => {
+                    ToBridge::State { height, state, experts_per_layer } => {
                         let head = json!({"t": "state", "height": height,
-                                          "n": state.len(), "bin_next": true});
+                                          "n": state.len(),
+                                          "experts_per_layer": experts_per_layer,
+                                          "bin_next": true});
                         match write_frame(&mut wr, head.to_string().as_bytes()).await {
                             Ok(()) => write_frame(&mut wr,
                                 &sestrian_core::int64_bytes(&state)).await,
                             e => e,
                         }
                     }
-                    ToBridge::Train { height, seed, budget_s } => {
+                    ToBridge::Train { height, seed, budget_s, min_nnz, active_pages } => {
                         let m = json!({"t": "train", "height": height, "seed": seed,
-                                       "budget_s": budget_s});
+                                       "budget_s": budget_s, "min_nnz": min_nnz,
+                                       "active_pages": active_pages});
                         write_frame(&mut wr, m.to_string().as_bytes()).await
                     }
-                    ToBridge::Advance { height, sparse } => {
-                        let m = json!({"t": "advance", "height": height, "sparse": sparse});
+                    ToBridge::Advance { height, dim, sparse } => {
+                        let m = json!({"t": "advance", "height": height,
+                                       "dim": dim, "sparse": sparse});
                         write_frame(&mut wr, m.to_string().as_bytes()).await
+                    }
+                    ToBridge::Grow { height, new_dim, page_id, layer, expert, init } => {
+                        let m = json!({"t": "grow", "height": height,
+                                       "new_dim": new_dim,
+                                       "page": {"page_id": page_id, "layer": layer,
+                                                "expert": expert},
+                                       "bin_next": true});
+                        match write_frame(&mut wr, m.to_string().as_bytes()).await {
+                            Ok(()) => write_frame(&mut wr,
+                                &sestrian_core::int64_bytes(&init)).await,
+                            e => e,
+                        }
                     }
                     ToBridge::Generate { prompt, n } => {
                         let m = json!({"t": "generate", "prompt": prompt, "n": n});

@@ -98,12 +98,15 @@ pub struct WireHeader {
     pub transfer_root: String,
     pub ledger_root: String,
     pub data_root: String,
-    #[serde(default)]
     pub vrf_proof: String,
-    #[serde(default)]
     pub score_root: String,    // rev 7: commitment to the proposer's delta scores
-    #[serde(default)]
     pub sketch_root: String,   // rev 8: commitment to the deltas' influence sketches
+    // PROTOCOL v1 — deliberately NO serde defaults on any field from here on
+    // (or above): a pre-fork peer/disk artifact must fail to parse loudly, not
+    // half-deserialize into a hash that can never validate.
+    pub model_root: String,    // ModelState commitment AFTER this block
+    pub vrf_attempt: u64,      // sortition attempt the proof binds to
+    pub version: u64,          // protocol version (VERSION_SCHEDULE-checked)
 }
 
 impl WireHeader {
@@ -122,6 +125,9 @@ impl WireHeader {
             vrf_proof: self.vrf_proof.clone(),
             score_root: self.score_root.clone(),
             sketch_root: self.sketch_root.clone(),
+            model_root: self.model_root.clone(),
+            vrf_attempt: self.vrf_attempt,
+            version: self.version,
         }
     }
 
@@ -140,6 +146,9 @@ impl WireHeader {
             vrf_proof: h.vrf_proof.clone(),
             score_root: h.score_root.clone(),
             sketch_root: h.sketch_root.clone(),
+            model_root: h.model_root.clone(),
+            vrf_attempt: h.vrf_attempt,
+            version: h.version,
         }
     }
 }
@@ -148,11 +157,12 @@ impl WireHeader {
 pub struct WireDeltaTx {
     pub miner: String,
     pub base_height: u64,
-    pub shard_id: u64,
     pub delta_hash: String,
     pub da_pointer: String,
-    #[serde(default)]
     pub bond: u64,
+    /// v1: the claimed page ids (sorted, deduped) — no serde default; a tx
+    /// without a claim set is a pre-fork artifact and must fail to parse.
+    pub pages: Vec<u32>,
     #[serde(default)]
     pub data_refs: Vec<String>,   // rev 5: provenance — corpora this gradient trained on
     pub sig: String, // hex
@@ -163,10 +173,10 @@ impl WireDeltaTx {
         Some(core::BackpropTx {
             miner: self.miner.clone(),
             base_height: self.base_height,
-            shard_id: self.shard_id,
             delta_hash: self.delta_hash.clone(),
             da_pointer: self.da_pointer.clone(),
             bond: self.bond,
+            pages: self.pages.clone(),
             data_refs: self.data_refs.clone(),
             sig: hex::decode(&self.sig).ok()?,
         })
@@ -176,10 +186,10 @@ impl WireDeltaTx {
         WireDeltaTx {
             miner: t.miner.clone(),
             base_height: t.base_height,
-            shard_id: t.shard_id,
             delta_hash: t.delta_hash.clone(),
             da_pointer: t.da_pointer.clone(),
             bond: t.bond,
+            pages: t.pages.clone(),
             data_refs: t.data_refs.clone(),
             sig: hex::encode(&t.sig),
         }

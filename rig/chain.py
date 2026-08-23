@@ -58,6 +58,26 @@ def trimmed_mean_int(deltas_int: list[np.ndarray], trim: float = 0.2) -> np.ndar
     return np.floor_divide(core.sum(axis=0, dtype=np.int64), core.shape[0])
 
 
+def paged_transition(parent_w_int: np.ndarray, bodies: list[np.ndarray],
+                     claims: list[list[int]],
+                     spans: list[tuple[int, int]]) -> np.ndarray:
+    """Protocol v1 state transition: per-page trimmed mean over each page's
+    ACTUAL claimants. For page p, the contributor set is the bodies whose claim
+    set includes p, sliced to p's span; pages nobody claimed are unchanged.
+    When every body claims every page this reduces exactly to the global
+    trimmed-mean transition. Claimant order is irrelevant (elementwise sort
+    inside trimmed_mean_int), so this is deterministic from block content.
+    """
+    w = parent_w_int.copy()
+    claim_sets = [set(c) for c in claims]
+    for page_id, (start, end) in enumerate(spans):
+        contributors = [b[start:end] for b, c in zip(bodies, claim_sets)
+                        if page_id in c]
+        if contributors:
+            w[start:end] = w[start:end] + trimmed_mean_int(contributors)
+    return w
+
+
 class Block:
     def __init__(self, height: int, deltas_int: list[np.ndarray],
                  miner_ids: list[int], root: str):

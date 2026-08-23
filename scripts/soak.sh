@@ -19,26 +19,26 @@ A=$(printf 'a%.0s' {1..64} | head -c 64)
 Bk=$(printf 'b%.0s' {1..64} | head -c 64)
 rm -rf /tmp/soak0 /tmp/soak1
 uv run --with torch --with numpy --with pynacl python -m client.make_genesis \
-    --model toy --seed 1337 --out /tmp/soak_genesis.bin
+    --model toy-moe --seed 1337 --out /tmp/soak_genesis.bin
 
 start_n0() {
   $B --network local --data-dir /tmp/soak0 --key-seed "$A" --genesis-file /tmp/soak_genesis.bin \
      --port 7910 --api-port 8110 --bridge-port 7989 --produce --interval 6 \
-     --rotate 2,0 --seconds "$1" --data-contributor "$FOUNDER" >> /tmp/soak0.log 2>&1 &
+     --data-refs genesis --seconds "$1" --data-contributor "$FOUNDER" >> /tmp/soak0.log 2>&1 &
   echo $!
 }
 : > /tmp/soak0.log; : > /tmp/soak1.log
 N0=$(start_n0 "$S")
 $B --network local --data-dir /tmp/soak1 --key-seed "$Bk" --genesis-file /tmp/soak_genesis.bin \
    --port 7911 --api-port 8111 --bridge-port 7988 --produce --interval 6 \
-   --rotate 2,1 --seconds "$S" --peers /ip4/127.0.0.1/udp/7910/quic-v1 \
+   --data-refs genesis --seconds "$S" --peers /ip4/127.0.0.1/udp/7910/quic-v1 \
    --data-contributor "$FOUNDER" >> /tmp/soak1.log 2>&1 &
 N1=$!
 sleep 3
 uv run --with torch --with numpy --with pynacl python -m client.miner_bridge \
-    --node-port 7989 --model toy --inner 10 --batch 16 --device cpu > /tmp/soakb0.log 2>&1 &
+    --node-port 7989 --model toy-moe --inner 10 --batch 16 --device cpu > /tmp/soakb0.log 2>&1 &
 uv run --with torch --with numpy --with pynacl python -m client.miner_bridge \
-    --node-port 7988 --model toy --inner 10 --batch 16 --device cpu > /tmp/soakb1.log 2>&1 &
+    --node-port 7988 --model toy-moe --inner 10 --batch 16 --device cpu > /tmp/soakb1.log 2>&1 &
 
 # CHAOS: after KILL_AT seconds, hard-kill node0, wait, and restart it. It must
 # fast-boot from its snapshot, re-acquire the data-dir lock, and sync the blocks

@@ -16,6 +16,8 @@ pub mod blocktree;
 pub mod capacity;
 pub mod da;
 pub mod lottery;
+pub mod merkle;
+pub mod model_state;
 pub mod token;
 
 pub const SCALE: f64 = 65536.0; // 1 << 16 fixed-point scale
@@ -150,15 +152,24 @@ pub fn verify_sig(pub_hex: &str, msg: &[u8], sig: &[u8]) -> bool {
     vk.verify(msg, &Signature::from_bytes(&sig_arr)).is_ok()
 }
 
-/// A miner's signed delta commitment (§4.1).
+/// A miner's signed delta commitment (§4.1, protocol v1). The body (delta)
+/// lives on the DA layer; the tx carries its hash, base height, the PAGE CLAIM
+/// SET, and a signature over all of it.
+///
+/// v1: `shard_id` is gone; `pages` is the sorted set of page ids this delta
+/// trained. The dense body must be exactly zero outside the claimed pages'
+/// spans — that is what makes per-page aggregation over actual contributors
+/// well-defined (a non-claimant's zero is absence, not a vote for zero), and
+/// what makes freezing a page an enforceable rule.
 #[derive(Clone, Debug)]
 pub struct BackpropTx {
     pub miner: String,
     pub base_height: u64,
-    pub shard_id: u64,
     pub delta_hash: String,
     pub da_pointer: String,
     pub bond: u64, // rev 4: stake bond the miner locks to submit (grains)
+    // v1: the claimed page ids (canonicalized: sorted, unique). Empty = invalid.
+    pub pages: Vec<u32>,
     // rev 5: PROVENANCE — content addresses of the data this gradient trained on.
     // Empty is rejected by block validation; the share pays these corpora's owners.
     pub data_refs: Vec<String>,
@@ -174,23 +185,37 @@ impl BackpropTx {
         r
     }
 
-    /// Must match the Python reference byte-for-byte (length-prefixed framing).
+    /// Sorted, de-duplicated page-id list — the canonical claim set.
+    pub fn canonical_pages(&self) -> Vec<u32> {
+        let mut p = self.pages.clone();
+        p.sort_unstable();
+        p.dedup();
+        p
+    }
+
+    /// Must match the Python reference byte-for-byte (length-prefixed framing;
+    /// both lists count-prefixed so zero entries is unambiguous).
     pub fn signing_bytes(&self) -> Vec<u8> {
         let refs = self.canonical_refs();
+        let pages = self.canonical_pages();
         let base = self.base_height.to_string();
-        let shard = self.shard_id.to_string();
         let bond = self.bond.to_string();
-        let count = refs.len().to_string();
+        let page_count = pages.len().to_string();
+        let page_strs: Vec<String> = pages.iter().map(|p| p.to_string()).collect();
+        let ref_count = refs.len().to_string();
         let mut parts: Vec<&[u8]> = vec![
             b"backprop",
             self.miner.as_bytes(),
             base.as_bytes(),
-            shard.as_bytes(),
             self.delta_hash.as_bytes(),
             self.da_pointer.as_bytes(),
             bond.as_bytes(),
-            count.as_bytes(),
+            page_count.as_bytes(),
         ];
+        for p in &page_strs {
+            parts.push(p.as_bytes());
+        }
+        parts.push(ref_count.as_bytes());
         for r in &refs {
             parts.push(r.as_bytes());
         }
@@ -215,6 +240,58 @@ pub fn txset_root(txids: &[String]) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Protocol version (v1)
+// ---------------------------------------------------------------------------
+
+/// The entire upgrade mechanism, deliberately minimal: the header commits a
+/// version, and validation requires it to equal the scheduled version for its
+/// height. A future upgrade appends (activation_height, version) here; nodes
+/// that don't know a version reject its blocks with "upgrade your node".
+pub const VERSION_SCHEDULE: &[(u64, u64)] = &[(0, 1)];
+
+pub fn expected_version(height: u64) -> u64 {
+    let mut v = VERSION_SCHEDULE[0].1;
+    for &(h0, ver) in VERSION_SCHEDULE {
+        if height >= h0 {
+            v = ver;
+        }
+    }
+    v
+}
+
+/// Protocol v1 state transition (mirrors `rig/chain.py::paged_transition`):
+/// per-page trimmed mean over each page's ACTUAL claimants. For page p, the
+/// contributor set is the bodies whose claim set includes p, sliced to p's
+/// span; pages nobody claimed are unchanged. When every body claims every page
+/// this reduces exactly to the global trimmed-mean transition. Claimant order
+/// is irrelevant (elementwise sort inside trimmed_mean).
+pub fn paged_transition(
+    parent_w: &[i64],
+    bodies: &[Vec<i64>],
+    claims: &[Vec<u32>],
+    spans: &[(u64, u64)],
+) -> Vec<i64> {
+    let mut w = parent_w.to_vec();
+    for (page_id, &(start, end)) in spans.iter().enumerate() {
+        let (start, end) = (start as usize, end as usize);
+        let contributors: Vec<Vec<i64>> = bodies
+            .iter()
+            .zip(claims)
+            .filter(|(_, c)| c.contains(&(page_id as u32)))
+            .map(|(b, _)| b[start..end].to_vec())
+            .collect();
+        if !contributors.is_empty() {
+            let mean = trimmed_mean(&contributors, 0.2);
+            for (wi, m) in w[start..end].iter_mut().zip(&mean) {
+                // numpy int64 add wraps on overflow; mirror it.
+                *wi = wi.wrapping_add(*m);
+            }
+        }
+    }
+    w
+}
+
+// ---------------------------------------------------------------------------
 // Block header
 // ---------------------------------------------------------------------------
 
@@ -233,21 +310,26 @@ pub struct Header {
     pub vrf_proof: String,     // rev 4: proposer's VRF proof (hex); work derives from it
     pub score_root: String,    // rev 7: commitment to the proposer's delta scores
     pub sketch_root: String,   // rev 8: commitment to the deltas' influence sketches
+    pub model_root: String,    // v1: ModelState commitment AFTER this block
+    pub vrf_attempt: u64,      // v1: sortition attempt (0..=ATTEMPT_MAX)
+    pub version: u64,          // v1: header version, checked vs VERSION_SCHEDULE
 }
 
 impl Header {
     /// The canonical serialization is Python's `json.dumps(dict, sort_keys=True)`
     /// with default separators (", " and ": "), keys in lexicographic order:
-    /// data_root, height, ledger_root, n_txs, prev_hash, proposer, score_root,
-    /// sketch_root, state_root, transfer_root, txset_root, vrf_proof, work.
+    /// data_root, height, ledger_root, model_root, n_txs, prev_hash, proposer,
+    /// score_root, sketch_root, state_root, transfer_root, txset_root, version,
+    /// vrf_attempt, vrf_proof, work.
     /// Values are hex strings and ints, so no JSON string escaping arises.
     pub fn canonical_json(&self) -> String {
         format!(
-            "{{\"data_root\": \"{}\", \"height\": {}, \"ledger_root\": \"{}\", \"n_txs\": {}, \"prev_hash\": \"{}\", \"proposer\": \"{}\", \"score_root\": \"{}\", \"sketch_root\": \"{}\", \"state_root\": \"{}\", \"transfer_root\": \"{}\", \"txset_root\": \"{}\", \"vrf_proof\": \"{}\", \"work\": {}}}",
-            self.data_root, self.height, self.ledger_root, self.n_txs,
-            self.prev_hash, self.proposer, self.score_root, self.sketch_root,
-            self.state_root, self.transfer_root, self.txset_root,
-            self.vrf_proof, self.work
+            "{{\"data_root\": \"{}\", \"height\": {}, \"ledger_root\": \"{}\", \"model_root\": \"{}\", \"n_txs\": {}, \"prev_hash\": \"{}\", \"proposer\": \"{}\", \"score_root\": \"{}\", \"sketch_root\": \"{}\", \"state_root\": \"{}\", \"transfer_root\": \"{}\", \"txset_root\": \"{}\", \"version\": {}, \"vrf_attempt\": {}, \"vrf_proof\": \"{}\", \"work\": {}}}",
+            self.data_root, self.height, self.ledger_root, self.model_root,
+            self.n_txs, self.prev_hash, self.proposer, self.score_root,
+            self.sketch_root, self.state_root, self.transfer_root,
+            self.txset_root, self.version, self.vrf_attempt, self.vrf_proof,
+            self.work
         )
     }
 

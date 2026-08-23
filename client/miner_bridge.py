@@ -25,8 +25,8 @@ import numpy as np
 from rig.chain import dequantize, quantize
 from .compress import Compressor, compress as topk_compress
 from .data import ByteData
-from .gossip import MODEL_PRESETS
-from .gpt import build
+from .gossip import MODEL_PRESETS, build_preset
+from .moe import ChainLayout, MoEGPT, MoEGPTConfig
 from .trainer import DiLoCoMiner, set_flat_params
 
 KEEP_FRAC = 0.02
@@ -72,14 +72,33 @@ def _sparse_dense(sp: dict) -> np.ndarray:
     return out
 
 
+def _sparse_dense_local(payload: dict) -> np.ndarray:
+    """Densify a LOCAL (un-b64'd) compressor payload — for the claim set."""
+    from .compress import decompress
+    return decompress(payload)
+
+
 def run(a):
     cfg = MODEL_PRESETS[a.model]
-    model, device = build(cfg, device=a.device)
+    is_moe = isinstance(cfg, MoEGPTConfig)
+    model, device = build_preset(a.model, device=a.device)
+    # PROTOCOL v1: the chain state is in CHAIN order (backbone page, then
+    # expert pages); ChainLayout is the torch<->chain permutation. Dense
+    # presets have no layout (torch order == wire order, legacy nets only).
+    layout = ChainLayout(model) if is_moe else None
+
+    def to_torch(chain_vec):
+        return layout.torch_of(chain_vec) if layout is not None else chain_vec
+
+    def to_chain(torch_vec):
+        return layout.chain_of(torch_vec) if layout is not None else torch_vec
+
     data = ByteData(path=a.data, block_size=cfg.block_size, device=device) \
         if a.data else ByteData(block_size=cfg.block_size, device=device)
     miner = DiLoCoMiner(model, data, device)
     comp = Compressor(keep_frac=KEEP_FRAC)
-    print(f"miner bridge: {model.num_params()/1e6:.1f}M params on {device}", flush=True)
+    print(f"miner bridge: {model.num_params()/1e6:.1f}M params on {device}"
+          + (f", {layout.n_pages()} pages" if layout else ""), flush=True)
 
     while True:                                     # reconnect loop
         try:
@@ -97,19 +116,59 @@ def run(a):
                 msg = json.loads(_recv(sock))
                 t = msg.get("t")
                 if t == "state":
-                    raw = _recv(sock)               # the raw i64 frame
+                    raw = _recv(sock)               # the raw i64 frame (CHAIN order)
                     state = np.frombuffer(raw, dtype="<i8").copy()
                     height = int(msg["height"])
-                    set_flat_params(model, dequantize(state))
+                    # v1: the node tells us the model shape; rebuild if the
+                    # chain grew while we were away (ragged expert counts)
+                    epl = msg.get("experts_per_layer")
+                    rebuild = (layout is not None and epl is not None
+                               and list(epl) != model.experts_per_layer)
+                    if rebuild:
+                        model, _ = build_preset(a.model, device=device,
+                                                experts_per_layer=list(epl))
+                        miner.model = model
+                        layout = ChainLayout(model)
+                        comp.residual = None
+                        print(f"rebuilt model for experts_per_layer={epl}",
+                              flush=True)
+                    if layout is not None and state.size != layout.n:
+                        _send(sock, {"t": "resync"})
+                        state = None
+                        continue
+                    set_flat_params(model, dequantize(to_torch(state)))
                     print(f"synced full state @ h{height} "
                           f"({state.size/1e6:.1f}M params)", flush=True)
                 elif t == "advance":
-                    if state is None:
+                    if state is None or int(msg.get("dim", state.size)) != state.size:
                         _send(sock, {"t": "resync"})
                         continue
                     state = state + _sparse_dense(msg["sparse"])
                     height = int(msg["height"])
-                    set_flat_params(model, dequantize(state))
+                    set_flat_params(model, dequantize(to_torch(state)))
+                elif t == "grow":
+                    # v1 GROWTH EVENT: the chain appended an expert page. The
+                    # node sends the page's deterministic init as a raw i64
+                    # frame; we append it to our state, instantiate the expert,
+                    # and rebuild the layout. (Dense presets never see this.)
+                    raw = _recv(sock)
+                    page = np.frombuffer(raw, dtype="<i8").copy()
+                    if state is None or layout is None:
+                        _send(sock, {"t": "resync"})
+                        continue
+                    info = msg["page"]
+                    model.add_expert(int(info["layer"]), dequantize(page))
+                    layout = ChainLayout(model)
+                    state = np.concatenate([state, page])
+                    height = int(msg["height"])
+                    comp.residual = None            # dimensions changed
+                    if state.size != int(msg["new_dim"]) or state.size != layout.n:
+                        _send(sock, {"t": "resync"})
+                        state = None
+                        continue
+                    set_flat_params(model, dequantize(to_torch(state)))
+                    print(f"GROWTH @ h{height}: +expert layer {info['layer']} "
+                          f"-> {state.size/1e6:.1f}M params", flush=True)
                 elif t == "train":
                     want_h = int(msg["height"])
                     if a.serve_only:
@@ -138,11 +197,37 @@ def run(a):
                     # EMA of per-step cost (first measurement seeds it outright)
                     obs = elapsed / max(1, steps)
                     step_secs = obs if step_secs <= 0 else 0.7 * step_secs + 0.3 * obs
-                    payload = comp.compress(dequantize(delta_int))
+                    # v1: the delta goes on the wire in CHAIN order, zeroed
+                    # outside the pages we may claim (frozen pages reject txs),
+                    # with the claim set attached and the compressor keeping at
+                    # least the node's work-quota floor (min_nnz).
+                    chain_delta = to_chain(delta_int)
+                    min_nnz = int(msg.get("min_nnz", 0))
+                    if layout is not None:
+                        active = msg.get("active_pages")
+                        active = list(range(layout.n_pages())) if active is None \
+                            else [int(p) for p in active]
+                        chain_delta = layout.zero_outside(chain_delta, active)
+                        if comp.residual is not None and \
+                                comp.residual.shape[0] == layout.n:
+                            # error feedback must not resurrect frozen-page
+                            # coordinates — the tx couldn't claim them
+                            comp.residual = layout.zero_outside(
+                                comp.residual, active)
+                        payload = comp.compress(dequantize(chain_delta),
+                                                min_keep=min_nnz)
+                        pages = layout.pages_touched(
+                            _sparse_dense_local(payload))
+                        pages = sorted(set(pages) & set(active)) or active[:1]
+                    else:
+                        payload = comp.compress(dequantize(chain_delta),
+                                                min_keep=min_nnz)
+                        pages = [0]
                     # inner_train mutated the model; restore chain state so the
                     # next round trains from the agreed head, not our drift
-                    set_flat_params(model, dequantize(state))
+                    set_flat_params(model, dequantize(to_torch(state)))
                     _send(sock, {"t": "delta", "height": want_h, "loss": loss,
+                                 "pages": pages,
                                  "payload": _payload_json(payload)})
                     print(f"h{want_h}: trained {steps}x{a.batch} in "
                           f"{elapsed:.0f}s, loss {loss:.3f}", flush=True)
@@ -169,8 +254,8 @@ def run(a):
                         base = float(base_loss)
                         for d in msg.get("deltas", []):
                             sp = d["sparse"]
-                            cand = state + _sparse_dense(sp)
-                            set_flat_params(model, dequantize(cand))
+                            cand = state + _sparse_dense(sp)   # chain order
+                            set_flat_params(model, dequantize(to_torch(cand)))
                             _, l = model(xb, yb)
                             scores[d["txid"]] = max(
                                 0, int(round((base - float(l)) * 1e6)))
@@ -183,7 +268,7 @@ def run(a):
                                                 dtype="<i8")
                             sketches[d["txid"]] = sketch_sparse(
                                 idx.tolist(), val.tolist())
-                        set_flat_params(model, dequantize(state))  # restore head
+                        set_flat_params(model, dequantize(to_torch(state)))
                     model.train()
                     _send(sock, {"t": "scores", "height": height,
                                  "scores": scores, "sketches": sketches})

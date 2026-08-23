@@ -8,7 +8,14 @@ from client.cas import (
     Bitswap, ContentStore, cid, get_model, put_model, read_manifest,
     state_from_pages, pages_from_state,
 )
-from client.moe import MoEGPT, MoEGPTConfig, PageMap
+from client.moe import MoEGPT, MoEGPTConfig
+
+
+def _chunks(n: int, size: int):
+    """Chunk [0, n) into ≤ size-parameter spans — CAS transport granularity is
+    arbitrary (it addresses bytes, not consensus pages), so plain chunking
+    replaces the old PageMap.subdivide here."""
+    return [(a, min(a + size, n)) for a in range(0, n, size)]
 from client.trainer import flat_params
 from rig.chain import quantize, state_root
 
@@ -38,9 +45,8 @@ def test_on_block_rejects_forgery_for_free():
 def test_put_get_model_roundtrip_over_pagemap():
     model = MoEGPT(MoEGPTConfig(n_layer=1, n_head=2, n_embd=16, block_size=8,
                                 n_experts=4, top_k=2))
-    pm = PageMap(model)
     state = quantize(flat_params(model))
-    spans = pm.subdivide(max_page=4096)                   # page-granularity chunks
+    spans = _chunks(state.size, 4096)                     # page-granularity chunks
     store = ContentStore()
     root, page_cids = put_model(store, state, spans)
     assert len(page_cids) == len(spans)
@@ -77,9 +83,8 @@ def test_swarm_reconstructs_model_from_content_addresses():
     server, no trust in the provider (each page self-verifies against its CID)."""
     model = MoEGPT(MoEGPTConfig(n_layer=2, n_head=2, n_embd=16, block_size=8,
                                 n_experts=6, top_k=2))
-    pm = PageMap(model)
     state = quantize(flat_params(model))
-    spans = pm.subdivide(max_page=2048)
+    spans = _chunks(state.size, 2048)
 
     a_store = ContentStore()
     root, page_cids = put_model(a_store, state, spans)    # A stores everything
