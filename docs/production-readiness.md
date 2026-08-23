@@ -129,13 +129,19 @@ the gap before the model is worth attacking. Keep mutating API endpoints
 token-gated/disabled.
 
 ## Operations — ☐ manifests/scripts ready; apply per environment
-- ☐ Persistent-volume StatefulSet (118) · prebuilt image + CI push (120)
+- ☐ Persistent-volume StatefulSet (118) — written; the live network runs the
+  bare-VPS anchor model instead (provision-seed.sh), so this applies when a
+  k8s environment returns
+- ✅ Prebuilt image + CI push (120) — images job green on main
 - ✅ Prometheus /metrics endpoint + alert rules (121)
-- ☐ Backup/restore script (122)
+- ✅ Backup/restore script (122) — APPLIED: nightly cron on both anchors
+  (deploy/backup-cron, keep-7 rotation); restore drill documented in the script
 - ◐ TLS termination (123): Caddy read-only HTTPS facade (deploy/Caddyfile.api)
   installed + validated on contabo-us-1, GET allow-list + CORS for the site's
   live panel; goes live (auto Let's Encrypt) once the api.sestrian.com A record
   points at it. Operator APIs stay plain-http loopback/LAN.
+- ✅ Anchors dial each other (both units carry --peers), so either recycles
+  stale transport after churn; DNS-named anchors with IP floor shipped (6ac8aac)
 - ✅ Second bootstrap/DA anchor (119): contabo-us-1 (13.140.32.27) live on a
   separate continent — regenerated the genesis root independently (fourth
   platform), synced the chain over WAN (shaking out the three catch-up bugs
