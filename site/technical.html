@@ -114,7 +114,7 @@
       honest security posture, and what is still unproven. Every claim below
       points at running code in the public repository.</p>
     <div class="meta">
-      <span><b>107.4M</b> params (≈32M active/token), live</span><span><b>67</b> node tests</span>
+      <span><b>107.4M</b> params (≈32M active/token), live &mdash; and the chain can GROW it</span><span><b>68</b> node tests</span>
       <span><b>28</b> golden-vector families</span>
       <span>Rust node ≡ <b>Python reference</b>, bit-exact</span>
       <span>verified <b>cross-vendor GPU</b></span>
@@ -142,11 +142,13 @@
   <section>
     <h2>2 · Architecture</h2>
     <p>Five layers, bottom to top. Each is implemented and tested; the rightmost
-      column names the module.</p>
+      column names the module &mdash; <span class="mono">.py</span> is the Python
+      reference (the spec), <span class="mono">.rs</span> the production Rust node,
+      pinned to each other by golden vectors.</p>
     <div class="stack">
-      <div class="layer"><span class="n">State</span><span class="d"><b>Weights as chain state.</b> Paged, Merkle-committed; deterministic fixed-point aggregation; replay reconstructs the model. <span class="mono">chain.py, blockchain.py</span></span></div>
-      <div class="layer"><span class="n">Consensus</span><span class="d"><b>Scored mempool + Nakamoto fork choice.</b> A delta is included only if a committee measures it improves the model; heaviest valid chain wins. <span class="mono">blockchain.py, p2p.py</span></span></div>
-      <div class="layer"><span class="n">Randomness</span><span class="d"><b>Threshold-BLS beacon (drand-style), DKG-generated.</b> Unbiasable, unpredictable, verifiable; drives shard assignment and leader election. <span class="mono">beacon.py, dkg.py</span></span></div>
+      <div class="layer"><span class="n">State</span><span class="d"><b>Weights as chain state.</b> Page-Merkle commitment over a consensus page table; deterministic integer aggregation; replay reconstructs the model bit-for-bit &mdash; including across on-chain GROWTH events, where the chain appends expert pages with deterministically derived weights. <span class="mono">merkle.rs, model_state.rs / chain.py</span></span></div>
+      <div class="layer"><span class="n">Consensus</span><span class="d"><b>VRF proposer sortition + Nakamoto fork choice.</b> Stake-weighted lottery gates every block; deltas carry committed held-out scores and a validated work quota; heaviest valid chain wins. A protocol version field makes upgrades a schedule, not a scramble. <span class="mono">blocktree.rs, lottery.rs / blockchain.py</span></span></div>
+      <div class="layer"><span class="n">Randomness</span><span class="d"><b>Live today: VRF attempt-ladder</b> &mdash; seeded by the parent block, deterministic liveness widening, verified in validation. The threshold-BLS beacon (drand-style, DKG-generated) is the designed mainnet upgrade for full unbiasability; it runs in the rig, not yet in the node. <span class="mono">lottery.rs / beacon.py, dkg.py</span></span></div>
       <div class="layer"><span class="n">Data</span><span class="d"><b>Erasure-coded data availability.</b> Reed-Solomon (any k-of-n reconstruct) + Merkle availability sampling; withheld bodies are unrecoverable and detected. <span class="mono">da.py</span></span></div>
       <div class="layer"><span class="n">Economics</span><span class="d"><b>Difficulty-style write-price homeostat + stake/slash.</b> Holds admission at target, prices out spam, slashes provable faults. <span class="mono">economics.py</span></span></div>
     </div>
@@ -173,8 +175,8 @@
       </tbody>
     </table></div>
     <div class="stats">
-      <div class="stat"><div class="v">117</div><div class="l">automated tests, all passing</div></div>
-      <div class="stat"><div class="v">2</div><div class="l">machines: coordinator-free consensus over Tailscale</div></div>
+      <div class="stat"><div class="v">272</div><div class="l">automated tests — 204 reference + 68 node — blocking in CI</div></div>
+      <div class="stat"><div class="v">4</div><div class="l">nodes live on two continents, coordinator-free, in lockstep</div></div>
       <div class="stat"><div class="v">O(k)</div><div class="l">per-token serving cost, independent of model size</div></div>
       <div class="stat"><div class="v">100%</div><div class="l">withholding attacks caught by DA sampling</div></div>
     </div>
@@ -228,13 +230,15 @@
 
   <section>
     <h2>6 · Reproducibility</h2>
-    <p>Everything is runnable and seeded. <code>scripts/run test</code> executes
-      117 tests; <code>scripts/run e2e</code> shows the flywheel; <code>scripts/run
-      integrated</code> runs beacon + DA + leader election in one loop;
-      <code>scripts/run live</code> opens a browser dashboard that streams the chain
-      block-by-block. The gossip network and the beacon have both been run
-      coordinator-free across two physical machines, producing a byte-identical
-      chain — where a node runs never changes the state.</p>
+    <p>Everything is runnable and seeded. <code>pytest tests/</code> runs the 204-test
+      Python reference suite and <code>cargo test</code> the 68-test production node;
+      28 golden-vector families pin the two to each other, and both are blocking in
+      CI alongside a live two-node convergence run and a kill/restart soak. The
+      strongest reproducibility claim is the running network itself: five machines
+      — Apple silicon, NVIDIA CUDA, and three bare Linux servers on two continents —
+      independently rebuilt the genesis from its published seed to the identical
+      root, and four of them are in block-for-block lockstep right now. Where a
+      node runs never changes the state.</p>
   </section>
 
   <section>
@@ -286,7 +290,9 @@
       <li><strong>Throughput.</strong> Every block carries a multi-MB delta, so a
         joining node syncs the full history and a slow uplink can miss the
         inclusion window. Mitigated — auto-fitted training rounds, DA-sharded
-        genesis, visible stale-delta alarms — not solved.</li>
+        genesis, bounded byte-budgeted sync with a catch-up cursor (the first
+        transatlantic join found and fixed three real WAN bugs, all documented in
+        the tracker), visible stale-delta alarms — not solved.</li>
     </ul>
   </section>
 </div>

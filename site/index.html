@@ -263,8 +263,8 @@
 
   <div class="ticker" aria-hidden="true">
     <div class="track">
-      <span>107.4M-param MoE trained on-chain<b> ✺ </b>genesis a5973160…02527b<b> ✺ </b>Apple MPS + NVIDIA CUDA, no coordinator<b> ✺ </b>mine · serve · stake data<b> ✺ </b>open devnet, MIT<b> ✺ </b></span>
-      <span>107.4M-param MoE trained on-chain<b> ✺ </b>genesis a5973160…02527b<b> ✺ </b>Apple MPS + NVIDIA CUDA, no coordinator<b> ✺ </b>mine · serve · stake data<b> ✺ </b>open devnet, MIT<b> ✺ </b></span>
+      <span>107.4M-param MoE trained on-chain<b> ✺ </b>the chain votes to grow its own model<b> ✺ </b>genesis a5973160…02527b<b> ✺ </b>five platforms, one identical root<b> ✺ </b>anchors on two continents, no coordinator<b> ✺ </b>mine · serve · stake data<b> ✺ </b>open devnet, MIT<b> ✺ </b></span>
+      <span>107.4M-param MoE trained on-chain<b> ✺ </b>the chain votes to grow its own model<b> ✺ </b>genesis a5973160…02527b<b> ✺ </b>five platforms, one identical root<b> ✺ </b>anchors on two continents, no coordinator<b> ✺ </b>mine · serve · stake data<b> ✺ </b>open devnet, MIT<b> ✺ </b></span>
     </div>
   </div>
 
@@ -401,6 +401,18 @@
           down to the coin.</p>
       </div>
     </div>
+    <div class="row">
+      <button class="rowbtn" aria-expanded="false" aria-controls="p4" id="b4">
+        <span class="n" aria-hidden="true">04</span><span class="t">It grows itself</span><span class="x" aria-hidden="true">+</span>
+      </button>
+      <div class="panel" id="p4" role="region" aria-labelledby="b4">
+        <p>No other network does this: when enough training work is flowing in, the chain
+          itself votes to make the model bigger — new expert pages, born on-chain with weights
+          every node derives identically, no meeting, no admin, no download. The brain you're
+          paid to build gets larger because you fed it, and the whole history still replays
+          bit for bit across the growth.</p>
+      </div>
+    </div>
   </section>
 
   <section class="loop">
@@ -475,7 +487,9 @@
       NVIDIA chips do their decimal math a little differently, so Sestrian rounds every update
       to whole numbers before it touches the chain — and whole numbers never disagree. We run
       it live: a MacBook and a gaming PC in different buildings, no referee between them,
-      landing on the same model to the last bit. You never have to trust another machine.
+      landing on the same model to the last bit. Five machines — Apple silicon, NVIDIA CUDA,
+      and three bare Linux servers on two continents — have each rebuilt the starting model
+      from nothing and printed the identical root. You never have to trust another machine.
       Or us.</p>
     <div class="readout" role="img" aria-label="Terminal readout: both an Apple MPS device and an NVIDIA CUDA device compute the same state root, a5973160 through 02527b. Consensus is bit-exact.">
       <span class="lab">apple·mps</span>&nbsp;&nbsp;float step 0.73921… → int delta → root <span class="ok">a5973160…02527b</span><br>
