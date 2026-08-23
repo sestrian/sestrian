@@ -33,7 +33,7 @@ documented as testnet play; wallets and keys carry over, balances do not.
 | `retarget` | window 16 blocks · target 8 deltas/window · quota 0.25×–8× (4dp fixed point) · k_sustain 3 · announce lead 2 windows · growth bound 1 expert page/event · genesis experts never freeze |
 | `protocol_version` | 1 (header-committed; `VERSION_SCHEDULE` is the upgrade mechanism) |
 | `bootstrap_peers` | `/ip4/169.58.211.248/udp/9800/quic-v1` (+ the second anchor added at relaunch) — QUIC is canonical |
-| devnet-1 record | final height + head hash recorded at shutdown; the chain store backup is retained (deploy/backup-restore.sh), the `devnet-genesis-1` release assets stay published forever, and the pre-v1 code is tagged `devnet-1-final`. |
+| devnet-1 record | **final height 151, head `9896723303f2a3f9`, supply 7,549,999,999,998 grains** (recorded at shutdown in `/root/devnet1-final-status.json` on the seed; 2 miner identities in the whole history — both founders'). The chain store backup is retained (deploy/backup-restore.sh), the `devnet-genesis-1` release assets stay published forever, and the pre-v1 code is tagged `devnet-1-final`. |
 
 Everything else in the §1 table (fair launch, zero balances, emission,
 reward split, founding corpus `85aa06fb…e3ae`, data_contributor) is unchanged.
