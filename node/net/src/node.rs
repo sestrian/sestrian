@@ -2001,13 +2001,18 @@ pub async fn run(
                             // CUDA miner pulled the rival tip forever). Parking
                             // orphans as pending counts as "learned", so this
                             // must be tested FIRST.
-                            let orphaned = batch_blocks.iter().any(|sb| {
+                            let orphan_block = batch_blocks.iter().find(|sb| {
                                 let par = &sb.header.prev_hash;
                                 sb.header.height > 0
+                                    // the genesis has no header entry — block 1
+                                    // ALWAYS looked orphaned, wedging the
+                                    // walk-back at from=0 forever (found live)
+                                    && par != &node.tree.genesis_hash
                                     && !node.tree.blocks.contains_key(par)
                                     && !node.pending.contains_key(par)
                                     && !batch_hashes.contains(par)
                             });
+                            let orphaned = orphan_block.is_some();
                             if orphaned && served > 0 {
                                 // the batch floats ABOVE anything we can connect
                                 // to: the peer is on a fork whose divergence
@@ -2024,6 +2029,9 @@ pub async fn run(
                                 *step = (*step * 2).min(4096);
                                 node.sync_cursor.insert(peer, cur);
                                 warn!(peer = %peer, from = cur,
+                                      orphan_h = orphan_block
+                                          .map(|sb| sb.header.height)
+                                          .unwrap_or(0),
                                       "sync batch unconnectable — walking back \
                                        to find the fork point");
                             } else if learned {
