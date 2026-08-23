@@ -122,8 +122,14 @@ jobs:
         run: |
           set -euo pipefail
           test ${#SESTRIAN_KEY_SEED} -eq 64 || { echo "seed mangled by YAML: ${#SESTRIAN_KEY_SEED} chars"; exit 1; }
+          # v1: --toy-dim is gone (the state must match a real page table). A
+          # zeros vector of the LOCAL network's exact dimension (toy-moe:
+          # 332,416 params) is a valid --check input — local bakes no root, so
+          # the preflight exercises identity/disk/genesis-shape without torch.
+          python3 -c "import struct,sys; sys.stdout.buffer.write(b'\x00'*8*332416)" > /tmp/smoke-genesis.bin
           node/target/${{ matrix.target }}/release/$BIN --check \
-            --network local --toy-dim 64 --data-dir "$(mktemp -d)"
+            --network local --genesis-file /tmp/smoke-genesis.bin \
+            --data-dir "$(mktemp -d)"
 
       - name: package (unix)
         if: runner.os != 'Windows'
