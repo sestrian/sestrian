@@ -976,6 +976,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         omitted_deltas: Default::default(),
         account_pool: Default::default(),
         pending: Default::default(),
+        pending_at: Default::default(),
         seen: Default::default(),
         seen_order: Default::default(),
         cfg: node::NodeConfig {

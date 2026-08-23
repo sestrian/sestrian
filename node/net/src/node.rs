@@ -346,6 +346,11 @@ pub struct Node {
     pub omitted_deltas: std::collections::BTreeMap<String, u64>,
     pub account_pool: HashMap<String, AccountTx>,
     pub pending: HashMap<String, (StoredBlock, PeerId)>, // blocks awaiting payloads
+    /// when each pending block was parked — eviction is by AGE, not by height:
+    /// during a fork heal the rival chain's blocks legitimately sit far below
+    /// our head (a height rule evicted the whole fork on every head advance,
+    /// found live)
+    pub pending_at: HashMap<String, f64>,
     pub seen: HashSet<String>,
     /// insertion order for `seen`, so it can be bounded as a recency ring
     pub seen_order: VecDeque<String>,
@@ -530,11 +535,15 @@ impl Node {
     /// lowest-height pending block (least likely to ever become live).
     fn queue_pending(&mut self, bh: String, sb: StoredBlock, peer: PeerId) {
         if self.pending.len() >= MAX_PENDING && !self.pending.contains_key(&bh) {
+            // evict the HIGHEST parked block: low blocks apply first, so they
+            // are the ones a heal needs; a dropped tip is re-served in seconds
             if let Some(drop) = self.pending.iter()
-                .min_by_key(|(_, (s, _))| s.header.height).map(|(h, _)| h.clone()) {
+                .max_by_key(|(_, (s, _))| s.header.height).map(|(h, _)| h.clone()) {
                 self.pending.remove(&drop);
+                self.pending_at.remove(&drop);
             }
         }
+        self.pending_at.entry(bh.clone()).or_insert_with(now);
         self.pending.insert(bh, (sb, peer));
     }
 
@@ -1024,6 +1033,7 @@ impl Node {
             .map(|(h, _)| h.clone()).collect();
         for h in ready {
             if let Some((sb, peer)) = self.pending.remove(&h) {
+                self.pending_at.remove(&h);
                 self.install(sb, Some(peer), swarm);
             }
         }
@@ -1094,11 +1104,14 @@ impl Node {
         self.evict_account_pool();
         // rev 7: (re)score surviving pool deltas against the new head's round
         self.request_evals();
-        let drop_pending: Vec<String> = self.pending.iter()
-            .filter(|(_, (s, _))| s.header.height + DELTA_STALE_SLACK < h)
-            .map(|(k, _)| k.clone()).collect();
+        // age-based only: rival-fork blocks legitimately sit far below head
+        let drop_pending: Vec<String> = self.pending.keys()
+            .filter(|k| self.pending_at.get(*k)
+                .map(|t| now() - t > 1800.0).unwrap_or(true))
+            .cloned().collect();
         for k in drop_pending {
             self.pending.remove(&k);
+            self.pending_at.remove(&k);
         }
         self.prune_old_bodies(h);
     }
