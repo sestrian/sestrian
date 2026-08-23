@@ -31,11 +31,12 @@ jobs:
           test -f site/index.html || { echo "site/index.html missing"; exit 1; }
           grep -q sestrian.com site/CNAME || { echo "CNAME must pin sestrian.com"; exit 1; }
           # the published genesis id is a promise to testers — never ship a page
-          # that contradicts the id compiled into the node
+          # that contradicts the id compiled into the node. HARD failure: a
+          # mismatched hash on the site means a stale or wrong deploy.
           if grep -rqo '[0-9a-f]\{64\}' site/*.html; then
             want=$(grep -o 'genesis_state_root: "[0-9a-f]*"' node/net/src/main.rs | head -1 | grep -o '[0-9a-f]\{64\}')
             for got in $(grep -rho '[0-9a-f]\{64\}' site/*.html | sort -u); do
-              [ "$got" = "$want" ] || echo "note: site mentions hash $got (network id is $want)"
+              [ "$got" = "$want" ] || { echo "FATAL: site mentions hash $got but the network id is $want"; exit 1; }
             done
           fi
       - uses: actions/configure-pages@v5

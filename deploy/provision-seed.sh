@@ -18,8 +18,15 @@ set -euo pipefail
 
 REPO_SSH="git@github.com:sestrian/sestrian.git"
 REPO_HTTPS="https://github.com/sestrian/sestrian.git"
-GENESIS_SEED=1337
-GENESIS_MODEL=small
+
+# --- genesis identity (env-overridable; same names scripts/install.sh uses) --
+# A re-genesis is a values-only change: flip these three (env or defaults) and
+# re-run. GENESIS_ID is the published genesis_state_root the generated artifact
+# MUST hash to; $APP/genesis.id records which identity this box currently holds.
+GENESIS_ID=${SESTRIAN_GENESIS_ID:-a597316003dbf12122b7cc6f39226ce7c8f7a871e58e7ddf364e56b08102527b}
+GENESIS_MODEL=${SESTRIAN_MODEL:-small-moe}
+GENESIS_SEED=${SESTRIAN_GENESIS_SEED:-20260822}
+
 DATA_CONTRIBUTOR="3432d48fd6878b4f2e7a1e40cc15e112c512fae7"
 NODE_PORT=9800
 API_PORT=8080
@@ -28,7 +35,7 @@ APP=/opt/sestrian
 echo "== packages =="
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
-apt-get install -qy git build-essential pkg-config curl ufw python3-venv python3-pip
+apt-get install -qy git build-essential pkg-config curl ufw python3-venv python3-pip zstd
 
 echo "== rust toolchain =="
 if ! command -v cargo >/dev/null; then
@@ -67,12 +74,42 @@ echo "== build node =="
 ( cd $APP/node && cargo build --release )
 
 echo "== genesis artifact =="
-if [ ! -f $APP/genesis.bin ]; then
+# RESET-AWARE: $APP/genesis.id stamps WHICH genesis this box holds. If the stamp
+# matches $GENESIS_ID the step is a no-op; on any mismatch (including a missing
+# stamp — a legacy pre-stamp deployment gets one reset on first run under this
+# script) the old chain is backed up, wiped, and the configured genesis is
+# regenerated + verified. $APP/seed.key is NEVER touched: peer identity survives
+# a re-genesis.
+STAMP=$APP/genesis.id
+if [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$GENESIS_ID" ] && [ -f $APP/genesis.bin ]; then
+    echo "genesis $GENESIS_ID already provisioned (stamp matches)"
+else
+    if [ -f $APP/genesis.bin ] || [ -d $APP/data ]; then
+        echo "genesis identity change: $([ -f "$STAMP" ] && cat "$STAMP" || echo '<unstamped>') -> $GENESIS_ID"
+        systemctl stop sestrian-seed 2>/dev/null || true
+        if [ -d $APP/data ]; then
+            mkdir -p $APP/backups
+            BK=$APP/backups/pre-regenesis-$(date +%Y%m%d-%H%M%S).tar.zst
+            DATA=$APP/data bash $APP/deploy/backup-restore.sh backup "$BK"
+        fi
+        rm -rf $APP/data $APP/genesis.bin
+        rm -f "$STAMP"
+    fi
     python3 -m venv $APP/.venv
     $APP/.venv/bin/pip install -q --index-url https://download.pytorch.org/whl/cpu torch
     $APP/.venv/bin/pip install -q numpy pynacl
     ( cd $APP && .venv/bin/python -m client.make_genesis \
-        --model $GENESIS_MODEL --seed $GENESIS_SEED --out genesis.bin )
+        --model $GENESIS_MODEL --seed $GENESIS_SEED --out genesis.bin ) | tee $APP/genesis.log
+    # same guard scripts/install.sh applies: a genesis that doesn't hash to the
+    # published id would put this seed on a different chain — never continue.
+    if ! grep -q "$GENESIS_ID" $APP/genesis.log; then
+        echo "FATAL: generated genesis does NOT match the published id $GENESIS_ID"
+        echo "       (model=$GENESIS_MODEL seed=$GENESIS_SEED) — not continuing."
+        rm -f $APP/genesis.bin
+        exit 1
+    fi
+    printf '%s\n' "$GENESIS_ID" > "$STAMP"
+    echo "genesis verified + stamped: $GENESIS_ID"
 fi
 
 echo "== identity =="

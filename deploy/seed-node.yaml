@@ -3,8 +3,10 @@
 # v3: a StatefulSet with a PERSISTENT VOLUME (the chain store survives pod
 # reschedule — no more emptyDir data loss) running the PREBUILT node image
 # (deploy/Dockerfile, built + pushed by CI — no compile-on-boot). Identity comes
-# from a k8s Secret; genesis is materialized once onto the persistent volume by
-# an init container and then reused.
+# from a k8s Secret; genesis is materialized onto the persistent volume by an
+# init container, stamped with its id (/data/genesis.id), and reused until the
+# declared GENESIS_ID changes — at which point the init container resets the
+# chain store and regenerates (see the init container for details).
 #
 #   # one-time setup:
 #   kubectl create secret generic sestrian-seed-key \
@@ -28,21 +30,56 @@ spec:
       labels: {app: sestrian-seed}
     spec:
       initContainers:
-        # Materialize the deterministic genesis onto the persistent volume ONCE.
-        # (Skipped on every subsequent boot — the file persists on the PVC.)
+        # Materialize the deterministic genesis onto the persistent volume.
+        # RESET-AWARE via a stamp file: /data/genesis.id records WHICH genesis
+        # the PVC currently holds. When it matches GENESIS_ID this is a no-op;
+        # on mismatch (a re-genesis — or a legacy pre-stamp PVC, which gets one
+        # reset on first rollout) the old artifact AND the chain store it
+        # materialized are wiped and the configured genesis is regenerated and
+        # VERIFIED against GENESIS_ID before being stamped. No PVC surgery
+        # needed to relaunch the network; the node identity lives in the k8s
+        # Secret and is untouched.
         - name: genesis
           image: python:3.12-bookworm
+          env:
+            # Flip these three values (plus the node image) to relaunch on a
+            # new genesis; GENESIS_ID is the published genesis_state_root.
+            - name: GENESIS_ID
+              value: "a597316003dbf12122b7cc6f39226ce7c8f7a871e58e7ddf364e56b08102527b"  # devnet-genesis-2 (PREVIEW until ceremony)
+            - name: GENESIS_MODEL
+              value: "small-moe"
+            - name: GENESIS_SEED
+              value: "20260822"
           command: ["/bin/bash", "-lc"]
           args:
             - |
-              set -e
-              if [ -f /data/genesis-seed.bin ]; then exit 0; fi
+              set -euo pipefail
+              if [ -f /data/genesis.id ] && [ "$(cat /data/genesis.id)" = "$GENESIS_ID" ] \
+                 && [ -f /data/genesis-seed.bin ]; then
+                echo "genesis $GENESIS_ID already materialized (stamp matches)"; exit 0
+              fi
+              echo "genesis identity change: $([ -f /data/genesis.id ] && cat /data/genesis.id || echo '<unstamped>') -> $GENESIS_ID"
+              # wipe the old artifact + every chain-store file the node
+              # materializes in /data (see deploy/backup-restore.sh manifest);
+              # nothing else lives on the PVC.
+              rm -rf /data/genesis-seed.bin /data/genesis.bin /data/snapshot.bin \
+                     /data/snapshot.json /data/blocks.jsonl /data/payloads \
+                     /data/uploads /data/.lock /data/genesis.id
               # public repo: plain HTTPS clone, no deploy key needed
               git clone --depth 1 https://github.com/sestrian/sestrian.git /app
               cd /app
               pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch
               pip install --no-cache-dir numpy pynacl
-              python -m client.make_genesis --model small --seed 1337 --out /data/genesis-seed.bin
+              python -m client.make_genesis --model "$GENESIS_MODEL" --seed "$GENESIS_SEED" \
+                  --out /data/genesis-seed.bin | tee /tmp/genesis.log
+              # a genesis that doesn't hash to the published id would put this
+              # seed on a different chain — never stamp it, never start.
+              if ! grep -q "$GENESIS_ID" /tmp/genesis.log; then
+                echo "FATAL: generated genesis does NOT match published id $GENESIS_ID"
+                rm -f /data/genesis-seed.bin; exit 1
+              fi
+              printf '%s\n' "$GENESIS_ID" > /data/genesis.id
+              echo "genesis verified + stamped: $GENESIS_ID"
           volumeMounts:
             - {name: data, mountPath: /data}
       containers:
@@ -91,7 +128,7 @@ spec:
       spec:
         accessModes: ["ReadWriteOnce"]
         resources:
-          requests: {storage: 20Gi}
+          requests: {storage: 30Gi}
 ---
 apiVersion: v1
 kind: Service
