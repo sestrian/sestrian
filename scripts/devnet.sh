@@ -36,8 +36,18 @@ B1=$(printf '%s' "$L1" | sed 's/.*LINEAGE[: ]*//' | tr -d '[:space:]')
 if [ -z "$B0" ]; then
     echo "DEVNET PRODUCED NO BLOCKS ✗ (empty lineage — see /tmp/devnet0.log)"; exit 1
 fi
-if [ "$B0" = "$B1" ]; then
-    echo "DEVNET CONVERGED ✓ ($(printf '%s' "$B0" | awk -F'>' '{print NF}') blocks)"
-else
-    echo "DEVNET DIVERGED ✗"; exit 1
-fi
+# v1: both nodes propose every round (no rotation), so the last block or two
+# can be an unsettled Nakamoto tip at exit — assert agreement on the settled
+# prefix (everything below a 2-block tip window), not byte-equal lineages.
+python3 - "$B0" "$B1" <<'PY'
+import sys
+a, b = (x.split(">") for x in sys.argv[1:3])
+n = min(len(a), len(b))
+settle = max(0, n - 2)
+if n < 4:
+    print(f"DEVNET TOO SHORT ✗ (only {n} common-height blocks)"); sys.exit(1)
+if a[:settle] != b[:settle]:
+    print("DEVNET DIVERGED ✗ (disagreement below the tip window)"); sys.exit(1)
+print(f"DEVNET CONVERGED ✓ ({settle} settled blocks agree, "
+      f"tips {len(a)}/{len(b)})")
+PY

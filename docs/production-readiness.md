@@ -61,6 +61,14 @@ each phase.
   affordance): headers commit `version`, validation pins it per height, unknown
   versions fail with "upgrade your node". Pre-v1 wire/disk artifacts fail to
   parse (no serde defaults on v1 fields) instead of half-loading.
+- ☐ Eager redial on peer DISCONNECT: the round-tick redial compares
+  `num_peers < configured`, which a lingering QUIC connection to a SIGKILLed
+  peer defeats for the idle-timeout window (300s) — an asymmetric-peer
+  topology can partition itself after churn (found by the v1 soak; the soak
+  harness now uses the real symmetric-anchor topology). Fix: dial configured
+  peers on ConnectionClosed immediately, and/or shorten keep-alive failure
+  detection. Liveness-only (fork choice reconciles on reconnect); not a
+  consensus risk.
 - ✅ Delta scoring (rev 7) — held-out-shard loss scores COMMITTED per block
   (header.score_root), enforced structure/bounds/commitment in validation;
   miner pool + data credits split ∝ score, uniform fallback; the trainer bridge

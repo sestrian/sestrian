@@ -329,6 +329,12 @@ pub struct Node {
     /// once-per-round training dispatch (production is a separate, per-tick
     /// eligibility ladder — see the run loop)
     pub last_trained_round: i64,
+    /// wall-clock of the last Head gossip we RECEIVED. Gossipsub mesh re-graft
+    /// after churn (same-PeerId reconnect) is flaky; if no foreign head has
+    /// been heard for a couple of rounds while peers are connected, the node
+    /// PULLS via direct request-response sync — heartbeat healing must not
+    /// depend on the mesh it is trying to heal.
+    pub last_foreign_head: f64,
     /// per-peer timestamp of the last sync we requested — heartbeat-triggered
     /// catch-up must not stack concurrent multi-hundred-MB transfers
     pub last_sync_req: HashMap<PeerId, f64>,
@@ -1336,6 +1342,30 @@ pub async fn run(
                     if swarm.network_info().num_peers() < expected {
                         dial_peers(&mut swarm, &node.cfg.peers.clone());
                     }
+                    // MESH-BLINDNESS HEAL: peers are connected but no foreign
+                    // head has been heard for 2+ rounds — the gossipsub mesh
+                    // may not have (re)grafted after churn. PULL directly over
+                    // request-response sync from every connected peer
+                    // (throttled per peer); fork choice reconciles from there.
+                    let connected: Vec<PeerId> =
+                        swarm.connected_peers().copied().collect();
+                    if !connected.is_empty()
+                        && now() - node.last_foreign_head > 2.0 * node.cfg.interval {
+                        let from = node.head_height().saturating_sub(8);
+                        for p in connected {
+                            let inflight = node.last_sync_req.get(&p)
+                                .map(|t| now() - t < SYNC_INFLIGHT_TIMEOUT)
+                                .unwrap_or(false);
+                            if !inflight {
+                                node.last_sync_req.insert(p, now());
+                                debug!(peer = %p, from,
+                                       "no foreign heads heard — direct sync pull");
+                                swarm.behaviour_mut().sync.send_request(&p,
+                                    SyncRequest { from_height: from, count: 64,
+                                                  want_genesis: false });
+                            }
+                        }
+                    }
                 }
                 if node.cfg.produce && round >= 0 && round != node.last_trained_round {
                     node.last_trained_round = round;
@@ -1583,6 +1613,7 @@ pub async fn run(
                                 node.retry_pending(&mut swarm);
                             }
                             Gossip::Head { hash, height } => {
+                                node.last_foreign_head = now();
                                 // unknown head -> pull the sender's recent chain,
                                 // BUT at most one in-flight catch-up per peer per
                                 // 90s — payload batches are tens of MB and stacked

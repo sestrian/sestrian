@@ -969,6 +969,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         last_proposed_round: -1,
         last_announced_round: -1,
         last_trained_round: -1,
+        last_foreign_head: 0.0,
         last_sync_req: Default::default(),
         peers_connected: 0,
         chat_pending: Vec::new(),
