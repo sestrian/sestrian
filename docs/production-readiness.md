@@ -61,14 +61,16 @@ each phase.
   affordance): headers commit `version`, validation pins it per height, unknown
   versions fail with "upgrade your node". Pre-v1 wire/disk artifacts fail to
   parse (no serde defaults on v1 fields) instead of half-loading.
-- ☐ Eager redial on peer DISCONNECT: the round-tick redial compares
-  `num_peers < configured`, which a lingering QUIC connection to a SIGKILLed
-  peer defeats for the idle-timeout window (300s) — an asymmetric-peer
-  topology can partition itself after churn (found by the v1 soak; the soak
-  harness now uses the real symmetric-anchor topology). Fix: dial configured
-  peers on ConnectionClosed immediately, and/or shorten keep-alive failure
-  detection. Liveness-only (fork choice reconciles on reconnect); not a
-  consensus risk.
+- ✅ Stale-transport healing after churn (found live by the v1 soak, on CI):
+  a SIGKILLed peer's QUIC connection lingers looking healthy under the SAME
+  PeerId as its restarted successor, black-holing both gossip and sync pulls —
+  the partition looked permanent. Two-layer heal shipped: (1) MESH-BLINDNESS
+  PULL — if peers are connected but no foreign Head has been heard for 2+
+  rounds, sync directly over request-response from every connected peer;
+  (2) CONNECTION RECYCLING — at 3 silent rounds, drop all connections and
+  redial the configured peers (guarded: inbound-only anchors never recycle).
+  Liveness-only; fork choice reconciles on fresh transport. The soak asserts
+  settled-prefix convergence through a mid-run SIGKILL.
 - ✅ Delta scoring (rev 7) — held-out-shard loss scores COMMITTED per block
   (header.score_root), enforced structure/bounds/commitment in validation;
   miner pool + data credits split ∝ score, uniform fallback; the trainer bridge

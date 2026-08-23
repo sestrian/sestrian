@@ -335,6 +335,13 @@ pub struct Node {
     /// PULLS via direct request-response sync — heartbeat healing must not
     /// depend on the mesh it is trying to heal.
     pub last_foreign_head: f64,
+    /// consecutive announce rounds with peers connected but NO foreign head
+    /// heard. At 3, the connections themselves are treated as suspect: a
+    /// SIGKILLed peer's QUIC connection lingers looking healthy (same PeerId
+    /// as its restarted successor), and both gossip and request-response can
+    /// be routed onto the corpse — so the node RECYCLES them (disconnect +
+    /// redial) to force fresh transport. Found live in the CI soak.
+    pub silent_rounds: u64,
     /// per-peer timestamp of the last sync we requested — heartbeat-triggered
     /// catch-up must not stack concurrent multi-hundred-MB transfers
     pub last_sync_req: HashMap<PeerId, f64>,
@@ -1351,20 +1358,46 @@ pub async fn run(
                         swarm.connected_peers().copied().collect();
                     if !connected.is_empty()
                         && now() - node.last_foreign_head > 2.0 * node.cfg.interval {
-                        let from = node.head_height().saturating_sub(8);
-                        for p in connected {
-                            let inflight = node.last_sync_req.get(&p)
-                                .map(|t| now() - t < SYNC_INFLIGHT_TIMEOUT)
-                                .unwrap_or(false);
-                            if !inflight {
-                                node.last_sync_req.insert(p, now());
-                                debug!(peer = %p, from,
-                                       "no foreign heads heard — direct sync pull");
-                                swarm.behaviour_mut().sync.send_request(&p,
-                                    SyncRequest { from_height: from, count: 64,
-                                                  want_genesis: false });
+                        node.silent_rounds += 1;
+                        // CONNECTION RECYCLING: three silent rounds means the
+                        // "connections" themselves are suspect — a SIGKILLed
+                        // peer's QUIC connection lingers looking healthy under
+                        // the SAME PeerId as its restarted successor, and both
+                        // gossip and our sync pulls can be routed onto the
+                        // corpse (requests vanish, the in-flight throttle
+                        // re-arms, and the partition looks permanent). Force
+                        // fresh transport: drop every connection and redial.
+                        // only a node with configured peers can recycle — a
+                        // seed/anchor (inbound-only) must never drop watchers
+                        // it has no way to redial.
+                        if node.silent_rounds >= 3 && !node.cfg.peers.is_empty() {
+                            warn!(rounds = node.silent_rounds,
+                                  "no foreign heads for 3+ rounds — recycling \
+                                   peer connections (stale-transport heal)");
+                            for p in &connected {
+                                let _ = swarm.disconnect_peer_id(*p);
+                            }
+                            node.last_sync_req.clear();
+                            node.silent_rounds = 0;
+                            dial_peers(&mut swarm, &node.cfg.peers.clone());
+                        } else {
+                            let from = node.head_height().saturating_sub(8);
+                            for p in connected {
+                                let inflight = node.last_sync_req.get(&p)
+                                    .map(|t| now() - t < SYNC_INFLIGHT_TIMEOUT)
+                                    .unwrap_or(false);
+                                if !inflight {
+                                    node.last_sync_req.insert(p, now());
+                                    info!(peer = %p, from,
+                                          "no foreign heads heard — direct sync pull");
+                                    swarm.behaviour_mut().sync.send_request(&p,
+                                        SyncRequest { from_height: from, count: 64,
+                                                      want_genesis: false });
+                                }
                             }
                         }
+                    } else {
+                        node.silent_rounds = 0;
                     }
                 }
                 if node.cfg.produce && round >= 0 && round != node.last_trained_round {
@@ -1614,6 +1647,7 @@ pub async fn run(
                             }
                             Gossip::Head { hash, height } => {
                                 node.last_foreign_head = now();
+                                node.silent_rounds = 0;
                                 // unknown head -> pull the sender's recent chain,
                                 // BUT at most one in-flight catch-up per peer per
                                 // 90s — payload batches are tens of MB and stacked
