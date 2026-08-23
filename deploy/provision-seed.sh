@@ -95,12 +95,13 @@ else
         rm -rf $APP/data $APP/genesis.bin
         rm -f "$STAMP"
     fi
-    # a stale venv (its interpreter replaced by an OS python upgrade) leaves
-    # pip un-executable — health-check and recreate rather than trusting it
-    if ! $APP/.venv/bin/python -c '' 2>/dev/null; then
-        rm -rf $APP/.venv
-        python3 -m venv $APP/.venv
-    fi
+    # ALWAYS rebuild the venv here: this branch only runs on a fresh install or
+    # an identity change, and a venv predating an OS python upgrade is broken
+    # in ways a health check on bin/python misses (bin/pip's shebang names the
+    # old versioned interpreter). One extra torch install per re-genesis is
+    # cheap; debugging a half-alive venv on a prod seed is not. (Live finding.)
+    rm -rf $APP/.venv
+    python3 -m venv $APP/.venv
     $APP/.venv/bin/pip install -q --index-url https://download.pytorch.org/whl/cpu torch
     $APP/.venv/bin/pip install -q numpy pynacl
     ( cd $APP && .venv/bin/python -m client.make_genesis \
