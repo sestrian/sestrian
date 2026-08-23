@@ -2104,6 +2104,14 @@ pub async fn run(
                     }
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Shards(
+                        request_response::Event::OutboundFailure { peer, error, .. })) => {
+                    warn!(%peer, %error, "shard request failed");
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::Shards(
+                        request_response::Event::InboundFailure { peer, error, .. })) => {
+                    warn!(%peer, %error, "shard response delivery failed");
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::Shards(
                         request_response::Event::Message { message, peer, .. })) => {
                     match message {
                         // Serve shards for the requested bodies, BYTE-BUDGETED.
@@ -2151,12 +2159,17 @@ pub async fn run(
                                         orig_len, shards });
                                 }
                             }
+                            info!(asked = request.txids.len(),
+                                  served = bodies.len(),
+                                  kb = budget_used / 1024, "serving shard request");
                             let _ = swarm.behaviour_mut().shards
                                 .send_response(channel, ShardResponse { bodies });
                         }
                         // store fetched shards; reconstruct any body now >= K
                         request_response::Message::Response { response, .. } => {
                             let mut got = false;
+                            info!(bodies = response.bodies.len(),
+                                  "shard response received");
                             for b in response.bodies {
                                 for (i, data) in b.shards {
                                     if let Some(bytes) = unb64(&data) {
