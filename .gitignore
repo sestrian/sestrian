@@ -17,3 +17,7 @@ dist/
 # genesis binaries are RELEASE assets, not repo contents (manifest+sums stay tracked)
 dist/genesis.bin
 dist/genesis.bin.zst
+
+# Generated at deploy time by scripts/chain_snapshot.py and carried in the
+# Pages artifact. Never commit it: a snapshot in git is a stale snapshot.
+site/chain.json

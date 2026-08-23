@@ -177,6 +177,28 @@
   .readout .ok{color:var(--signal)}
   .readout .lab{color:var(--bone)}
 
+  /* ── live devnet viewer ──────────────────────────── */
+  .chain{border-top:1px solid var(--line);padding:clamp(80px,12vh,150px) 0}
+  .chain h2{font-size:clamp(38px,6.4vw,92px);font-weight:900;font-stretch:122%;text-transform:uppercase;
+    line-height:.94;letter-spacing:-.015em;margin:0 0 26px;max-width:15ch}
+  .chain .body{max-width:64ch;color:var(--dim);font-size:clamp(16.5px,1.6vw,20px);margin:0 0 1em}
+  .chain .kicker .dot.cold{background:var(--dim)}
+  @media(prefers-reduced-motion:no-preference){.chain .kicker .dot.cold{animation:none}}
+  .chain .grid{margin-top:44px;display:grid;gap:1px;background:var(--line);border:1px solid var(--line);
+    grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
+  .chain .cell{background:var(--black);padding:22px 24px 24px}
+  .chain .k{font-family:var(--mono);font-size:11.5px;letter-spacing:.2em;text-transform:uppercase;
+    color:var(--dim);margin-bottom:12px}
+  /* tabular-nums: a ticking height must not reflow the row it sits in */
+  .chain .v{font-family:var(--mono);font-size:clamp(24px,3.2vw,38px);line-height:1;color:var(--bone);
+    font-variant-numeric:tabular-nums;word-break:break-word}
+  .chain .v .u{font-size:.4em;color:var(--dim);letter-spacing:.12em;margin-left:.5em}
+  .chain .v.warn{color:var(--signal)}
+  .chain .readout{margin-top:-1px}
+  .chain .stamp{font-family:var(--mono);font-size:12.5px;color:var(--dim);margin-top:20px;line-height:1.8}
+  .chain .stamp a{color:var(--dim);text-decoration:underline;text-underline-offset:3px}
+  .chain .stamp a:hover{color:var(--signal)}
+
   /* ── join (giant footer cta) ─────────────────────── */
   .join-blk{border-top:1px solid var(--line);padding:clamp(80px,14vh,170px) 0 clamp(60px,8vh,100px)}
   .join-blk .kicker{margin-bottom:8px}
@@ -452,6 +474,32 @@
     </div>
   </section>
 
+  <section class="chain wrap" id="chain" aria-label="Live devnet status">
+    <p class="kicker"><span class="dot" id="ch-dot" aria-hidden="true"></span><span id="ch-state">devnet · reading the chain</span></p>
+    <h2>The chain, right now.</h2>
+    <p class="body">Not a screenshot. These are the numbers the network is agreeing on as you
+      read them — pulled from a node you don&rsquo;t have to trust, and that you can check
+      yourself against any other node on the network.</p>
+
+    <div class="grid" id="ch-grid" aria-live="polite">
+      <div class="cell"><div class="k">height</div><div class="v" id="ch-height">&ndash;</div></div>
+      <div class="cell"><div class="k">supply</div><div class="v" id="ch-supply">&ndash;<span class="u">SES</span></div></div>
+      <div class="cell"><div class="k">peers</div><div class="v" id="ch-peers">&ndash;</div></div>
+      <div class="cell"><div class="k">miners</div><div class="v" id="ch-miners">&ndash;</div></div>
+      <div class="cell"><div class="k">parameters</div><div class="v" id="ch-params">&ndash;</div></div>
+      <div class="cell"><div class="k">expert pages</div><div class="v" id="ch-pages">&ndash;</div></div>
+      <div class="cell"><div class="k">growth events</div><div class="v" id="ch-growth">&ndash;</div></div>
+      <div class="cell"><div class="k">stale deltas</div><div class="v" id="ch-stale">&ndash;</div></div>
+    </div>
+
+    <div class="readout" id="ch-readout">
+      <span class="lab">head&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span> <span id="ch-head">&mdash;</span><br>
+      <span class="lab">model&nbsp;&nbsp;&nbsp;&nbsp;</span> <span id="ch-root">&mdash;</span>
+    </div>
+
+    <p class="stamp" id="ch-stamp">Connecting&hellip;</p>
+  </section>
+
   <section class="join-blk wrap" id="join">
     <p class="kicker"><span class="dot" aria-hidden="true"></span>Phase 1 — open devnet, live now</p>
     <a class="giant" href="https://github.com/sestrian/sestrian/blob/main/docs/joining.md">Join the<br>devnet&nbsp;↗</a>
@@ -594,6 +642,131 @@ $ <span class="s">scripts/install.sh --mine</span>   <span class="c"># or plain 
       panel.style.maxHeight=open?"0":panel.scrollHeight+"px";
     });
   });
+
+  /* ── live devnet viewer ──────────────────────────────────────────────
+     Two sources, deliberately. chain.json is baked into the deploy, so the
+     panel shows real numbers the instant the page loads and never depends on
+     a node being reachable from the visitor's browser. Then we try the live
+     API and upgrade in place if it answers.
+
+     The live call WILL fail until an https endpoint exists: this page is
+     https, and a browser refuses to fetch http:// from it outright — the
+     request never leaves, and it doesn't even surface as a CORS error. That
+     is why the baked snapshot is the floor and live is the bonus, rather
+     than the other way round.                                            */
+  (function(){
+    var grid=document.getElementById("ch-grid");
+    if(!grid) return;
+    var LIVE="https://api.sestrian.com";     // cloudflared -> seed :8080
+    var POLL=20000;
+    var $=function(id){return document.getElementById(id);};
+
+    var nf=new Intl.NumberFormat("en-US");
+    function compact(n){
+      if(!isFinite(n)) return "–";
+      if(n>=1e9) return (n/1e9).toFixed(2).replace(/\.?0+$/,"")+"B";
+      if(n>=1e6) return (n/1e6).toFixed(1).replace(/\.0$/,"")+"M";
+      if(n>=1e3) return (n/1e3).toFixed(1).replace(/\.0$/,"")+"K";
+      return String(n);
+    }
+    function set(id,txt,warn){
+      var el=$(id); if(!el) return;
+      if(el.textContent!==txt) el.textContent=txt;
+      if(warn!==undefined) el.classList.toggle("warn",!!warn);
+    }
+    function ago(iso){
+      var s=Math.max(0,(Date.now()-new Date(iso).getTime())/1000);
+      if(s<90) return Math.round(s)+"s ago";
+      if(s<5400) return Math.round(s/60)+" min ago";
+      if(s<172800) return Math.round(s/3600)+" h ago";
+      return Math.round(s/86400)+" days ago";
+    }
+
+    function render(d,meta){
+      var m=d.model||{};
+      set("ch-height", nf.format(d.height));
+      // supply is in base units (1e9 per SES), same as the wallet CLI prints
+      $("ch-supply").innerHTML = nf.format(Math.round((d.supply||0)/1e9)) +
+        '<span class="u">SES</span>';
+      set("ch-peers", nf.format(d.peers));
+      set("ch-miners", d.miners==null ? "–" : nf.format(d.miners));
+      set("ch-params", m.dim ? compact(m.dim) : "–");
+      set("ch-pages", m.expert_pages==null ? "–"
+            : m.expert_pages_active+"/"+m.expert_pages);
+      set("ch-growth", m.growth_events==null ? "–" : nf.format(m.growth_events));
+      // the number that means "miners are wasting their work" — call it out
+      set("ch-stale", d.stale_deltas==null ? "–" : nf.format(d.stale_deltas),
+          d.stale_deltas>0);
+      set("ch-head", d.head || "—");
+      set("ch-root", m.model_root || "—");
+
+      var dot=$("ch-dot");
+      if(meta.live){
+        dot.classList.remove("cold");
+        set("ch-state","devnet · live");
+        $("ch-stamp").innerHTML='Polling the seed node every '+(POLL/1000)+
+          's. Cross-check any figure yourself: <a href="'+LIVE+'/status">'+
+          LIVE.replace(/^https:\/\//,"")+'/status</a>';
+      } else {
+        dot.classList.add("cold");
+        set("ch-state","devnet · last snapshot");
+        $("ch-stamp").innerHTML='Captured '+ago(meta.at)+' when this page was built — '+
+          'live polling needs an https endpoint for the node. '+
+          '<a href="https://github.com/sestrian/sestrian">Run a node</a> to see it tick.';
+      }
+    }
+
+    function unavailable(){
+      $("ch-dot").classList.add("cold");
+      set("ch-state","devnet · unreachable");
+      $("ch-stamp").innerHTML="Could not read the chain from this page. That is a "+
+        "problem with this site, not the network — "+
+        '<a href="https://github.com/sestrian/sestrian">check a node directly</a>.';
+    }
+
+    // 1. baked snapshot: instant, always same-origin
+    fetch("chain.json",{cache:"no-store"})
+      .then(function(r){return r.ok?r.json():Promise.reject();})
+      .then(function(s){ if(s&&s.ok) render(s.status,{live:false,at:s.captured_at});
+                         else unavailable(); })
+      .catch(unavailable)
+      .finally(goLive);
+
+    // 2. upgrade to live if the node is reachable over https
+    function goLive(){
+      var tries=0;
+      (function poll(){
+        var ctl=new AbortController();
+        var t=setTimeout(function(){ctl.abort();},6000);
+        fetch(LIVE+"/status",{signal:ctl.signal,cache:"no-store"})
+          .then(function(r){return r.ok?r.json():Promise.reject();})
+          .then(function(d){
+            tries=0;
+            return fetch(LIVE+"/miners",{cache:"no-store"})
+              .then(function(r){return r.ok?r.json():null;})
+              .catch(function(){return null;})
+              .then(function(ms){
+                // /miners answers {head_height, miners[], …}; tolerate a bare
+                // array too. Reading it as an array outright silently rendered
+                // a dash where the miner count should be.
+                var lst=(ms&&!Array.isArray(ms))?ms.miners:ms;
+                if(Array.isArray(lst)) d.miners=lst.length;
+                render(d,{live:true});
+              });
+          })
+          .catch(function(){
+            // Stay on the snapshot and stop hammering an endpoint that isn't
+            // there. Three strikes is enough to tell "not deployed" from "one
+            // dropped request".
+            if(++tries>=3) return;
+          })
+          .finally(function(){
+            clearTimeout(t);
+            if(tries<3) setTimeout(poll,POLL);
+          });
+      })();
+    }
+  })();
 })();
 </script>
 </body>

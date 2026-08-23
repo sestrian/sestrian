@@ -5,7 +5,11 @@ name: pages
 on:
   push:
     branches: [main]
-    paths: ['site/**', '.github/workflows/pages.yml']
+    paths: ['site/**', 'scripts/chain_snapshot.py', '.github/workflows/pages.yml']
+  # Refresh the live panel's baked chain snapshot without needing a commit.
+  # Deploy-only: nothing is written back to the repo, so this costs no history.
+  schedule:
+    - cron: '*/30 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -39,6 +43,13 @@ jobs:
               [ "$got" = "$want" ] || { echo "FATAL: site mentions hash $got but the network id is $want"; exit 1; }
             done
           fi
+      # Bake a real chain snapshot into the artifact. It is NOT committed — the
+      # deploy carries it — so a panel that refreshes every 30 min costs zero
+      # commits. Writes ok:false and keeps going if the seed is down: a copy
+      # change must never be blocked by node downtime.
+      - name: snapshot the chain for the live panel
+        run: python3 scripts/chain_snapshot.py site/chain.json
+
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
