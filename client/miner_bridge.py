@@ -274,12 +274,33 @@ def run(a):
                         _send(sock, {"t": "scores", "height": want_h,
                                      "scores": {}})
                         continue
-                    gen = torch.Generator().manual_seed(int(msg.get("seed", 0)))
-                    xb, yb = data.get_batch("val", a.batch, generator=gen)
+                    # NOISE FLOOR: a single val batch's measurement error is
+                    # the same magnitude as a delta's true per-round improvement
+                    # (measured live: one delta, two GPUs, 464 vs 3020 u-nats),
+                    # so single-batch scores were coin flips clamped at zero.
+                    # Evaluate over several seeded batches; noise ~ 1/sqrt(n).
+                    EVAL_BATCHES = 4
+                    seed0 = int(msg.get("seed", 0))
+                    batches = []
+                    for bi in range(EVAL_BATCHES):
+                        gen = torch.Generator().manual_seed(seed0 + bi)
+                        batches.append(data.get_batch("val", a.batch,
+                                                      generator=gen))
+                    xb, yb = batches[0]      # routing capture uses batch 0
                     scores, sketches = {}, {}
                     model.eval()
                     with torch.no_grad():
                         import torch.nn.functional as F
+
+                        def per_token_loss_all():
+                            outs = []
+                            for bx, by in batches:
+                                logits, _ = model(bx, by)
+                                outs.append(F.cross_entropy(
+                                    logits.view(-1, logits.size(-1)),
+                                    by.reshape(-1), reduction="none",
+                                ).view(by.shape))
+                            return outs
 
                         def per_token_loss():
                             logits, _ = model(xb, yb)
@@ -306,10 +327,12 @@ def run(a):
                                     return h
                                 hooks.append(
                                     blk.moe.register_forward_hook(mk(li)))
-                        base_tok = per_token_loss()
+                        base_all = per_token_loss_all()
                         for h in hooks:
                             h.remove()
-                        base = float(base_tok.mean())
+                        base_tok = base_all[0]
+                        base = float(sum(t.mean() for t in base_all)
+                                     / len(base_all))
 
                         def token_mask(pages):
                             if layout is None:
@@ -332,13 +355,24 @@ def run(a):
                             sp = d["sparse"]
                             cand = state + _sparse_dense(sp)   # chain order
                             set_flat_params(model, dequantize(to_torch(cand)))
-                            cand_tok = per_token_loss()
+                            cand_all = per_token_loss_all()
                             m = token_mask([int(p) for p in d.get("pages", [])])
                             if m is None:
-                                imp = base - float(cand_tok.mean())
+                                cm = float(sum(t.mean() for t in cand_all)
+                                           / len(cand_all))
+                                imp = base - cm
                             else:
-                                imp = float(base_tok[m].mean()) \
-                                    - float(cand_tok[m].mean())
+                                # mask applies to batch 0 (where routing was
+                                # captured); the other batches contribute their
+                                # full-token means to shrink the noise
+                                b0 = float(base_tok[m].mean()) \
+                                    - float(cand_all[0][m].mean())
+                                rest_b = sum(float(t.mean())
+                                             for t in base_all[1:])
+                                rest_c = sum(float(t.mean())
+                                             for t in cand_all[1:])
+                                n = len(cand_all)
+                                imp = (b0 + (rest_b - rest_c)) / n
                             scores[d["txid"]] = max(0, int(round(imp * 1e6)))
                             # rev 8: the delta's integer influence sketch —
                             # exactly recomputable from the DA body by anyone
