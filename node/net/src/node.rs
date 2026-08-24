@@ -385,6 +385,13 @@ pub struct Node {
     /// transfers, and the response handler needs the window we asked for to
     /// detect a stalled overlap (see sync_cursor)
     pub last_sync_req: HashMap<PeerId, (f64, u64)>,
+    /// The OUTSTANDING request id per peer. A gate cleared by a STALE response
+    /// (one that had already timed out) spawns a second in-flight request; the
+    /// stale responses multiply and a peer ends up served 4-6 concurrent syncs,
+    /// all timing out — which re-forked the miners at max quota (found live).
+    /// Only a response/failure matching the outstanding id touches the gate.
+    pub sync_req_id: HashMap<PeerId, request_response::OutboundRequestId>,
+    pub shard_req_id: HashMap<PeerId, request_response::OutboundRequestId>,
     /// Per-peer floor for the next sync request's from_height. Requests anchor
     /// at head−2 (reorg margin), but the server packs oldest-first under a byte
     /// budget — with payload-heavy blocks a batch can be EXACTLY the overlap
@@ -932,8 +939,9 @@ impl Node {
                         .map(|t| now() - t < 120.0).unwrap_or(false);
                     if !busy {
                         self.last_shard_req.insert(*p, now());
-                        swarm.behaviour_mut().shards
+                        let rid = swarm.behaviour_mut().shards
                             .send_request(p, ShardRequest { txids: missing.clone() });
+                        self.shard_req_id.insert(*p, rid);
                     }
                 }
             }
@@ -949,11 +957,13 @@ impl Node {
                 if !inflight {
                     let fh = sb.header.height.saturating_sub(1);
                     self.last_sync_req.insert(peer, (now(), fh));
-                    swarm.behaviour_mut().sync.send_request(&peer, SyncRequest {
-                        from_height: fh,
-                        count: 32,
-                        want_genesis: false,
-                    });
+                    let rid = swarm.behaviour_mut().sync.send_request(&peer,
+                        SyncRequest {
+                            from_height: fh,
+                            count: 32,
+                            want_genesis: false,
+                        });
+                    self.sync_req_id.insert(peer, rid);
                 }
                 self.queue_pending(bh, sb, peer);
             }
@@ -1520,8 +1530,10 @@ pub async fn run(
                                 .map(|t| now() - t < 120.0).unwrap_or(false);
                             if !busy {
                                 node.last_shard_req.insert(p, now());
-                                swarm.behaviour_mut().shards.send_request(&p,
-                                    ShardRequest { txids: want.clone() });
+                                let rid = swarm.behaviour_mut().shards
+                                    .send_request(&p,
+                                        ShardRequest { txids: want.clone() });
+                                node.shard_req_id.insert(p, rid);
                                 sent += 1;
                             }
                         }
@@ -1578,9 +1590,10 @@ pub async fn run(
                                     node.last_sync_req.insert(p, (now(), from));
                                     info!(peer = %p, from,
                                           "no foreign heads heard — direct sync pull");
-                                    swarm.behaviour_mut().sync.send_request(&p,
+                                    let rid = swarm.behaviour_mut().sync.send_request(&p,
                                         SyncRequest { from_height: from, count: 64,
                                                       want_genesis: false });
+                                    node.sync_req_id.insert(p, rid);
                                 }
                             }
                         }
@@ -1869,9 +1882,11 @@ pub async fn run(
                                                     .unwrap_or(false);
                                                 if !busy {
                                                     node.last_shard_req.insert(p, now());
-                                                    swarm.behaviour_mut().shards
+                                                    let rid = swarm.behaviour_mut()
+                                                        .shards
                                                         .send_request(&p, ShardRequest {
                                                             txids: vec![txid.clone()] });
+                                                    node.shard_req_id.insert(p, rid);
                                                 }
                                             }
                                         }
@@ -1915,8 +1930,10 @@ pub async fn run(
                                     let req = SyncRequest {
                                         from_height: from, count: SYNC_MAX_BLOCKS as u64,
                                         want_genesis: false };
-                                    swarm.behaviour_mut().sync
+                                    let rid = swarm.behaviour_mut().sync
                                         .send_request(&propagation_source, req);
+                                    node.sync_req_id
+                                        .insert(propagation_source, rid);
                                 }
                             }
                         }
@@ -1925,9 +1942,13 @@ pub async fn run(
                 // failures were silently swallowed by the catch-all — a dead
                 // transfer looked identical to a healthy quiet mesh
                 SwarmEvent::Behaviour(BehaviourEvent::Sync(
-                        request_response::Event::OutboundFailure { peer, error, .. })) => {
-                    warn!(%peer, %error, "sync request failed");
-                    node.last_sync_req.remove(&peer);
+                        request_response::Event::OutboundFailure {
+                            peer, error, request_id, .. })) => {
+                    if node.sync_req_id.get(&peer) == Some(&request_id) {
+                        warn!(%peer, %error, "sync request failed");
+                        node.sync_req_id.remove(&peer);
+                        node.last_sync_req.remove(&peer);
+                    }
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Sync(
                         request_response::Event::InboundFailure { peer, error, .. })) => {
@@ -2019,10 +2040,17 @@ pub async fn run(
                             let _ = swarm.behaviour_mut().sync
                                 .send_response(channel, resp);
                         }
-                        request_response::Message::Response { response, .. } => {
+                        request_response::Message::Response {
+                                response, request_id, .. } => {
+                            // stale response (its request already timed out and
+                            // was replaced): TAKE THE DATA, but leave the gate,
+                            // cursor and re-request logic alone — a stale clear
+                            // is what multiplied in-flight requests (found live)
+                            let current = node.sync_req_id.get(&peer)
+                                == Some(&request_id);
                             info!(blocks = response.blocks.len(),
                                   their_head = response.head_height,
-                                  "sync response received");
+                                  current, "sync response received");
                             for (txid, p) in response.payloads {
                                 if !node.payloads.contains_key(&txid) {
                                     node.store.put_payload(&txid, &p);
@@ -2054,9 +2082,18 @@ pub async fn run(
                             // clear the in-flight marker so the next Head from this
                             // peer immediately pulls the next batch (continuous
                             // catch-up instead of one batch per throttle window)
-                            let last_from = node.last_sync_req.remove(&peer)
-                                .map(|(_, f)| f);
+                            let last_from = if current {
+                                node.sync_req_id.remove(&peer);
+                                node.last_sync_req.remove(&peer)
+                                    .map(|(_, f)| f)
+                            } else { None };
                             let behind = response.head_height > node.head_height();
+                            if !current {
+                                // data absorbed; a fresh request may already be
+                                // in flight — do not touch cursor or re-request
+                                node.retry_pending(&mut swarm);
+                                continue;
+                            }
                             // "orphaned": some served block's parent is nowhere
                             // — not applied, not pending, not in this batch. Its
                             // ancestors are missing, so the fork point is below
@@ -2136,18 +2173,24 @@ pub async fn run(
                                         .min(response.head_height)
                                         .saturating_sub(2));
                                 node.last_sync_req.insert(peer, (now(), from));
-                                swarm.behaviour_mut().sync.send_request(&peer,
+                                let rid = swarm.behaviour_mut().sync
+                                    .send_request(&peer,
                                     SyncRequest { from_height: from,
                                                   count: SYNC_MAX_BLOCKS as u64,
                                                   want_genesis: false });
+                                node.sync_req_id.insert(peer, rid);
                             }
                         }
                     }
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Shards(
-                        request_response::Event::OutboundFailure { peer, error, .. })) => {
-                    warn!(%peer, %error, "shard request failed");
-                    node.last_shard_req.remove(&peer);
+                        request_response::Event::OutboundFailure {
+                            peer, error, request_id, .. })) => {
+                    if node.shard_req_id.get(&peer) == Some(&request_id) {
+                        warn!(%peer, %error, "shard request failed");
+                        node.shard_req_id.remove(&peer);
+                        node.last_shard_req.remove(&peer);
+                    }
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Shards(
                         request_response::Event::InboundFailure { peer, error, .. })) => {
@@ -2208,8 +2251,14 @@ pub async fn run(
                                 .send_response(channel, ShardResponse { bodies });
                         }
                         // store fetched shards; reconstruct any body now >= K
-                        request_response::Message::Response { response, .. } => {
-                            node.last_shard_req.remove(&peer);
+                        request_response::Message::Response {
+                                response, request_id, .. } => {
+                            let current = node.shard_req_id.get(&peer)
+                                == Some(&request_id);
+                            if current {
+                                node.shard_req_id.remove(&peer);
+                                node.last_shard_req.remove(&peer);
+                            }
                             let mut got = false;
                             info!(bodies = response.bodies.len(),
                                   "shard response received");
@@ -2281,10 +2330,12 @@ pub async fn run(
                                     .map(|(_, id)| id).collect();
                                 still.extend(node.want_deltas.keys().cloned());
                                 still.truncate(32);
-                                if !still.is_empty() {
+                                if !still.is_empty() && current {
                                     node.last_shard_req.insert(peer, now());
-                                    swarm.behaviour_mut().shards.send_request(&peer,
-                                        ShardRequest { txids: still });
+                                    let rid = swarm.behaviour_mut().shards
+                                        .send_request(&peer,
+                                            ShardRequest { txids: still });
+                                    node.shard_req_id.insert(peer, rid);
                                 }
                             }
                         }
@@ -2324,7 +2375,9 @@ pub async fn run(
                             from_height: from, count: 64,
                             want_genesis: false,
                         };
-                        swarm.behaviour_mut().sync.send_request(&peer_id, req);
+                        let rid = swarm.behaviour_mut().sync
+                            .send_request(&peer_id, req);
+                        node.sync_req_id.insert(peer_id, rid);
                     }
                 }
                 _ => {}
