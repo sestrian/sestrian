@@ -1659,6 +1659,21 @@ pub async fn run(
                 if node.cfg.produce && round >= 0 && round != node.last_proposed_round {
                     let elapsed_in_round =
                         (now() - node.t0 - jitter) - round as f64 * node.cfg.interval;
+                    // PER-MINER PHASE OFFSET (producer behavior, not consensus):
+                    // with every miner proposing at the same instant, every
+                    // round is a same-height tie, and at envelope-size bodies
+                    // the tie-loser can't fetch the winner before the NEXT tie
+                    // lands — forks deepen past the prune window (found live,
+                    // twice). A deterministic 0..interval/4 stagger from the
+                    // miner's pubkey makes ties the exception again.
+                    let phase = {
+                        let h = core::delta_hash(node.key.pub_hex().as_bytes());
+                        (u64::from_str_radix(&h[..8], 16).unwrap_or(0) % 1000)
+                            as f64 / 1000.0 * (node.cfg.interval / 4.0)
+                    };
+                    if elapsed_in_round < phase {
+                        continue;
+                    }
                     let max_allowed =
                         (elapsed_in_round / (node.cfg.interval / 8.0)).floor()
                             .max(0.0) as u64;
