@@ -25,7 +25,7 @@ uv run --with torch --with numpy --with pynacl python -m client.make_genesis \
     --model toy-moe --seed 1337 --out /tmp/swarm_genesis.bin
 
 for i in $(seq 0 $((N - 1))); do
-    SEED=$(printf "%02d%.0s" $i {1..32} | head -c 64)
+    SEED=$(printf "%064x" $((i + 1)))
     PEERS=""
     if [ "$i" -gt 0 ]; then
         PEERS="--peers /ip4/127.0.0.1/udp/$BASE_PORT/quic-v1"
