@@ -147,7 +147,7 @@
       pinned to each other by golden vectors.</p>
     <div class="stack">
       <div class="layer"><span class="n">State</span><span class="d"><b>Weights as chain state.</b> Page-Merkle commitment over a consensus page table; deterministic integer aggregation; replay reconstructs the model bit-for-bit &mdash; including across on-chain GROWTH events, where the chain appends expert pages with deterministically derived weights. <span class="mono">merkle.rs, model_state.rs / chain.py</span></span></div>
-      <div class="layer"><span class="n">Consensus</span><span class="d"><b>VRF proposer sortition + Nakamoto fork choice.</b> Stake-weighted lottery gates every block; deltas carry committed held-out scores and a validated work quota; heaviest valid chain wins. A protocol version field makes upgrades a schedule, not a scramble. <span class="mono">blocktree.rs, lottery.rs / blockchain.py</span></span></div>
+      <div class="layer"><span class="n">Consensus</span><span class="d"><b>VRF proposer sortition + Nakamoto fork choice.</b> Stake-weighted lottery gates every block; deltas carry committed held-out scores, a validated work quota, and a hard SIZE ENVELOPE — consensus never scales the payload (Bitcoin's block-size lesson): capacity pressure makes miners specialize on fewer experts, and sustained pressure grows the model on-chain. A protocol version field makes upgrades a schedule, not a scramble. <span class="mono">blocktree.rs, lottery.rs / blockchain.py</span></span></div>
       <div class="layer"><span class="n">Randomness</span><span class="d"><b>Live today: VRF attempt-ladder</b> &mdash; seeded by the parent block, deterministic liveness widening, verified in validation. The threshold-BLS beacon (drand-style, DKG-generated) is the designed mainnet upgrade for full unbiasability; it runs in the rig, not yet in the node. <span class="mono">lottery.rs / beacon.py, dkg.py</span></span></div>
       <div class="layer"><span class="n">Data</span><span class="d"><b>Erasure-coded data availability.</b> Reed-Solomon (any k-of-n reconstruct) + Merkle availability sampling; withheld bodies are unrecoverable and detected. <span class="mono">da.py</span></span></div>
       <div class="layer"><span class="n">Economics</span><span class="d"><b>Difficulty-style write-price homeostat + stake/slash.</b> Holds admission at target, prices out spam, slashes provable faults. <span class="mono">economics.py</span></span></div>
@@ -289,7 +289,9 @@
         funded, but the crossover has to be earned by real paying usage.</li>
       <li><strong>Throughput.</strong> Every block carries a multi-MB delta, so a
         joining node syncs the full history and a slow uplink can miss the
-        inclusion window. Mitigated — auto-fitted training rounds, DA-sharded
+        inclusion window. Bounded by protocol: the delta envelope caps every
+        update at ~8MB regardless of quota, so worst-case network load is
+        ~3Mbit/s forever. Mitigated further — auto-fitted training rounds, DA-sharded
         genesis, bounded byte-budgeted sync with a catch-up cursor (the first
         transatlantic join found and fixed three real WAN bugs, all documented in
         the tracker), visible stale-delta alarms — not solved.</li>
