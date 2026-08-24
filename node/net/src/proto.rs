@@ -93,17 +93,6 @@ impl Payload {
         SparseI64 { n, idx: b64(&idx), val: b64(&val) }
     }
 
-    pub fn from_dense_i64(v: &[i64]) -> SparseI64 {
-        let mut idx = Vec::new();
-        let mut val = Vec::new();
-        for (i, x) in v.iter().enumerate() {
-            if *x != 0 {
-                idx.extend_from_slice(&(i as u32).to_le_bytes());
-                val.extend_from_slice(&x.to_le_bytes());
-            }
-        }
-        SparseI64 { n: v.len(), idx: b64(&idx), val: b64(&val) }
-    }
 }
 
 /// Sparse vector with full i64 values (aggregates; bridge advances).

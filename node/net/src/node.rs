@@ -511,11 +511,14 @@ impl Node {
             return;
         }
         let hh = self.head_height();
-        let want: Vec<(String, SparseI64)> = self.delta_pool.iter()
+        let want: Vec<(String, SparseI64, Vec<u32>)> = self.delta_pool.iter()
             .filter(|(id, t)| t.base_height == hh && !self.delta_scores.contains_key(*id))
-            .filter_map(|(id, _)| {
-                let dense = self.payloads.get(id)?.dense()?;
-                Some((id.clone(), Payload::from_dense_i64(&dense)))
+            .filter_map(|(id, t)| {
+                let p = self.payloads.get(id)?;
+                let coords = p.coords()?;
+                Some((id.clone(),
+                      Payload::from_coords_i64(p.n, &coords),
+                      t.canonical_pages()))
             })
             .collect();
         if !want.is_empty() {

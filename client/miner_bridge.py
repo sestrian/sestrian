@@ -279,15 +279,67 @@ def run(a):
                     scores, sketches = {}, {}
                     model.eval()
                     with torch.no_grad():
-                        _, base_loss = model(xb, yb)
-                        base = float(base_loss)
+                        import torch.nn.functional as F
+
+                        def per_token_loss():
+                            logits, _ = model(xb, yb)
+                            return F.cross_entropy(
+                                logits.view(-1, logits.size(-1)),
+                                yb.reshape(-1), reduction="none",
+                            ).view(yb.shape)
+
+                        # CLAIM-AWARE SCORING: capture which experts each
+                        # held-out token routes through (baseline model), so a
+                        # delta is measured on the tokens that actually use the
+                        # experts it claims. A specialized delta is no longer
+                        # invisible to an evaluator whose data routes elsewhere
+                        # — the failure that zeroed half the committed scores
+                        # and blocked organic growth (found live).
+                        routed = {}
+                        hooks = []
+                        if layout is not None:
+                            for li, blk in enumerate(model.blocks):
+                                def mk(li):
+                                    def h(mod, inp, out):
+                                        w = mod._gates(inp[0])
+                                        routed[li] = (w > 0)
+                                    return h
+                                hooks.append(
+                                    blk.moe.register_forward_hook(mk(li)))
+                        base_tok = per_token_loss()
+                        for h in hooks:
+                            h.remove()
+                        base = float(base_tok.mean())
+
+                        def token_mask(pages):
+                            if layout is None:
+                                return None
+                            claimed = [layout.experts[p - 1]
+                                       for p in pages if p >= 1]
+                            if not claimed:
+                                return None          # backbone-only: all tokens
+                            m = torch.zeros_like(yb, dtype=torch.bool)
+                            for (li, e) in claimed:
+                                r = routed.get(li)
+                                if r is not None and e < r.shape[-1]:
+                                    m |= r[..., e]
+                            # too few routed tokens = noise, not signal
+                            if int(m.sum()) < 16:
+                                return None
+                            return m
+
                         for d in msg.get("deltas", []):
                             sp = d["sparse"]
                             cand = state + _sparse_dense(sp)   # chain order
                             set_flat_params(model, dequantize(to_torch(cand)))
-                            _, l = model(xb, yb)
-                            scores[d["txid"]] = max(
-                                0, int(round((base - float(l)) * 1e6)))
+                            cand_tok = per_token_loss()
+                            m = token_mask([int(p) for p in d.get("pages", [])])
+                            if m is None:
+                                imp = base - float(cand_tok.mean())
+                            else:
+                                imp = float(base_tok[m].mean()) \
+                                    - float(cand_tok[m].mean())
+                            scores[d["txid"]] = max(0, int(round(imp * 1e6)))
                             # rev 8: the delta's integer influence sketch —
                             # exactly recomputable from the DA body by anyone
                             from rig.sketch import sketch_sparse

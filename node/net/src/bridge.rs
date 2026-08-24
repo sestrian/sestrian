@@ -44,7 +44,7 @@ pub enum ToBridge {
     /// rev 7: score candidate deltas on a held-out batch (seeded from block
     /// context). Each delta rides as a full-i64 sparse vector the trainer adds
     /// to its synced state, evaluates, and reverts.
-    Eval { height: u64, seed: u64, deltas: Vec<(String, SparseI64)> },
+    Eval { height: u64, seed: u64, deltas: Vec<(String, SparseI64, Vec<u32>)> },
 }
 
 #[derive(Debug)]
@@ -200,7 +200,8 @@ async fn serve_one(
                     }
                     ToBridge::Eval { height, seed, deltas } => {
                         let ds: Vec<Value> = deltas.iter()
-                            .map(|(txid, sp)| json!({"txid": txid, "sparse": sp}))
+                            .map(|(txid, sp, pages)| json!({
+                                "txid": txid, "sparse": sp, "pages": pages }))
                             .collect();
                         let m = json!({"t": "eval", "height": height,
                                        "seed": seed, "deltas": ds});
