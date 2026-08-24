@@ -193,7 +193,16 @@ saturation says the model needs capacity. Candidate fixes to DISCUSS (all
 consensus-adjacent): score deltas against held-out slices weighted to their
 CLAIMED pages; score the joint application; or exempt the staleness gate when
 every miner's aggregate across the window scored positive at least once.
-Decide before the next protocol rev; do not patch ad hoc.
+RESOLVED DIAGNOSIS (after claim-aware masks + 4-batch noise reduction shipped
+as proposer policy): with the noise floor lowered, true per-delta improvement
+at the plateau measures ~0-400 u-nats — the zeros are HONEST. Two miners on
+one shared corpus produce near-redundant gradients, so per-delta marginal
+value is genuinely tiny. Recommended for the next protocol rev: gate growth
+on the WINDOW'S cumulative held-out trend ("is the network learning?") rather
+than per-delta zeros; per-delta scores stay for reward weighting. The deep
+fix is data diversity across miners (the corpus economy) — which is also
+what makes specialization real. Decide before the next protocol rev; do not
+patch ad hoc.
 
 ## Remaining — testnet-phase extensions (need a multi-party network)
 The single-operator devnet can't validate these; the testnet is their gate.
