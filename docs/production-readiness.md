@@ -106,9 +106,17 @@ each phase.
   budget 48→16MB, the connect-time opportunistic pull now respects the
   in-flight throttle + cursor (it used to fire a duplicate ~50MB transfer on
   every reconnect), and request-response failures / connection closes are now
-  logged with their cause instead of being silently swallowed. Follow-on
-  (testnet): move block validation off the swarm event loop so reads never
-  stall.
+  logged with their cause instead of being silently swallowed.
+- ✅ THE ACTOR SPLIT + INCREMENTAL STATE ENGINE (the structural close-out of
+  every transport incident above): the swarm loop now owns transport ONLY —
+  its worst-case pause is microseconds — while a chain actor owns all state
+  behind typed channels. And validation itself became O(envelope): one
+  resident weight vector mutated in place, sparse undo/redo per block,
+  cached page leaves (only touched pages rehash), sparse bodies end to end
+  with a streaming delta hash. Committed-root checks make the incremental
+  math self-verifying — divergence is loud rejection, never a fork. Proven:
+  golden chain replay (fork + growth) bit-exact, devnet + growth-proof +
+  forced-announce + kill/restart soak all green on the new engine.
 - ✅ Delta scoring (rev 7) — held-out-shard loss scores COMMITTED per block
   (header.score_root), enforced structure/bounds/commitment in validation;
   miner pool + data credits split ∝ score, uniform fallback; the trainer bridge
