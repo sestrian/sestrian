@@ -307,6 +307,47 @@ fn now() -> f64 {
 /// so the node resumes contributing instead of going silent forever.
 const TRAIN_TIMEOUT_SECS: f64 = 180.0;
 
+/// Chain -> Net commands. The chain actor NEVER touches the swarm: it asks
+/// the net loop, which enforces the per-peer in-flight gates and owns all
+/// transport state. Unbounded: commands are tiny and the net loop drains fast.
+pub enum ToNet {
+    Publish(Gossip),
+    /// request a sync pull; `from` is echoed back with the response batch so
+    /// the chain's catch-up state machine sees the window it asked for
+    SendSync(PeerId, u64),
+    SendShards(PeerId, Vec<String>),
+    /// the connected head changed — the net loop announces this each round
+    /// and anchors its mesh-blind pulls on the height
+    HeadInfo { hash: String, height: u64 },
+}
+
+/// Net -> Chain events. Everything stateful happens on the chain actor; the
+/// net loop forwards, annotated with the transport facts only it knows.
+pub enum ToChain {
+    Dtx(crate::proto::WireDeltaTx, Payload, Option<PeerId>),
+    Atx(serde_json::Value),
+    Blk(StoredBlock, Option<PeerId>),
+    /// a peer announced a head we may not have
+    Head { peer: PeerId, hash: String, height: u64 },
+    PeerConnected(PeerId),
+    SyncServe(SyncRequest, tokio::sync::oneshot::Sender<SyncResponse>),
+    ShardServe(ShardRequest, tokio::sync::oneshot::Sender<ShardResponse>),
+    SyncBatch {
+        peer: PeerId,
+        /// true iff this response matched the outstanding request (stale
+        /// batches still carry data but must not drive the state machine)
+        current: bool,
+        from: u64,
+        blocks: Vec<StoredBlock>,
+        payloads: HashMap<String, Payload>,
+        their_head: u64,
+    },
+    ShardBatch { peer: PeerId, current: bool, bodies: Vec<BodyShards> },
+    /// the net loop's round metronome, with the transport facts of the moment
+    RoundTick { round: i64, elapsed_in_round: f64, num_peers: usize,
+                connected: Vec<PeerId>, mesh_blind: bool },
+}
+
 pub struct NodeConfig {
     pub produce: bool,
     pub interval: f64,
@@ -363,7 +404,6 @@ pub struct Node {
     pub train_deadline: f64,
     pub t0: f64,
     pub last_proposed_round: i64,
-    pub last_announced_round: i64,
     /// once-per-round training dispatch (production is a separate, per-tick
     /// eligibility ladder — see the run loop)
     pub last_trained_round: i64,
@@ -372,26 +412,21 @@ pub struct Node {
     /// been heard for a couple of rounds while peers are connected, the node
     /// PULLS via direct request-response sync — heartbeat healing must not
     /// depend on the mesh it is trying to heal.
-    pub last_foreign_head: f64,
     /// consecutive announce rounds with peers connected but NO foreign head
     /// heard. At 3, the connections themselves are treated as suspect: a
     /// SIGKILLed peer's QUIC connection lingers looking healthy (same PeerId
     /// as its restarted successor), and both gossip and request-response can
     /// be routed onto the corpse — so the node RECYCLES them (disconnect +
     /// redial) to force fresh transport. Found live in the CI soak.
-    pub silent_rounds: u64,
     /// per-peer (timestamp, from_height) of the last sync we requested —
     /// heartbeat-triggered catch-up must not stack concurrent multi-hundred-MB
     /// transfers, and the response handler needs the window we asked for to
     /// detect a stalled overlap (see sync_cursor)
-    pub last_sync_req: HashMap<PeerId, (f64, u64)>,
     /// The OUTSTANDING request id per peer. A gate cleared by a STALE response
     /// (one that had already timed out) spawns a second in-flight request; the
     /// stale responses multiply and a peer ends up served 4-6 concurrent syncs,
     /// all timing out — which re-forked the miners at max quota (found live).
     /// Only a response/failure matching the outstanding id touches the gate.
-    pub sync_req_id: HashMap<PeerId, request_response::OutboundRequestId>,
-    pub shard_req_id: HashMap<PeerId, request_response::OutboundRequestId>,
     /// Per-peer floor for the next sync request's from_height. Requests anchor
     /// at head−2 (reorg margin), but the server packs oldest-first under a byte
     /// budget — with payload-heavy blocks a batch can be EXACTLY the overlap
@@ -414,16 +449,13 @@ pub struct Node {
     pub quota_rejects: u64,
     /// per-peer rotation cursor for serving GENESIS shards one at a time, so a
     /// bootstrapping peer that keeps asking us collects K distinct shards.
-    /// One shard request in flight per peer — unthrottled requests queue past
-    /// the response timeout and the server uploads multi-MB responses nobody
-    /// is waiting for anymore (found live: the heal trickled at ~1 body per
-    /// 5 minutes while EU uploaded discarded 29MB responses in a loop).
-    pub last_shard_req: HashMap<PeerId, f64>,
+    /// the chain actor's outbound line to the net loop
+    pub net: tokio::sync::mpsc::UnboundedSender<ToNet>,
     /// Exponential walk-back step per peer while hunting a fork point below
     /// our head (batches whose blocks can't connect to anything we know).
     pub sync_walkback: HashMap<PeerId, u64>,
-    /// Rotating serve cursor per (peer, body) — distinct shards per response.
-    pub shard_cursor: HashMap<(PeerId, String), usize>,
+    /// Rotating serve cursor per body — repeated asks get distinct shards.
+    pub serve_shard_cursor: HashMap<String, usize>,
     /// Announced deltas whose bodies we are fetching by shards: txid ->
     /// (signed tx held until the body reconstructs, give-up deadline). Bounded.
     pub want_deltas: HashMap<String, (crate::proto::WireDeltaTx, f64)>,
@@ -434,11 +466,8 @@ impl Node {
         self.tree.blocks[&self.tree.head].height
     }
 
-    fn publish(&mut self, swarm: &mut Swarm<Behaviour>, msg: &Gossip) {
-        let bytes = serde_json::to_vec(msg).unwrap();
-        if let Err(e) = swarm.behaviour_mut().gossipsub.publish(self.topic.clone(), bytes) {
-            debug!("publish: {e}");                // e.g. no peers yet — fine
-        }
+    fn publish(&mut self, msg: &Gossip) {
+        let _ = self.net.send(ToNet::Publish(msg.clone()));
     }
 
     /// Record a txid as seen, bounding the set as an insertion-ordered ring so a
@@ -898,8 +927,7 @@ impl Node {
     // ---- installation ----------------------------------------------------
     /// Try to install a stored block (bodies from the payload store). Returns
     /// true if installed; queues it as pending when payloads are missing.
-    fn install(&mut self, sb: StoredBlock, from: Option<PeerId>,
-               swarm: &mut Swarm<Behaviour>) -> bool {
+    fn install(&mut self, sb: StoredBlock, from: Option<PeerId>) -> bool {
         let bh = sb.hash();
         if self.blocks_full.contains_key(&bh) {
             return false;
@@ -939,38 +967,15 @@ impl Node {
                 })
                 .collect();
             if !missing.is_empty() {
-                let peers: Vec<PeerId> = swarm.connected_peers().copied().collect();
-                for p in &peers {
-                    let busy = self.last_shard_req.get(p)
-                        .map(|t| now() - t < 120.0).unwrap_or(false);
-                    if !busy {
-                        self.last_shard_req.insert(*p, now());
-                        let rid = swarm.behaviour_mut().shards
-                            .send_request(p, ShardRequest { txids: missing.clone() });
-                        self.shard_req_id.insert(*p, rid);
-                    }
+                if let Some(peer) = from {
+                    let _ = self.net.send(ToNet::SendShards(peer, missing.clone()));
                 }
+                // the round refetch asks every connected peer; this is the
+                // eager first ask of the peer that sent us the block
             }
             if let Some(peer) = from {
-                // GATED like every other request site: an ungated per-block
-                // fallback floods the peer with concurrent syncs, and their
-                // interleaved responses corrupt the per-peer walk-back state
-                // (last_from no longer matches the response being processed —
-                // found live as a from=0 loop chasing tip-height orphans).
-                let inflight = self.last_sync_req.get(&peer)
-                    .map(|(t, _)| now() - t < SYNC_INFLIGHT_TIMEOUT)
-                    .unwrap_or(false);
-                if !inflight {
-                    let fh = sb.header.height.saturating_sub(1);
-                    self.last_sync_req.insert(peer, (now(), fh));
-                    let rid = swarm.behaviour_mut().sync.send_request(&peer,
-                        SyncRequest {
-                            from_height: fh,
-                            count: 32,
-                            want_genesis: false,
-                        });
-                    self.sync_req_id.insert(peer, rid);
-                }
+                let fh = sb.header.height.saturating_sub(1);
+                let _ = self.net.send(ToNet::SendSync(peer, fh));
                 self.queue_pending(bh, sb, peer);
             }
             return false;
@@ -1032,12 +1037,8 @@ impl Node {
             Err(e) => {
                 if e.0.contains("orphan") {
                     if let Some(peer) = from {
-                        let req = SyncRequest {
-                            from_height: self.head_height().saturating_sub(8),
-                            count: 64,
-                            want_genesis: false,
-                        };
-                        swarm.behaviour_mut().sync.send_request(&peer, req);
+                        let _ = self.net.send(ToNet::SendSync(
+                            peer, self.head_height().saturating_sub(8)));
                         self.queue_pending(bh, sb, peer);
                     }
                 } else {
@@ -1048,7 +1049,7 @@ impl Node {
         }
     }
 
-    fn retry_pending(&mut self, swarm: &mut Swarm<Behaviour>) {
+    fn retry_pending(&mut self) {
         let ready: Vec<String> = self.pending.iter()
             .filter(|(_, (sb, _))| {
                 sb.txs.iter().all(|t| t.to_core()
@@ -1062,7 +1063,7 @@ impl Node {
         for h in ready {
             if let Some((sb, peer)) = self.pending.remove(&h) {
                 self.pending_at.remove(&h);
-                self.install(sb, Some(peer), swarm);
+                self.install(sb, Some(peer));
             }
         }
     }
@@ -1071,6 +1072,9 @@ impl Node {
         let h = self.head_height();
         info!(height = h, head = &self.tree.head[..10],
               supply = self.tree.head_ledger().supply(), "head advanced");
+        // the net loop announces our head each round — keep its cache honest
+        let _ = self.net.send(ToNet::HeadInfo {
+            hash: self.tree.head.clone(), height: h });
         // keep the bridge synced with a sparse state diff — or, across a v1
         // GROWTH boundary, an explicit Grow message. (The old zip silently
         // TRUNCATED on a length change, which would have desynced the trainer
@@ -1456,19 +1460,64 @@ impl Node {
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
+/// THE ACTOR SPLIT. Two tasks, two owners, typed channels between them:
+///
+///  * the NET loop owns the swarm and nothing else — per-peer in-flight gates,
+///    dial/recycle, gossip mechanics, a cached head for announcements. Its
+///    worst-case pause is microseconds: it validates nothing, hashes nothing,
+///    serves nothing itself.
+///  * the CHAIN actor owns the tree, the store, the mempool, the trainer
+///    bridge and the API — every stateful decision. A stall here (snapshot
+///    fsync, a dense proposer aggregation) no longer starves the transport,
+///    which is what turned every big-payload incident into a fork.
+///
+/// The chain actor asks for network sends via ToNet; the net loop annotates
+/// inbound traffic with the transport facts only it knows (request identity,
+/// mesh silence) via ToChain.
 pub async fn run(
     mut node: Node,
     mut swarm: Swarm<Behaviour>,
-    mut api_rx: mpsc::Receiver<ApiCmd>,
-    mut bridge_rx: mpsc::Receiver<FromBridge>,
+    api_rx: mpsc::Receiver<ApiCmd>,
+    bridge_rx: mpsc::Receiver<FromBridge>,
 ) {
+    use futures::stream::FuturesUnordered;
+
     let end = if node.cfg.seconds > 0.0 { now() + node.cfg.seconds } else { f64::MAX };
-    let mut tick = tokio::time::interval(Duration::from_millis(400));
     let jitter: f64 = rand::random::<f64>() * 0.5;
-    // SIGTERM is what systemd/k8s send on stop — handle it (not just SIGINT) so
-    // the post-loop final snapshot runs and the next boot fast-boots at head.
-    // Windows has no SIGTERM; CTRL_SHUTDOWN is its analogue (sent when a service
-    // is stopped or the machine shuts down), so graceful shutdown works there too.
+    let interval = node.cfg.interval;
+    let t0 = node.t0;
+    let cfg_peers = node.cfg.peers.clone();
+    let topic = node.topic.clone();
+
+    let (net_tx, mut net_rx) = tokio::sync::mpsc::unbounded_channel::<ToNet>();
+    let (chain_tx, chain_rx) = tokio::sync::mpsc::unbounded_channel::<ToChain>();
+    node.net = net_tx;
+    let initial_head = (node.tree.head.clone(), node.head_height());
+
+    // ---- the chain actor ----
+    let chain = tokio::spawn(run_chain(node, chain_rx, api_rx, bridge_rx));
+
+    // ---- net-side state ----
+    let mut cached_head = initial_head;
+    let mut last_announced_round: i64 = -1;
+    let mut last_foreign_head = now();
+    let mut silent_rounds: u64 = 0;
+    let mut last_sync_req: HashMap<PeerId, (f64, u64)> = HashMap::new();
+    let mut sync_req_id: HashMap<PeerId, request_response::OutboundRequestId> =
+        HashMap::new();
+    let mut last_shard_req: HashMap<PeerId, f64> = HashMap::new();
+    let mut shard_req_id: HashMap<PeerId, request_response::OutboundRequestId> =
+        HashMap::new();
+
+    enum Reply {
+        Sync(request_response::ResponseChannel<SyncResponse>, Option<SyncResponse>),
+        Shards(request_response::ResponseChannel<ShardResponse>, Option<ShardResponse>),
+    }
+    let mut replies: FuturesUnordered<
+        std::pin::Pin<Box<dyn std::future::Future<Output = Reply> + Send>>,
+    > = FuturesUnordered::new();
+
+    let mut tick = tokio::time::interval(Duration::from_millis(400));
     #[cfg(unix)]
     let mut stop_signal = tokio::signal::unix::signal(
         tokio::signal::unix::SignalKind::terminate())
@@ -1476,6 +1525,22 @@ pub async fn run(
     #[cfg(windows)]
     let mut stop_signal = tokio::signal::windows::ctrl_shutdown()
         .expect("install CTRL_SHUTDOWN handler");
+
+    let send_sync = |swarm: &mut Swarm<Behaviour>,
+                     last_sync_req: &mut HashMap<PeerId, (f64, u64)>,
+                     sync_req_id: &mut HashMap<PeerId, request_response::OutboundRequestId>,
+                     peer: PeerId, from: u64| {
+        let inflight = last_sync_req.get(&peer)
+            .map(|(t, _)| now() - t < SYNC_INFLIGHT_TIMEOUT)
+            .unwrap_or(false);
+        if !inflight {
+            last_sync_req.insert(peer, (now(), from));
+            let rid = swarm.behaviour_mut().sync.send_request(&peer, SyncRequest {
+                from_height: from, count: SYNC_MAX_BLOCKS as u64,
+                want_genesis: false });
+            sync_req_id.insert(peer, rid);
+        }
+    };
 
     loop {
         if now() >= end {
@@ -1490,491 +1555,133 @@ pub async fn run(
                 info!("terminate signal — shutting down");
                 break;
             }
+            Some(reply) = replies.next() => match reply {
+                Reply::Sync(ch, Some(resp)) => {
+                    let _ = swarm.behaviour_mut().sync.send_response(ch, resp);
+                }
+                Reply::Shards(ch, Some(resp)) => {
+                    let _ = swarm.behaviour_mut().shards.send_response(ch, resp);
+                }
+                _ => {} // chain actor gone — shutting down
+            },
+            Some(cmd) = net_rx.recv() => match cmd {
+                ToNet::Publish(msg) => {
+                    let bytes = serde_json::to_vec(&msg).unwrap();
+                    if let Err(e) = swarm.behaviour_mut().gossipsub
+                        .publish(topic.clone(), bytes) {
+                        debug!("publish: {e}");
+                    }
+                }
+                ToNet::SendSync(peer, from) => {
+                    send_sync(&mut swarm, &mut last_sync_req, &mut sync_req_id,
+                              peer, from);
+                }
+                ToNet::SendShards(peer, txids) => {
+                    let busy = last_shard_req.get(&peer)
+                        .map(|t| now() - t < 120.0).unwrap_or(false);
+                    if !busy && !txids.is_empty() {
+                        last_shard_req.insert(peer, now());
+                        let rid = swarm.behaviour_mut().shards
+                            .send_request(&peer, ShardRequest { txids });
+                        shard_req_id.insert(peer, rid);
+                    }
+                }
+                ToNet::HeadInfo { hash, height } => {
+                    cached_head = (hash, height);
+                }
+            },
             _ = tick.tick() => {
-                let round = ((now() - node.t0 - jitter) / node.cfg.interval).floor() as i64;
-                if round >= 0 && round != node.last_announced_round {
-                    node.last_announced_round = round;
+                let round = ((now() - t0 - jitter) / interval).floor() as i64;
+                let elapsed_in_round = (now() - t0 - jitter) - round as f64 * interval;
+                if round >= 0 && round != last_announced_round {
+                    last_announced_round = round;
                     // the self-healing heartbeat: announce our head every round
-                    let head_msg = Gossip::Head {
-                        hash: node.tree.head.clone(),
-                        height: node.head_height(),
-                    };
-                    node.publish(&mut swarm, &head_msg);
+                    let bytes = serde_json::to_vec(&Gossip::Head {
+                        hash: cached_head.0.clone(),
+                        height: cached_head.1,
+                    }).unwrap();
+                    let _ = swarm.behaviour_mut().gossipsub
+                        .publish(topic.clone(), bytes);
                     // …and re-dial configured peers when connections are lost
-                    // (restarts on either side otherwise orphan the mesh forever)
-                    let expected = node.cfg.peers.split(',')
+                    let expected = cfg_peers.split(',')
                         .filter(|s| !s.is_empty()).count();
                     if swarm.network_info().num_peers() < expected {
-                        dial_peers(&mut swarm, &node.cfg.peers.clone());
+                        dial_peers(&mut swarm, &cfg_peers);
                     }
-                    // truth-sync the peer gauge: the manual +1/-1 accounting
-                    // drifted upward under connection churn (a public page once
-                    // showed 251 "peers" on a 4-node network)
-                    node.peers_connected = swarm.network_info().num_peers();
-                    // BODY REFETCH: every round, re-ask connected peers for the
-                    // shards of (a) bodies that pending blocks are stuck on and
-                    // (b) announced deltas still wanted. One shard-request per
-                    // peer per round is cheap; responses are byte-budgeted.
-                    node.want_deltas.retain(|_, (_, dl)| *dl > now());
-                    // LOWEST BLOCK FIRST: application is strictly bottom-up, so
-                    // fetching in txid order stalls the head until the lowest
-                    // body happens to arrive (found live on the fresh rejoin)
-                    let mut by_h: Vec<(u64, String)> = node.pending.values()
-                        .flat_map(|(sb, _)| sb.txs.iter()
-                            .filter_map(|t| t.to_core().map(|tc|
-                                (sb.header.height, tc.txid()))))
-                        .filter(|(_, id)| !node.payloads.contains_key(id)
-                                && !node.store.has_payload(id))
-                        .collect();
-                    by_h.sort();
-                    let mut seen_ids = HashSet::new();
-                    let mut want: Vec<String> = by_h.into_iter()
-                        .filter(|(_, id)| seen_ids.insert(id.clone()))
-                        .map(|(_, id)| id).collect();
-                    want.extend(node.want_deltas.keys().cloned());
-                    want.truncate(32);
-                    if !want.is_empty() {
-                        let ps: Vec<PeerId> =
-                            swarm.connected_peers().copied().collect();
-                        let mut sent = 0;
-                        for p in ps {
-                            let busy = node.last_shard_req.get(&p)
-                                .map(|t| now() - t < 120.0).unwrap_or(false);
-                            if !busy {
-                                node.last_shard_req.insert(p, now());
-                                let rid = swarm.behaviour_mut().shards
-                                    .send_request(&p,
-                                        ShardRequest { txids: want.clone() });
-                                node.shard_req_id.insert(p, rid);
-                                sent += 1;
-                            }
-                        }
-                        if sent > 0 {
-                            info!(bodies = want.len(), peers = sent,
-                                  "refetching missing delta bodies by shards");
-                        }
-                    }
-                    // MESH-BLINDNESS HEAL: peers are connected but no foreign
-                    // head has been heard for 2+ rounds — the gossipsub mesh
-                    // may not have (re)grafted after churn. PULL directly over
-                    // request-response sync from every connected peer
-                    // (throttled per peer); fork choice reconciles from there.
+                    // MESH-BLINDNESS + STALE-TRANSPORT RECYCLING (net-owned:
+                    // it is a statement about connections, not the chain)
                     let connected: Vec<PeerId> =
                         swarm.connected_peers().copied().collect();
+                    let mut mesh_blind = false;
                     if !connected.is_empty()
-                        && now() - node.last_foreign_head > 2.0 * node.cfg.interval {
-                        node.silent_rounds += 1;
-                        // CONNECTION RECYCLING: three silent rounds means the
-                        // "connections" themselves are suspect — a SIGKILLed
-                        // peer's QUIC connection lingers looking healthy under
-                        // the SAME PeerId as its restarted successor, and both
-                        // gossip and our sync pulls can be routed onto the
-                        // corpse (requests vanish, the in-flight throttle
-                        // re-arms, and the partition looks permanent). Force
-                        // fresh transport: drop every connection and redial.
-                        // only a node with configured peers can recycle — a
-                        // seed/anchor (inbound-only) must never drop watchers
-                        // it has no way to redial.
-                        if node.silent_rounds >= 3 && !node.cfg.peers.is_empty() {
-                            warn!(rounds = node.silent_rounds,
+                        && now() - last_foreign_head > 2.0 * interval {
+                        silent_rounds += 1;
+                        if silent_rounds >= 3 && !cfg_peers.is_empty() {
+                            warn!(rounds = silent_rounds,
                                   "no foreign heads for 3+ rounds — recycling \
                                    peer connections (stale-transport heal)");
                             for p in &connected {
                                 let _ = swarm.disconnect_peer_id(*p);
                             }
-                            node.last_sync_req.clear();
-                            node.silent_rounds = 0;
-                            dial_peers(&mut swarm, &node.cfg.peers.clone());
+                            last_sync_req.clear();
+                            sync_req_id.clear();
+                            silent_rounds = 0;
+                            dial_peers(&mut swarm, &cfg_peers);
                         } else {
-                            let anchor = node.head_height().saturating_sub(8);
-                            for p in connected {
-                                let inflight = node.last_sync_req.get(&p)
-                                    .map(|(t, _)| now() - t < SYNC_INFLIGHT_TIMEOUT)
-                                    .unwrap_or(false);
-                                if !inflight {
-                                    // a set cursor OVERRIDES the anchor: it may
-                                    // point BELOW our head while hunting a fork
-                                    // point (walk-back), or above it (overlap
-                                    // advance) — either way it is the search
-                                    // state, not a floor
-                                    let from = node.sync_cursor.get(&p).copied()
-                                        .unwrap_or(anchor);
-                                    node.last_sync_req.insert(p, (now(), from));
-                                    info!(peer = %p, from,
-                                          "no foreign heads heard — direct sync pull");
-                                    let rid = swarm.behaviour_mut().sync.send_request(&p,
-                                        SyncRequest { from_height: from, count: 64,
-                                                      want_genesis: false });
-                                    node.sync_req_id.insert(p, rid);
-                                }
-                            }
+                            mesh_blind = true;
                         }
-                    } else {
-                        node.silent_rounds = 0;
+                    } else if now() - last_foreign_head <= 2.0 * interval {
+                        silent_rounds = 0;
                     }
-                }
-                if node.cfg.produce && round >= 0 && round != node.last_trained_round {
-                    node.last_trained_round = round;
-                    // republish unconfirmed deltas for the current height: a
-                    // publish can silently fail before the gossip mesh forms
-                    // (InsufficientPeers), so retry each round until included
-                    let hh = node.head_height();
-                    let resend: Vec<(WireDeltaTx, Payload)> = node.delta_pool.values()
-                        .filter(|t| t.base_height == hh)
-                        .filter_map(|t| node.payloads.get(&t.txid())
-                            .map(|p| (WireDeltaTx::from_core(t), p.clone())))
-                        .collect();
-                    for (tx, payload) in resend {
-                        // over the inline cap: announce (empty payload) — the
-                        // body travels by shards; inline gossip above 64MB is
-                        // silently dropped by the mesh, which forked the net
-                        let payload = if payload.wire_bytes() > dtx_inline_max() {
-                            Payload { n: payload.n, idx: String::new(), val: String::new() }
-                        } else { payload };
-                        node.publish(&mut swarm, &Gossip::Dtx { tx, payload });
-                    }
-                    // train EVERY round (the delta gossips to whoever proposes)
-                    if node.bridge_synced && !node.train_inflight {
-                        node.train_inflight = true;
-                        node.train_deadline = now() + TRAIN_TIMEOUT_SECS;
-                        let model = &node.tree.model[&node.tree.head];
-                        let active_pages: Vec<u32> = model.pages.iter().enumerate()
-                            .filter(|(_, p)| p.status == "A")
-                            .map(|(i, _)| i as u32).collect();
-                        // v2: the trainer plans its CLAIM under the envelope —
-                        // budget params = delta_max_nnz * 1e6 / quota — so
-                        // min_nnz here is the floor for the WHOLE model only
-                        // when it fits the budget; the bridge recomputes the
-                        // real floor for the pages it actually claims.
-                        let min_nnz = model.required_nnz(&active_pages);
-                        let _ = node.bridge_tx.try_send(ToBridge::Train {
-                            height: node.head_height(),
-                            seed: round as u64,
-                            // spend at most ~60% of the round on inner steps:
-                            // the rest covers compression, scoring/sketching and
-                            // gossip, so the delta lands while it's still
-                            // includable rather than arriving stale.
-                            budget_s: node.cfg.interval * 0.6,
-                            min_nnz,
-                            max_nnz: node.tree.params.delta_max_nnz,
-                            quota_4dp: model.quota_4dp as u64,
-                            active_pages,
-                        });
-                    }
-                }
-                // v1 PROPOSING (replaces devnet rotation): checked EVERY tick,
-                // once per round — the eligibility ladder widens with time
-                // inside the round (attempt a usable after a·interval/8 s of
-                // politeness), so a prompt eligible proposer publishes early
-                // and dominates fork choice, while ATTEMPT_MAX guarantees a
-                // 2-miner fleet can never stall.
-                if node.cfg.produce && round >= 0 && round != node.last_proposed_round {
-                    let elapsed_in_round =
-                        (now() - node.t0 - jitter) - round as f64 * node.cfg.interval;
-                    // PER-MINER PHASE OFFSET (producer behavior, not consensus):
-                    // with every miner proposing at the same instant, every
-                    // round is a same-height tie, and at envelope-size bodies
-                    // the tie-loser can't fetch the winner before the NEXT tie
-                    // lands — forks deepen past the prune window (found live,
-                    // twice). A deterministic 0..interval/4 stagger from the
-                    // miner's pubkey makes ties the exception again.
-                    let phase = {
-                        let h = core::delta_hash(node.key.pub_hex().as_bytes());
-                        (u64::from_str_radix(&h[..8], 16).unwrap_or(0) % 1000)
-                            as f64 / 1000.0 * (node.cfg.interval / 4.0)
-                    };
-                    if elapsed_in_round < phase {
-                        continue;
-                    }
-                    let max_allowed =
-                        (elapsed_in_round / (node.cfg.interval / 8.0)).floor()
-                            .max(0.0) as u64;
-                    if let Some(attempt) = node.eligible_attempt(max_allowed) {
-                        node.last_proposed_round = round;
-                        if let Some((stored, block)) = node.build_candidate(attempt) {
-                            let bh = stored.hash();
-                            match node.tree.add_block(block) {
-                                Ok(_) => {
-                                    // durability: never gossip a block we didn't persist
-                                    if let Err(e) = node.store.append_block(&stored) {
-                                        error!("FATAL: cannot persist our block h{}: {e}; \
-                                                halting", stored.header.height);
-                                        std::process::exit(1);
-                                    }
-                                    for t in &stored.txs {
-                                        if let Some(tc) = t.to_core() {
-                                            let id = tc.txid();
-                                            node.delta_pool.remove(&id);
-                                            node.delta_scores.remove(&id);
-                                            node.delta_sketches.remove(&id);
-                                        }
-                                    }
-                                    for v in stored.transfers.iter()
-                                            .chain(stored.data_txs.iter()) {
-                                        if let Some(t) = account_tx_from_json(v) {
-                                            node.account_pool.remove(&t.txid());
-                                        }
-                                    }
-                                    node.blocks_full.insert(bh, stored.clone());
-                                    let old = stored.header.prev_hash.clone();
-                                    node.on_head_advance(&old);
-                                    node.publish(&mut swarm, &Gossip::Blk { block: stored });
-                                }
-                                Err(e) => warn!("own block rejected: {}", e.0),
-                            }
-                        }
-                    }
-                }
-                // WATCHDOG: a hung trainer must not silence the node forever
-                if node.train_inflight && now() > node.train_deadline {
-                    warn!("training round timed out after {TRAIN_TIMEOUT_SECS}s — \
-                           clearing in-flight flag and resuming");
-                    node.train_inflight = false;
+                    let _ = chain_tx.send(ToChain::RoundTick {
+                        round, elapsed_in_round,
+                        num_peers: swarm.network_info().num_peers(),
+                        connected: connected.clone(),
+                        mesh_blind,
+                    });
+                } else if round >= 0 {
+                    // sub-round ticks still drive the chain (training watchdog,
+                    // proposal politeness ladder)
+                    let _ = chain_tx.send(ToChain::RoundTick {
+                        round, elapsed_in_round,
+                        num_peers: swarm.network_info().num_peers(),
+                        connected: swarm.connected_peers().copied().collect(),
+                        mesh_blind: false,
+                    });
                 }
             }
-            Some(ev) = bridge_rx.recv() => match ev {
-                FromBridge::Connected | FromBridge::NeedState => {
-                    node.train_inflight = false;
-                    node.chat_inflight = false;
-                    for tx in node.chat_pending.drain(..) {
-                        let _ = tx.send(json!({"ok": false,
-                            "error": "model reconnected — try again"}));
-                    }
-                    node.send_bridge_state();
-                }
-                FromBridge::Generated { text, height } => {
-                    node.chat_inflight = false;
-                    if let Some(tx) = node.chat_pending.pop() {
-                        let _ = tx.send(json!({"ok": true, "reply": text,
-                                               "height": height}));
-                    }
-                }
-                FromBridge::Scores { height, scores, sketches } => {
-                    // rev 7/8: cache our trainer's held-out scores + influence
-                    // sketches for pool deltas; build_candidate commits them.
-                    // Clamped/shaped; only for deltas we still hold (stale
-                    // responses no-op harmlessly).
-                    if height == node.head_height() {
-                        for (txid, s) in scores {
-                            if node.delta_pool.contains_key(&txid) {
-                                node.delta_scores.insert(
-                                    txid, s.min(core::blocktree::SCORE_CAP));
-                            }
-                        }
-                        for (txid, mut sk) in sketches {
-                            if node.delta_pool.contains_key(&txid) {
-                                sk.resize(core::blocktree::SKETCH_DIM, 0);
-                                node.delta_sketches.insert(txid, sk);
-                            }
-                        }
-                    }
-                }
-                FromBridge::Delta { height, loss, pages, payload } => {
-                    node.train_inflight = false;
-                    if height != node.head_height() {
-                        // A delta is includable only at base_height == head, so a
-                        // trainer slower than the block interval produces deltas
-                        // that are ALWAYS stale — it mines forever and earns
-                        // nothing. This used to be debug!, i.e. an invisible
-                        // failure: the operator saw "trained, loss …" and no
-                        // rewards, with no explanation. Say it loudly, and say
-                        // what to do about it.
-                        node.stale_deltas += 1;
-                        warn!(trained_at = height, head = node.head_height(),
-                              consecutive = node.stale_deltas,
-                              "DELTA DROPPED (stale): your training round finished \
-                               after the head moved on, so it cannot be included \
-                               and earns nothing. Your GPU is slower than the \
-                               block interval — lower --inner/--batch on the \
-                               trainer (or raise the node's --interval).");
-                    } else {
-                        node.stale_deltas = 0;
-                        let dense = payload.dense().unwrap_or_default();
-                        let dh = core::delta_hash(&core::int64_bytes(&dense));
-                        // v1: canonicalize the trainer's claim set (sorted,
-                        // deduped) — the signed tx must carry the exact form
-                        // validation requires.
-                        let mut claim: Vec<u32> = pages.clone();
-                        claim.sort_unstable();
-                        claim.dedup();
-                        let mut tx = core::BackpropTx {
-                            miner: node.key.pub_hex(),
-                            base_height: height,
-                            delta_hash: dh.clone(),
-                            da_pointer: format!("da://{dh}"),
-                            bond: 0, // bootstrap: no bond; a bonded-miner policy is config
-                            pages: claim,
-                            // rev 5: name the staked corpora this miner trains on so
-                            // the delta is provenanced and the data share pays their owners
-                            data_refs: node.cfg.data_refs.clone(),
-                            sig: vec![],
-                        };
-                        tx.sig = node.key.sign(&tx.signing_bytes());
-                        info!(height, loss, kb = payload.wire_bytes() / 1024,
-                              "trained delta");
-                        let wire = WireDeltaTx::from_core(&tx);
-                        if node.accept_delta(tx, payload.clone()) {
-                            let payload = if payload.wire_bytes() > dtx_inline_max() {
-                                Payload { n: payload.n, idx: String::new(), val: String::new() }
-                            } else { payload };
-                            node.publish(&mut swarm,
-                                         &Gossip::Dtx { tx: wire, payload });
-                        }
-                    }
-                }
-            },
-            Some(cmd) = api_rx.recv() => match cmd {
-                ApiCmd::Status(o) => { let _ = o.send(node.api_status()); }
-                ApiCmd::Metrics(o) => { let _ = o.send(node.api_metrics()); }
-                ApiCmd::Balance(addr, o) => { let _ = o.send(node.api_balance(&addr)); }
-                ApiCmd::Registry(o) => { let _ = o.send(node.api_registry()); }
-                ApiCmd::Chain(o) => { let _ = o.send(node.api_chain()); }
-                ApiCmd::Miners(o) => { let _ = o.send(node.api_miners()); }
-                ApiCmd::Chat(prompt, o) => {
-                    if !node.bridge_synced {
-                        let _ = o.send(json!({"ok": false,
-                            "error": "no model attached to this node yet"}));
-                    } else if node.chat_inflight {
-                        let _ = o.send(json!({"ok": false,
-                            "error": "model is generating for someone else — try again"}));
-                    } else {
-                        node.chat_inflight = true;
-                        node.chat_pending.push(o);
-                        let _ = node.bridge_tx.try_send(ToBridge::Generate {
-                            prompt, n: 120,
-                        });
-                    }
-                }
-                ApiCmd::Upload(bytes, stake, media, o) => {
-                    let (reply, gossip) = node.api_upload(bytes, stake, media);
-                    if let Some(msg) = gossip {
-                        node.publish(&mut swarm, &msg);
-                    }
-                    let _ = o.send(reply);
-                }
-                ApiCmd::SubmitAccountTx(v, o) => {
-                    let reply = match account_tx_from_json(&v) {
-                        None => json!({"ok": false, "error": "malformed tx"}),
-                        Some(tx) => match node.accept_account_tx(tx.clone()) {
-                            None => json!({"ok": false,
-                                           "error": "bad signature or duplicate"}),
-                            Some(txid) => {
-                                node.publish(&mut swarm,
-                                             &Gossip::Atx { tx: account_tx_to_json(&tx) });
-                                json!({"ok": true, "txid": txid,
-                                       "status": "in mempool — settles in the next block"})
-                            }
-                        },
-                    };
-                    let _ = o.send(reply);
-                }
-            },
-            ev = swarm.select_next_some() => match ev {
+            event = swarm.select_next_some() => match event {
                 SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(
-                        gossipsub::Event::Message { message, propagation_source, .. })) => {
-                    if let Ok(g) = serde_json::from_slice::<Gossip>(&message.data) {
-                        match g {
+                        gossipsub::Event::Message { propagation_source, message, .. })) => {
+                    if let Ok(msg) = serde_json::from_slice::<Gossip>(&message.data) {
+                        match msg {
                             Gossip::Dtx { tx, payload } => {
-                                if let Some(t) = tx.to_core() {
-                                    let empty = payload.idx.is_empty()
-                                        && payload.val.is_empty();
-                                    if !empty {
-                                        node.accept_delta(t, payload);
-                                    } else {
-                                        // announcement of a body too big to
-                                        // gossip inline: reconstruct from
-                                        // shards we hold, or start fetching
-                                        let txid = t.txid();
-                                        if let Some(p) = node.payloads.get(&txid)
-                                            .cloned()
-                                            .or_else(|| node.store
-                                                .reconstruct_payload(&txid)) {
-                                            node.payloads
-                                                .insert(txid.clone(), p.clone());
-                                            node.accept_delta(t, p);
-                                        } else if node.want_deltas.len() < 64
-                                            && !node.want_deltas
-                                                .contains_key(&txid) {
-                                            info!(txid = &txid[..12],
-                                                  "big delta announced — \
-                                                   fetching body by shards");
-                                            node.want_deltas.insert(txid.clone(),
-                                                (tx, now() + WANT_DELTA_TTL));
-                                            let peers: Vec<PeerId> = swarm
-                                                .connected_peers().copied()
-                                                .collect();
-                                            for p in peers {
-                                                let busy = node.last_shard_req.get(&p)
-                                                    .map(|t| now() - t < 120.0)
-                                                    .unwrap_or(false);
-                                                if !busy {
-                                                    node.last_shard_req.insert(p, now());
-                                                    let rid = swarm.behaviour_mut()
-                                                        .shards
-                                                        .send_request(&p, ShardRequest {
-                                                            txids: vec![txid.clone()] });
-                                                    node.shard_req_id.insert(p, rid);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    node.retry_pending(&mut swarm);
-                                }
+                                let _ = chain_tx.send(ToChain::Dtx(
+                                    tx, payload, Some(propagation_source)));
                             }
                             Gossip::Atx { tx } => {
-                                if let Some(t) = account_tx_from_json(&tx) {
-                                    node.accept_account_tx(t);
-                                }
+                                let _ = chain_tx.send(ToChain::Atx(tx));
                             }
                             Gossip::Blk { block } => {
-                                node.install(block, Some(propagation_source), &mut swarm);
-                                node.retry_pending(&mut swarm);
+                                let _ = chain_tx.send(ToChain::Blk(
+                                    block, Some(propagation_source)));
                             }
                             Gossip::Head { hash, height } => {
-                                node.last_foreign_head = now();
-                                node.silent_rounds = 0;
-                                // unknown head -> pull the sender's recent chain,
-                                // BUT at most one in-flight catch-up per peer per
-                                // 90s — payload batches are tens of MB and stacked
-                                // transfers saturate home uplinks without landing
-                                // one request in flight per peer; re-request as
-                                // soon as the last response landed (last_sync_req
-                                // is cleared on receipt) or after a lost-response
-                                // timeout — so a lagging node keeps catching up.
-                                let inflight = node.last_sync_req
-                                    .get(&propagation_source)
-                                    .map(|(t, _)| now() - t < SYNC_INFLIGHT_TIMEOUT)
-                                    .unwrap_or(false);
-                                if !node.tree.blocks.contains_key(&hash) && !inflight {
-                                    let from = node.sync_cursor
-                                        .get(&propagation_source).copied()
-                                        .unwrap_or_else(|| node.head_height()
-                                            .min(height).saturating_sub(2));
-                                    node.last_sync_req
-                                        .insert(propagation_source, (now(), from));
-                                    info!(peer = %propagation_source, their_h = height,
-                                          from, "unknown head — requesting sync");
-                                    let req = SyncRequest {
-                                        from_height: from, count: SYNC_MAX_BLOCKS as u64,
-                                        want_genesis: false };
-                                    let rid = swarm.behaviour_mut().sync
-                                        .send_request(&propagation_source, req);
-                                    node.sync_req_id
-                                        .insert(propagation_source, rid);
-                                }
+                                last_foreign_head = now();
+                                silent_rounds = 0;
+                                let _ = chain_tx.send(ToChain::Head {
+                                    peer: propagation_source, hash, height });
                             }
                         }
                     }
                 }
-                // failures were silently swallowed by the catch-all — a dead
-                // transfer looked identical to a healthy quiet mesh
                 SwarmEvent::Behaviour(BehaviourEvent::Sync(
                         request_response::Event::OutboundFailure {
                             peer, error, request_id, .. })) => {
-                    if node.sync_req_id.get(&peer) == Some(&request_id) {
+                    if sync_req_id.get(&peer) == Some(&request_id) {
                         warn!(%peer, %error, "sync request failed");
-                        node.sync_req_id.remove(&peer);
-                        node.last_sync_req.remove(&peer);
+                        sync_req_id.remove(&peer);
+                        last_sync_req.remove(&peer);
                     }
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Sync(
@@ -1985,238 +1692,37 @@ pub async fn run(
                         request_response::Event::Message { peer, message, .. })) => {
                     match message {
                         request_response::Message::Request { request, channel, .. } => {
-                            // serve OUR head chain from `from_height` upward,
-                            // oldest-first, bounded by SYNC_BYTE_BUDGET (always at
-                            // least one block, so progress is guaranteed).
-                            let mut ascending: Vec<String> = Vec::new();
-                            let mut cur = node.tree.head.clone();
-                            while cur != node.tree.genesis_hash {
-                                let hdr = &node.tree.blocks[&cur];
-                                if hdr.height < request.from_height {
-                                    break;
-                                }
-                                ascending.push(cur.clone());
-                                cur = hdr.prev_hash.clone();
-                            }
-                            ascending.reverse();
-                            let want = (request.count as usize).min(SYNC_MAX_BLOCKS);
-                            let mut chain = Vec::new();
-                            let mut payloads = HashMap::new();
-                            let mut bytes = 0usize;
-                            for h in ascending {
-                                if chain.len() >= want {
-                                    break;
-                                }
-                                let Some(sb) = node.blocks_full.get(&h).cloned() else { continue };
-                                for t in &sb.txs {
-                                    if let Some(tc) = t.to_core() {
-                                        let txid = tc.txid();
-                                        if let Some(p) = node.payloads.get(&txid).cloned()
-                                            .or_else(|| node.store.get_payload(&txid)) {
-                                            // an oversized body would blow the
-                                            // response cap — ship the block, let
-                                            // the requester shard-fetch the body
-                                            if p.wire_bytes() > dtx_inline_max() {
-                                                continue;
-                                            }
-                                            bytes += p.wire_bytes();
-                                            payloads.insert(txid, p);
-                                        }
-                                    }
-                                }
-                                chain.push(sb);
-                                if bytes >= SYNC_BYTE_BUDGET {
-                                    break; // packed a budget's worth (>=1 block sent)
-                                }
-                            }
-                            info!(from = request.from_height, served = chain.len(),
-                                  kb = bytes / 1024, "serving sync request");
-                            // a fresh node bootstraps the genesis from us — the
-                            // shared trust anchor, self-verified by the requester
-                            // against the published genesis id.
-                            // Serving the genesis is only possible when it fits
-                            // the response cap: JSON-encoded i64s are ~6-10
-                            // bytes each, so a ~650MB production genesis blows
-                            // past SYNC_RESP_MAX and the requester would just
-                            // time out. Refuse loudly instead of blackholing —
-                            // the requester's error tells them to generate it
-                            // locally (it's deterministic).
-                            let genesis = if request.want_genesis {
-                                let g = node.tree.genesis_state();
-                                match g {
-                                    Some(w) if w.len() * 8 <= SYNC_BYTE_BUDGET =>
-                                        Some(w.clone()),
-                                    Some(w) => {
-                                        warn!(params = w.len(),
-                                              "peer asked for the genesis but it is \
-                                               too large to serve over sync; they \
-                                               must generate it locally from the \
-                                               published seed");
-                                        None
-                                    }
-                                    None => None,
-                                }
-                            } else {
-                                None
-                            };
-                            let resp = SyncResponse {
-                                blocks: chain, payloads,
-                                head_height: node.head_height(),
-                                genesis,
-                            };
-                            let _ = swarm.behaviour_mut().sync
-                                .send_response(channel, resp);
+                            let (otx, orx) = tokio::sync::oneshot::channel();
+                            let _ = chain_tx.send(ToChain::SyncServe(request, otx));
+                            replies.push(Box::pin(async move {
+                                Reply::Sync(channel, orx.await.ok())
+                            }));
                         }
                         request_response::Message::Response {
                                 response, request_id, .. } => {
-                            // stale response (its request already timed out and
-                            // was replaced): TAKE THE DATA, but leave the gate,
-                            // cursor and re-request logic alone — a stale clear
-                            // is what multiplied in-flight requests (found live)
-                            let current = node.sync_req_id.get(&peer)
+                            let current = sync_req_id.get(&peer)
                                 == Some(&request_id);
-                            info!(blocks = response.blocks.len(),
-                                  their_head = response.head_height,
-                                  current, "sync response received");
-                            for (txid, p) in response.payloads {
-                                if !node.payloads.contains_key(&txid) {
-                                    node.store.put_payload(&txid, &p);
-                                    node.payloads.insert(txid, p);
-                                }
-                            }
-            let served = response.blocks.len() as u64;
-                            let batch_hashes: HashSet<String> = response.blocks
-                                .iter().map(|sb| sb.hash()).collect();
-                            let batch_blocks = response.blocks.clone();
-                            // "learned" must count blocks parked as PENDING
-                            // (payload not yet fetched) — they are new knowledge.
-                            // Counting only applied blocks made a pending-wedged
-                            // node advance its cursor past the peer's real head,
-                            // after which sync pulled nothing at all (found live
-                            // during the quota-fork incident).
-                            let known_before =
-                                node.tree.blocks.len() + node.pending.len();
-                            for sb in response.blocks {
-                                // attribute to the responding peer: a block whose
-                                // body is missing then PARKS as pending (and the
-                                // refetch machinery drains it) instead of being
-                                // dropped to wait for a whole re-serve cycle
-                                node.install(sb, Some(peer), &mut swarm);
-                            }
-                            node.retry_pending(&mut swarm);
-                            let learned = node.tree.blocks.len()
-                                + node.pending.len() > known_before;
-                            // clear the in-flight marker so the next Head from this
-                            // peer immediately pulls the next batch (continuous
-                            // catch-up instead of one batch per throttle window)
-                            let last_from = if current {
-                                node.sync_req_id.remove(&peer);
-                                node.last_sync_req.remove(&peer)
-                                    .map(|(_, f)| f)
-                            } else { None };
-                            let behind = response.head_height > node.head_height();
-                            if !current {
-                                // data absorbed; a fresh request may already be
-                                // in flight — do not touch cursor or re-request
-                                node.retry_pending(&mut swarm);
-                                continue;
-                            }
-                            // "orphaned": some served block's parent is nowhere
-                            // — not applied, not pending, not in this batch. Its
-                            // ancestors are missing, so the fork point is below
-                            // the request window. Height comparisons are USELESS
-                            // here: an equal-length rival fork orphans at the
-                            // same heights we already have (found live — the
-                            // CUDA miner pulled the rival tip forever). Parking
-                            // orphans as pending counts as "learned", so this
-                            // must be tested FIRST.
-                            let orphan_block = batch_blocks.iter().find(|sb| {
-                                let par = &sb.header.prev_hash;
-                                sb.header.height > 0
-                                    // the genesis has no header entry — block 1
-                                    // ALWAYS looked orphaned, wedging the
-                                    // walk-back at from=0 forever (found live)
-                                    && par != &node.tree.genesis_hash
-                                    && !node.tree.blocks.contains_key(par)
-                                    && !node.pending.contains_key(par)
-                                    && !batch_hashes.contains(par)
+                            let from = if current {
+                                sync_req_id.remove(&peer);
+                                last_sync_req.remove(&peer).map(|(_, f)| f)
+                                    .unwrap_or(0)
+                            } else { 0 };
+                            let _ = chain_tx.send(ToChain::SyncBatch {
+                                peer, current, from,
+                                blocks: response.blocks,
+                                payloads: response.payloads,
+                                their_head: response.head_height,
                             });
-                            let orphaned = orphan_block.is_some();
-                            if orphaned && served > 0 {
-                                // the batch floats ABOVE anything we can connect
-                                // to: the peer is on a fork whose divergence
-                                // point is BELOW our head. Walk the request
-                                // start back exponentially until batches
-                                // connect (found live: an anchor pinned its
-                                // cursor at a fork's TIP and pulled orphans
-                                // forever).
-                                let base = last_from
-                                    .unwrap_or_else(|| node.head_height());
-                                let step = node.sync_walkback.entry(peer)
-                                    .or_insert(4);
-                                let cur = base.saturating_sub(*step);
-                                *step = (*step * 2).min(4096);
-                                node.sync_cursor.insert(peer, cur);
-                                warn!(peer = %peer, from = cur,
-                                      orphan_h = orphan_block
-                                          .map(|sb| sb.header.height)
-                                          .unwrap_or(0),
-                                      "sync batch unconnectable — walking back \
-                                       to find the fork point");
-                            } else if learned {
-                                // real progress (or a reorg branch that actually
-                                // connects): the overlap anchor is safe again
-                                node.sync_cursor.remove(&peer);
-                                node.sync_walkback.remove(&peer);
-                            } else if behind && served > 0 {
-                                // the peer is ahead but the whole batch was blocks
-                                // we already had: the byte-budgeted window is stuck
-                                // inside the reorg margin. Jump past what was served
-                                // or the loop repeats forever. CLAMPED to the peer's
-                                // head — past it, requests return nothing, forever.
-                                if let Some(f) = last_from {
-                                    let cur = (f + served)
-                                        .min(response.head_height);
-                                    node.sync_cursor.insert(peer, cur);
-                                    warn!(peer = %peer, cursor = cur,
-                                          their_head = response.head_height,
-                                          "sync batch taught nothing — advancing \
-                                           request cursor past the overlap");
-                                }
-                            }
-                            // still behind after a batch that MOVED something
-                            // (new blocks, or a strictly advanced cursor): pull
-                            // the next window NOW instead of waiting for the next
-                            // Head announcement. Gating on movement stops a
-                            // pending-wedged node from hammering the peer in a
-                            // tight request loop.
-                            let cursor_now = node.sync_cursor.get(&peer).copied();
-                            let moved = learned
-                                || (cursor_now.is_some()
-                                    && cursor_now != last_from);
-                            if (behind || orphaned) && served > 0 && moved {
-                                let from = cursor_now.unwrap_or_else(||
-                                    node.head_height()
-                                        .min(response.head_height)
-                                        .saturating_sub(2));
-                                node.last_sync_req.insert(peer, (now(), from));
-                                let rid = swarm.behaviour_mut().sync
-                                    .send_request(&peer,
-                                    SyncRequest { from_height: from,
-                                                  count: SYNC_MAX_BLOCKS as u64,
-                                                  want_genesis: false });
-                                node.sync_req_id.insert(peer, rid);
-                            }
                         }
                     }
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Shards(
                         request_response::Event::OutboundFailure {
                             peer, error, request_id, .. })) => {
-                    if node.shard_req_id.get(&peer) == Some(&request_id) {
+                    if shard_req_id.get(&peer) == Some(&request_id) {
                         warn!(%peer, %error, "shard request failed");
-                        node.shard_req_id.remove(&peer);
-                        node.last_shard_req.remove(&peer);
+                        shard_req_id.remove(&peer);
+                        last_shard_req.remove(&peer);
                     }
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Shards(
@@ -2224,147 +1730,25 @@ pub async fn run(
                     warn!(%peer, %error, "shard response delivery failed");
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Shards(
-                        request_response::Event::Message { message, peer, .. })) => {
+                        request_response::Event::Message { peer, message, .. })) => {
                     match message {
-                        // Serve shards for the requested bodies, BYTE-BUDGETED.
-                        // The old path b64-encoded every shard of every body into
-                        // one response; at retarget-window quotas a single delta
-                        // body is ~92MB, so the full shard set blew the response
-                        // cap and the transfer silently died — which forked the
-                        // live network at the first quota rise. Now: a rotating
-                        // per-(peer, body) cursor hands out distinct shards a
-                        // budget at a time (the pattern the genesis path already
-                        // used), so a requester asking repeatedly reconstructs
-                        // ANY size body from bounded responses. At least one
-                        // shard is always served, so progress is guaranteed.
                         request_response::Message::Request { request, channel, .. } => {
-                            let mut bodies = Vec::new();
-                            let mut budget_used = 0usize;
-                            for txid in request.txids.iter().take(32) {
-                                if budget_used >= SHARD_SERVE_BUDGET {
-                                    break;
-                                }
-                                let Some((k, n, orig_len)) = node.store.shard_meta(txid)
-                                    else { continue };
-                                let have = node.store.list_shard_indices(txid);
-                                if have.is_empty() {
-                                    continue;
-                                }
-                                let cur = node.shard_cursor
-                                    .entry((peer, txid.clone())).or_insert(0);
-                                let mut shards: Vec<(u32, String)> = Vec::new();
-                                for step in 0..have.len() {
-                                    if budget_used >= SHARD_SERVE_BUDGET
-                                        && !shards.is_empty() {
-                                        break;
-                                    }
-                                    let pick = have[(*cur + step) % have.len()];
-                                    if let Some(d) = node.store.read_shard(txid, pick) {
-                                        budget_used += d.len() * 4 / 3; // b64 size
-                                        shards.push((pick, b64(&d)));
-                                    }
-                                }
-                                *cur = (*cur + shards.len().max(1)) % have.len().max(1);
-                                if !shards.is_empty() {
-                                    bodies.push(BodyShards {
-                                        txid: txid.clone(), k: k as u32, n: n as u32,
-                                        orig_len, shards });
-                                }
-                            }
-                            info!(asked = request.txids.len(),
-                                  served = bodies.len(),
-                                  kb = budget_used / 1024, "serving shard request");
-                            let _ = swarm.behaviour_mut().shards
-                                .send_response(channel, ShardResponse { bodies });
+                            let (otx, orx) = tokio::sync::oneshot::channel();
+                            let _ = chain_tx.send(ToChain::ShardServe(request, otx));
+                            replies.push(Box::pin(async move {
+                                Reply::Shards(channel, orx.await.ok())
+                            }));
                         }
-                        // store fetched shards; reconstruct any body now >= K
                         request_response::Message::Response {
                                 response, request_id, .. } => {
-                            let current = node.shard_req_id.get(&peer)
+                            let current = shard_req_id.get(&peer)
                                 == Some(&request_id);
                             if current {
-                                node.shard_req_id.remove(&peer);
-                                node.last_shard_req.remove(&peer);
+                                shard_req_id.remove(&peer);
+                                last_shard_req.remove(&peer);
                             }
-                            let mut got = false;
-                            info!(bodies = response.bodies.len(),
-                                  "shard response received");
-                            for b in response.bodies {
-                                for (i, data) in b.shards {
-                                    if let Some(bytes) = unb64(&data) {
-                                        node.store.put_shard(&b.txid, i, &bytes,
-                                            b.k as usize, b.n as usize, b.orig_len);
-                                        got = true;
-                                    }
-                                }
-                                // the genesis key is raw weights, not a Payload —
-                                // reconstructing it is the bootstrap path's job
-                                if b.txid != crate::store::Store::GENESIS_DA_KEY
-                                    && !node.payloads.contains_key(&b.txid)
-                                    && !node.store.has_payload(&b.txid) {
-                                    if let Some(p) = node.store.reconstruct_payload(&b.txid) {
-                                        // DISK, not RAM: install() preloads it
-                                        // when the block is ready to validate
-                                        node.store.put_payload(&b.txid, &p);
-                                    }
-                                }
-                                // an announced delta whose body just completed
-                                // enters the mempool like an inline one
-                                if let Some((wtx, _)) = node.want_deltas
-                                    .remove(&b.txid) {
-                                    match (wtx.to_core(),
-                                           node.payloads.get(&b.txid).cloned()
-                                               .or_else(|| node.store
-                                                   .get_payload(&b.txid))) {
-                                        (Some(t), Some(p)) => {
-                                            info!(txid = &b.txid[..12],
-                                                  "announced delta body \
-                                                   reconstructed from shards");
-                                            node.accept_delta(t, p);
-                                        }
-                                        (_, None) => {
-                                            // not enough shards yet — keep wanting
-                                            node.want_deltas.insert(b.txid.clone(),
-                                                (wtx, now() + WANT_DELTA_TTL));
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                            if got {
-                                node.retry_pending(&mut swarm);
-                                // CHAIN the fetch: this peer just proved it has
-                                // shards — immediately re-ask for whatever is
-                                // still missing instead of waiting for the next
-                                // round tick. A 92MB body needs K bounded
-                                // responses; at one per 180s round a fork heal
-                                // would take hours. Terminates: every response
-                                // either stores a new shard (rotating serve
-                                // cursor) or comes back empty (got=false).
-                                let mut by_h: Vec<(u64, String)> = node.pending
-                                    .values()
-                                    .flat_map(|(sb, _)| sb.txs.iter()
-                                        .filter_map(|t| t.to_core().map(|tc|
-                                            (sb.header.height, tc.txid()))))
-                                    .filter(|(_, id)|
-                                        !node.payloads.contains_key(id)
-                                        && !node.store.has_payload(id))
-                                    .collect();
-                                by_h.sort();
-                                let mut seen_ids = HashSet::new();
-                                let mut still: Vec<String> = by_h.into_iter()
-                                    .filter(|(_, id)| seen_ids.insert(id.clone()))
-                                    .map(|(_, id)| id).collect();
-                                still.extend(node.want_deltas.keys().cloned());
-                                still.truncate(32);
-                                if !still.is_empty() && current {
-                                    node.last_shard_req.insert(peer, now());
-                                    let rid = swarm.behaviour_mut().shards
-                                        .send_request(&peer,
-                                            ShardRequest { txids: still });
-                                    node.shard_req_id.insert(peer, rid);
-                                }
-                            }
+                            let _ = chain_tx.send(ToChain::ShardBatch {
+                                peer, current, bodies: response.bodies });
                         }
                     }
                 }
@@ -2376,43 +1760,45 @@ pub async fn run(
                     debug!(%peer_id, agent = %info.agent_version, "peer identified");
                 }
                 SwarmEvent::ConnectionClosed { peer_id, cause, num_established, .. } => {
-                    node.peers_connected = node.peers_connected.saturating_sub(1);
-                    // a silent close is undebuggable — the US anchor's first WAN
-                    // catch-up died repeatedly with no trace of why
                     info!(%peer_id, remaining = num_established,
                           cause = ?cause, "peer connection closed");
                 }
                 SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                    node.peers_connected += 1;
                     info!(%peer_id, "peer connected");
-                    // opportunistic catch-up from every new peer — anchor BELOW
-                    // our head: an equal-height fork needs the peer's blocks at
-                    // heights we already have, not just above them. Respects the
-                    // per-peer in-flight throttle and the catch-up cursor: on a
-                    // payload-heavy chain the redial loop otherwise re-requests
-                    // the same huge window on every reconnect, forever.
-                    let inflight = node.last_sync_req.get(&peer_id)
-                        .map(|(t, _)| now() - t < SYNC_INFLIGHT_TIMEOUT)
-                        .unwrap_or(false);
-                    if !inflight {
-                        let from = node.sync_cursor.get(&peer_id).copied()
-                            .unwrap_or_else(|| node.head_height().saturating_sub(8));
-                        node.last_sync_req.insert(peer_id, (now(), from));
-                        let req = SyncRequest {
-                            from_height: from, count: 64,
-                            want_genesis: false,
-                        };
-                        let rid = swarm.behaviour_mut().sync
-                            .send_request(&peer_id, req);
-                        node.sync_req_id.insert(peer_id, rid);
-                    }
+                    let _ = chain_tx.send(ToChain::PeerConnected(peer_id));
                 }
                 _ => {}
-            },
+            }
         }
     }
+    // dropping chain_tx ends the chain actor's loop; it writes the final
+    // snapshot + report before returning
+    drop(chain_tx);
+    let _ = chain.await;
+}
 
-    // final report + snapshot
+/// The chain actor: owns every stateful decision. See `run` for the split.
+async fn run_chain(
+    mut node: Node,
+    mut chain_rx: tokio::sync::mpsc::UnboundedReceiver<ToChain>,
+    mut api_rx: mpsc::Receiver<ApiCmd>,
+    mut bridge_rx: mpsc::Receiver<FromBridge>,
+) {
+    loop {
+        tokio::select! {
+            cmd = chain_rx.recv() => {
+                let Some(cmd) = cmd else { break }; // net loop gone: shut down
+                node.handle_chain_cmd(cmd);
+            }
+            Some(ev) = bridge_rx.recv() => {
+                node.handle_bridge(ev);
+            }
+            Some(cmd) = api_rx.recv() => {
+                node.handle_api(cmd);
+            }
+        }
+    }
+    // final report + snapshot (moved here from the old single loop)
     let h = node.head_height();
     node.store.write_snapshot(&node.tree.head, h,
                               node.tree.head_state(),
@@ -2422,16 +1808,577 @@ pub async fn run(
     let mut cur = node.tree.head.clone();
     while cur != node.tree.genesis_hash {
         lineage.push(cur[..6].to_string());
-        cur = node.tree.blocks[&cur].prev_hash.clone();
+        let Some(hh) = node.tree.blocks.get(&cur) else { break };
+        cur = hh.prev_hash.clone();
     }
     lineage.reverse();
     println!("LINEAGE {}", lineage.join(">"));
-    println!("done — height {} head {} supply {} ledger {}",
-             h, &node.tree.head[..16], node.tree.head_ledger().supply(),
-             &node.tree.head_ledger().root()[..12]);
 }
 
-/// Dial the configured peers (multiaddrs, comma-separated).
+impl Node {
+    fn handle_chain_cmd(&mut self, cmd: ToChain) {
+        match cmd {
+            ToChain::Dtx(tx, payload, source) => {
+                if let Some(t) = tx.to_core() {
+                    let empty = payload.idx.is_empty() && payload.val.is_empty();
+                    if !empty {
+                        self.accept_delta(t, payload);
+                    } else {
+                        // announcement of a body too big to gossip inline:
+                        // reconstruct from shards we hold, or start fetching
+                        let txid = t.txid();
+                        if let Some(p) = self.payloads.get(&txid).cloned()
+                            .or_else(|| self.store.reconstruct_payload(&txid)) {
+                            self.payloads.insert(txid.clone(), p.clone());
+                            self.accept_delta(t, p);
+                        } else if self.want_deltas.len() < 64
+                            && !self.want_deltas.contains_key(&txid) {
+                            info!(txid = &txid[..12],
+                                  "big delta announced — fetching body by shards");
+                            self.want_deltas.insert(txid.clone(),
+                                (tx, now() + WANT_DELTA_TTL));
+                            if let Some(p) = source {
+                                let _ = self.net.send(ToNet::SendShards(
+                                    p, vec![txid]));
+                            }
+                        }
+                    }
+                    self.retry_pending();
+                }
+            }
+            ToChain::Atx(v) => {
+                if let Some(t) = account_tx_from_json(&v) {
+                    self.accept_account_tx(t);
+                }
+            }
+            ToChain::Blk(block, source) => {
+                self.install(block, source);
+                self.retry_pending();
+            }
+            ToChain::Head { peer, hash, height } => {
+                if !self.tree.blocks.contains_key(&hash) {
+                    let from = self.sync_cursor.get(&peer).copied()
+                        .unwrap_or_else(|| self.head_height()
+                            .min(height).saturating_sub(2));
+                    info!(peer = %peer, their_h = height, from,
+                          "unknown head — requesting sync");
+                    let _ = self.net.send(ToNet::SendSync(peer, from));
+                }
+            }
+            ToChain::PeerConnected(peer) => {
+                // opportunistic catch-up from every new peer — anchor BELOW
+                // our head: an equal-height fork needs the peer's blocks at
+                // heights we already have, not just above them
+                let from = self.sync_cursor.get(&peer).copied()
+                    .unwrap_or_else(|| self.head_height().saturating_sub(8));
+                let _ = self.net.send(ToNet::SendSync(peer, from));
+            }
+            ToChain::SyncServe(request, reply) => {
+                let _ = reply.send(self.serve_sync(&request));
+            }
+            ToChain::ShardServe(request, reply) => {
+                let _ = reply.send(self.serve_shards(&request));
+            }
+            ToChain::SyncBatch { peer, current, from, blocks, payloads, their_head } => {
+                self.handle_sync_batch(peer, current, from, blocks, payloads,
+                                       their_head);
+            }
+            ToChain::ShardBatch { peer, current, bodies } => {
+                self.handle_shard_batch(peer, current, bodies);
+            }
+            ToChain::RoundTick { round, elapsed_in_round, num_peers,
+                                 connected, mesh_blind } => {
+                self.peers_connected = num_peers;
+                self.round_tick(round, elapsed_in_round, connected, mesh_blind);
+            }
+        }
+    }
+
+    fn handle_sync_batch(&mut self, peer: PeerId, current: bool, from: u64,
+                         blocks: Vec<StoredBlock>,
+                         payloads: HashMap<String, Payload>, their_head: u64) {
+        info!(blocks = blocks.len(), their_head, current,
+              "sync response received");
+        for (txid, p) in payloads {
+            if !self.payloads.contains_key(&txid) {
+                self.store.put_payload(&txid, &p);
+                self.payloads.insert(txid, p);
+            }
+        }
+        let served = blocks.len() as u64;
+        let batch_hashes: HashSet<String> = blocks.iter().map(|sb| sb.hash()).collect();
+        let known_before = self.tree.blocks.len() + self.pending.len();
+        let batch_blocks: Vec<StoredBlock> = blocks;
+        for sb in batch_blocks.clone() {
+            self.install(sb, Some(peer));
+        }
+        self.retry_pending();
+        let learned = self.tree.blocks.len() + self.pending.len() > known_before;
+        if !current {
+            return; // data absorbed; do not touch the catch-up state machine
+        }
+        let last_from = Some(from);
+        let behind = their_head > self.head_height();
+        // "orphaned": some served block's parent is nowhere — not applied,
+        // not pending, not in this batch. Its ancestors are missing, so the
+        // fork point is below the request window.
+        let orphaned = batch_blocks.iter().any(|sb| {
+            let par = &sb.header.prev_hash;
+            sb.header.height > 0
+                && par != &self.tree.genesis_hash
+                && !self.tree.blocks.contains_key(par)
+                && !self.pending.contains_key(par)
+                && !batch_hashes.contains(par)
+        });
+        if orphaned && served > 0 {
+            let base = last_from.unwrap_or_else(|| self.head_height());
+            let step = self.sync_walkback.entry(peer).or_insert(4);
+            let cur = base.saturating_sub(*step);
+            *step = (*step * 2).min(4096);
+            self.sync_cursor.insert(peer, cur);
+            warn!(peer = %peer, from = cur,
+                  "sync batch unconnectable — walking back to find the fork point");
+        } else if learned {
+            self.sync_cursor.remove(&peer);
+            self.sync_walkback.remove(&peer);
+        } else if behind && served > 0 {
+            if let Some(f) = last_from {
+                let cur = (f + served).min(their_head);
+                self.sync_cursor.insert(peer, cur);
+                warn!(peer = %peer, cursor = cur, their_head,
+                      "sync batch taught nothing — advancing request cursor \
+                       past the overlap");
+            }
+        }
+        let cursor_now = self.sync_cursor.get(&peer).copied();
+        let moved = learned || (cursor_now.is_some() && cursor_now != last_from);
+        if (behind || orphaned) && served > 0 && moved {
+            let f = cursor_now.unwrap_or_else(||
+                self.head_height().min(their_head).saturating_sub(2));
+            let _ = self.net.send(ToNet::SendSync(peer, f));
+        }
+    }
+
+    fn handle_shard_batch(&mut self, peer: PeerId, current: bool,
+                          bodies: Vec<BodyShards>) {
+        let mut got = false;
+        info!(bodies = bodies.len(), "shard response received");
+        for b in bodies {
+            for (i, data) in b.shards {
+                if let Some(bytes) = unb64(&data) {
+                    self.store.put_shard(&b.txid, i, &bytes,
+                        b.k as usize, b.n as usize, b.orig_len);
+                    got = true;
+                }
+            }
+            if b.txid != crate::store::Store::GENESIS_DA_KEY
+                && !self.payloads.contains_key(&b.txid)
+                && !self.store.has_payload(&b.txid) {
+                if let Some(p) = self.store.reconstruct_payload(&b.txid) {
+                    self.store.put_payload(&b.txid, &p);
+                }
+            }
+            if let Some((wtx, _)) = self.want_deltas.remove(&b.txid) {
+                match (wtx.to_core(),
+                       self.payloads.get(&b.txid).cloned()
+                           .or_else(|| self.store.get_payload(&b.txid))) {
+                    (Some(t), Some(p)) => {
+                        info!(txid = &b.txid[..12],
+                              "announced delta body reconstructed from shards");
+                        self.accept_delta(t, p);
+                    }
+                    (_, None) => {
+                        self.want_deltas.insert(b.txid.clone(),
+                            (wtx, now() + WANT_DELTA_TTL));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if got {
+            self.retry_pending();
+            if current {
+                let still = self.missing_bodies(32);
+                if !still.is_empty() {
+                    let _ = self.net.send(ToNet::SendShards(peer, still));
+                }
+            }
+        }
+    }
+
+    /// Bodies still missing for pending blocks (lowest block first) and for
+    /// announced deltas — what the refetch machinery asks peers for.
+    fn missing_bodies(&mut self, cap: usize) -> Vec<String> {
+        self.want_deltas.retain(|_, (_, dl)| *dl > now());
+        let mut by_h: Vec<(u64, String)> = self.pending.values()
+            .flat_map(|(sb, _)| sb.txs.iter()
+                .filter_map(|t| t.to_core().map(|tc|
+                    (sb.header.height, tc.txid()))))
+            .filter(|(_, id)| !self.payloads.contains_key(id)
+                    && !self.store.has_payload(id))
+            .collect();
+        by_h.sort();
+        let mut seen_ids = HashSet::new();
+        let mut want: Vec<String> = by_h.into_iter()
+            .filter(|(_, id)| seen_ids.insert(id.clone()))
+            .map(|(_, id)| id).collect();
+        want.extend(self.want_deltas.keys().cloned());
+        want.truncate(cap);
+        want
+    }
+}
+
+impl Node {
+    fn round_tick(&mut self, round: i64, elapsed_in_round: f64,
+                  connected: Vec<PeerId>, mesh_blind: bool) {
+        if round >= 0 && round != self.last_trained_round {
+            self.last_trained_round = round;
+            // BODY REFETCH: once per round, ask connected peers for the shards
+            // of bodies pending blocks are stuck on + announced deltas wanted
+            let want = self.missing_bodies(32);
+            if !want.is_empty() {
+                info!(bodies = want.len(), peers = connected.len(),
+                      "refetching missing delta bodies by shards");
+                for p in &connected {
+                    let _ = self.net.send(ToNet::SendShards(*p, want.clone()));
+                }
+            }
+            // republish unconfirmed deltas for the current height: a publish
+            // can silently fail before the gossip mesh forms
+            let hh = self.head_height();
+            let resend: Vec<(WireDeltaTx, Payload)> = self.delta_pool.values()
+                .filter(|t| t.base_height == hh)
+                .filter_map(|t| self.payloads.get(&t.txid())
+                    .map(|p| (WireDeltaTx::from_core(t), p.clone())))
+                .collect();
+            for (tx, payload) in resend {
+                let payload = if payload.wire_bytes() > dtx_inline_max() {
+                    Payload { n: payload.n, idx: String::new(), val: String::new() }
+                } else { payload };
+                self.publish(&Gossip::Dtx { tx, payload });
+            }
+            // train EVERY round (the delta gossips to whoever proposes)
+            if self.cfg.produce && self.bridge_synced && !self.train_inflight {
+                self.train_inflight = true;
+                self.train_deadline = now() + TRAIN_TIMEOUT_SECS;
+                let model = &self.tree.model[&self.tree.head];
+                let active_pages: Vec<u32> = model.pages.iter().enumerate()
+                    .filter(|(_, p)| p.status == "A")
+                    .map(|(i, _)| i as u32).collect();
+                let min_nnz = model.required_nnz(&active_pages);
+                let _ = self.bridge_tx.try_send(ToBridge::Train {
+                    height: self.head_height(),
+                    seed: round as u64,
+                    budget_s: self.cfg.interval * 0.6,
+                    min_nnz,
+                    max_nnz: self.tree.params.delta_max_nnz,
+                    quota_4dp: model.quota_4dp as u64,
+                    active_pages,
+                });
+            }
+        }
+        // MESH-BLINDNESS PULL: the net loop says peers are connected but no
+        // foreign head has been heard — pull directly from every peer, with
+        // our catch-up cursor as the request start where one is set
+        if mesh_blind {
+            for p in &connected {
+                let from = self.sync_cursor.get(p).copied()
+                    .unwrap_or_else(|| self.head_height().saturating_sub(8));
+                info!(peer = %p, from, "no foreign heads heard — direct sync pull");
+                let _ = self.net.send(ToNet::SendSync(*p, from));
+            }
+        }
+        // v1 PROPOSING: the eligibility ladder widens inside the round; the
+        // per-miner phase offset staggers proposals so ties are rare
+        if self.cfg.produce && round >= 0 && round != self.last_proposed_round {
+            let phase = {
+                let h = core::delta_hash(self.key.pub_hex().as_bytes());
+                (u64::from_str_radix(&h[..8], 16).unwrap_or(0) % 1000)
+                    as f64 / 1000.0 * (self.cfg.interval / 4.0)
+            };
+            if elapsed_in_round >= phase {
+                let max_allowed =
+                    (elapsed_in_round / (self.cfg.interval / 8.0)).floor()
+                        .max(0.0) as u64;
+                if let Some(attempt) = self.eligible_attempt(max_allowed) {
+                    self.last_proposed_round = round;
+                    if let Some((stored, block)) = self.build_candidate(attempt) {
+                        let bh = stored.hash();
+                        match self.tree.add_block(block) {
+                            Ok(_) => {
+                                if let Err(e) = self.store.append_block(&stored) {
+                                    error!("FATAL: cannot persist our block h{}: {e}; \
+                                            halting", stored.header.height);
+                                    std::process::exit(1);
+                                }
+                                for t in &stored.txs {
+                                    if let Some(tc) = t.to_core() {
+                                        let id = tc.txid();
+                                        self.delta_pool.remove(&id);
+                                        self.delta_scores.remove(&id);
+                                        self.delta_sketches.remove(&id);
+                                    }
+                                }
+                                for v in stored.transfers.iter()
+                                        .chain(stored.data_txs.iter()) {
+                                    if let Some(t) = account_tx_from_json(v) {
+                                        self.account_pool.remove(&t.txid());
+                                    }
+                                }
+                                self.blocks_full.insert(bh, stored.clone());
+                                let old = stored.header.prev_hash.clone();
+                                self.on_head_advance(&old);
+                                self.publish(&Gossip::Blk { block: stored });
+                            }
+                            Err(e) => warn!("own block rejected: {}", e.0),
+                        }
+                    }
+                }
+            }
+        }
+        // WATCHDOG: a hung trainer must not silence the node forever
+        if self.train_inflight && now() > self.train_deadline {
+            warn!("training round timed out after {TRAIN_TIMEOUT_SECS}s — \
+                   clearing in-flight flag and resuming");
+            self.train_inflight = false;
+        }
+    }
+
+    fn handle_bridge(&mut self, ev: FromBridge) {
+        match ev {
+            FromBridge::Connected | FromBridge::NeedState => {
+                self.train_inflight = false;
+                self.chat_inflight = false;
+                for tx in self.chat_pending.drain(..) {
+                    let _ = tx.send(json!({"ok": false,
+                        "error": "model reconnected — try again"}));
+                }
+                self.send_bridge_state();
+            }
+            FromBridge::Generated { text, height } => {
+                self.chat_inflight = false;
+                if let Some(tx) = self.chat_pending.pop() {
+                    let _ = tx.send(json!({"ok": true, "reply": text,
+                                           "height": height}));
+                }
+            }
+            FromBridge::Scores { height, scores, sketches } => {
+                if height == self.head_height() {
+                    for (txid, s) in scores {
+                        if self.delta_pool.contains_key(&txid) {
+                            self.delta_scores.insert(
+                                txid, s.min(core::blocktree::SCORE_CAP));
+                        }
+                    }
+                    for (txid, mut sk) in sketches {
+                        if self.delta_pool.contains_key(&txid) {
+                            sk.resize(core::blocktree::SKETCH_DIM, 0);
+                            self.delta_sketches.insert(txid, sk);
+                        }
+                    }
+                }
+            }
+            FromBridge::Delta { height, loss, pages, payload } => {
+                self.train_inflight = false;
+                if height != self.head_height() {
+                    self.stale_deltas += 1;
+                    warn!(trained_at = height, head = self.head_height(),
+                          consecutive = self.stale_deltas,
+                          "DELTA DROPPED (stale): your training round finished \
+                           after the head moved on, so it cannot be included \
+                           and earns nothing. Your GPU is slower than the \
+                           block interval — lower --inner/--batch on the \
+                           trainer (or raise the node's --interval).");
+                } else {
+                    self.stale_deltas = 0;
+                    // hash from the SPARSE form — no dense materialization
+                    let dh = payload.coords()
+                        .map(|c| core::delta_hash_sparse(payload.n, &c))
+                        .unwrap_or_default();
+                    let mut claim: Vec<u32> = pages.clone();
+                    claim.sort_unstable();
+                    claim.dedup();
+                    let mut tx = core::BackpropTx {
+                        miner: self.key.pub_hex(),
+                        base_height: height,
+                        delta_hash: dh.clone(),
+                        da_pointer: format!("da://{dh}"),
+                        bond: 0,
+                        pages: claim,
+                        data_refs: self.cfg.data_refs.clone(),
+                        sig: vec![],
+                    };
+                    tx.sig = self.key.sign(&tx.signing_bytes());
+                    info!(height, loss, kb = payload.wire_bytes() / 1024,
+                          "trained delta");
+                    let wire = WireDeltaTx::from_core(&tx);
+                    if self.accept_delta(tx, payload.clone()) {
+                        let payload = if payload.wire_bytes() > dtx_inline_max() {
+                            Payload { n: payload.n,
+                                      idx: String::new(), val: String::new() }
+                        } else { payload };
+                        self.publish(&Gossip::Dtx { tx: wire, payload });
+                    }
+                }
+            }
+        }
+    }
+
+    fn handle_api(&mut self, cmd: ApiCmd) {
+        match cmd {
+            ApiCmd::Status(o) => { let _ = o.send(self.api_status()); }
+            ApiCmd::Metrics(o) => { let _ = o.send(self.api_metrics()); }
+            ApiCmd::Balance(addr, o) => { let _ = o.send(self.api_balance(&addr)); }
+            ApiCmd::Registry(o) => { let _ = o.send(self.api_registry()); }
+            ApiCmd::Chain(o) => { let _ = o.send(self.api_chain()); }
+            ApiCmd::Miners(o) => { let _ = o.send(self.api_miners()); }
+            ApiCmd::Chat(prompt, o) => {
+                if !self.bridge_synced {
+                    let _ = o.send(json!({"ok": false,
+                        "error": "no model attached to this node yet"}));
+                } else if self.chat_inflight {
+                    let _ = o.send(json!({"ok": false,
+                        "error": "model is generating for someone else — try again"}));
+                } else {
+                    self.chat_inflight = true;
+                    self.chat_pending.push(o);
+                    let _ = self.bridge_tx.try_send(ToBridge::Generate {
+                        prompt, n: 120,
+                    });
+                }
+            }
+            ApiCmd::Upload(bytes, stake, media, o) => {
+                let (reply, gossip) = self.api_upload(bytes, stake, media);
+                if let Some(msg) = gossip {
+                    self.publish(&msg);
+                }
+                let _ = o.send(reply);
+            }
+            ApiCmd::SubmitAccountTx(v, o) => {
+                let reply = match account_tx_from_json(&v) {
+                    None => json!({"ok": false, "error": "malformed tx"}),
+                    Some(tx) => match self.accept_account_tx(tx.clone()) {
+                        None => json!({"ok": false,
+                                       "error": "bad signature or duplicate"}),
+                        Some(txid) => {
+                            self.publish(&Gossip::Atx {
+                                tx: account_tx_to_json(&tx) });
+                            json!({"ok": true, "txid": txid,
+                                   "status": "in mempool — settles in the next block"})
+                        }
+                    },
+                };
+                let _ = o.send(reply);
+            }
+        }
+    }
+
+    fn serve_sync(&mut self, request: &SyncRequest) -> SyncResponse {
+        // serve OUR head chain from `from_height` upward, oldest-first,
+        // bounded by SYNC_BYTE_BUDGET (always at least one block)
+        let mut ascending: Vec<String> = Vec::new();
+        let mut cur = self.tree.head.clone();
+        while cur != self.tree.genesis_hash {
+            let hdr = &self.tree.blocks[&cur];
+            if hdr.height < request.from_height {
+                break;
+            }
+            ascending.push(cur.clone());
+            cur = hdr.prev_hash.clone();
+        }
+        ascending.reverse();
+        let want = (request.count as usize).min(SYNC_MAX_BLOCKS);
+        let mut chain = Vec::new();
+        let mut payloads = HashMap::new();
+        let mut bytes = 0usize;
+        for h in ascending {
+            if chain.len() >= want {
+                break;
+            }
+            let Some(sb) = self.blocks_full.get(&h).cloned() else { continue };
+            for t in &sb.txs {
+                if let Some(tc) = t.to_core() {
+                    let txid = tc.txid();
+                    if let Some(p) = self.payloads.get(&txid).cloned()
+                        .or_else(|| self.store.get_payload(&txid)) {
+                        // oversized bodies travel by shards, not inline
+                        if p.wire_bytes() > dtx_inline_max() {
+                            continue;
+                        }
+                        bytes += p.wire_bytes();
+                        payloads.insert(txid, p);
+                    }
+                }
+            }
+            chain.push(sb);
+            if bytes >= SYNC_BYTE_BUDGET {
+                break;
+            }
+        }
+        info!(from = request.from_height, served = chain.len(),
+              kb = bytes / 1024, "serving sync request");
+        let genesis = if request.want_genesis {
+            match self.tree.genesis_state() {
+                Some(w) if w.len() * 8 <= SYNC_BYTE_BUDGET => Some(w.clone()),
+                Some(w) => {
+                    warn!(params = w.len(),
+                          "peer asked for the genesis but it is too large to \
+                           serve over sync; they must generate it locally");
+                    None
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        SyncResponse {
+            blocks: chain, payloads,
+            head_height: self.head_height(),
+            genesis,
+        }
+    }
+
+    fn serve_shards(&mut self, request: &ShardRequest) -> ShardResponse {
+        // byte-budgeted, rotating per-body cursor: any size body moves in
+        // bounded responses; >= 1 shard always served (see the fork incident)
+        let mut bodies = Vec::new();
+        let mut budget_used = 0usize;
+        for txid in request.txids.iter().take(32) {
+            if budget_used >= SHARD_SERVE_BUDGET {
+                break;
+            }
+            let Some((k, n, orig_len)) = self.store.shard_meta(txid)
+                else { continue };
+            let have = self.store.list_shard_indices(txid);
+            if have.is_empty() {
+                continue;
+            }
+            let cur = self.serve_shard_cursor
+                .entry(txid.clone()).or_insert(0);
+            let mut shards: Vec<(u32, String)> = Vec::new();
+            for step in 0..have.len() {
+                if budget_used >= SHARD_SERVE_BUDGET && !shards.is_empty() {
+                    break;
+                }
+                let pick = have[(*cur + step) % have.len()];
+                if let Some(d) = self.store.read_shard(txid, pick) {
+                    budget_used += d.len() * 4 / 3;
+                    shards.push((pick, b64(&d)));
+                }
+            }
+            *cur = (*cur + shards.len().max(1)) % have.len().max(1);
+            if !shards.is_empty() {
+                bodies.push(BodyShards {
+                    txid: txid.clone(), k: k as u32, n: n as u32,
+                    orig_len, shards });
+            }
+        }
+        info!(asked = request.txids.len(), served = bodies.len(),
+              kb = budget_used / 1024, "serving shard request");
+        ShardResponse { bodies }
+    }
+}
+
 pub fn dial_peers(swarm: &mut Swarm<Behaviour>, peers: &str) {
     for p in peers.split(',').filter(|s| !s.is_empty()) {
         match p.parse::<Multiaddr>() {

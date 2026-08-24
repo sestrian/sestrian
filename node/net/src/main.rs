@@ -999,22 +999,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .duration_since(std::time::UNIX_EPOCH)?.as_secs_f64()
         },
         last_proposed_round: -1,
-        last_announced_round: -1,
         last_trained_round: -1,
-        last_foreign_head: 0.0,
-        silent_rounds: 0,
-        last_sync_req: Default::default(),
         sync_cursor: Default::default(),
+        net: tokio::sync::mpsc::unbounded_channel().0, // replaced inside run()
         sync_walkback: Default::default(),
-        last_shard_req: Default::default(),
-        sync_req_id: Default::default(),
-        shard_req_id: Default::default(),
         peers_connected: 0,
         chat_pending: Vec::new(),
         chat_inflight: false,
         stale_deltas: 0,
         quota_rejects: 0,
-        shard_cursor: Default::default(),
+        serve_shard_cursor: Default::default(),
         want_deltas: Default::default(),
     };
     node::run(n, swarm, api_rx, bridge_ev_rx).await;
