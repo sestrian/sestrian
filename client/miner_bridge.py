@@ -351,32 +351,47 @@ def run(a):
                                 return None
                             return m
 
-                        for d in msg.get("deltas", []):
-                            sp = d["sparse"]
-                            cand = state + _sparse_dense(sp)   # chain order
-                            set_flat_params(model, dequantize(to_torch(cand)))
-                            cand_all = per_token_loss_all()
+                        # LEAVE-ONE-OUT (v3 design, stage 1): apply ALL
+                        # candidates, then score each as aggregate-with minus
+                        # aggregate-without, on its claim-routed tokens. The
+                        # aggregate carries k-times one delta's signal (noise-
+                        # robust) and duplicated gradients earn ~nothing —
+                        # redundancy is priced at zero, which is the incentive
+                        # that makes miners seek DIFFERENT data.
+                        deltas = msg.get("deltas", [])
+                        dense_by_tx = {d["txid"]: _sparse_dense(d["sparse"])
+                                       for d in deltas}
+                        agg_all = state.copy()
+                        for dd in dense_by_tx.values():
+                            agg_all = agg_all + dd
+                        set_flat_params(model, dequantize(to_torch(agg_all)))
+                        all_tok = per_token_loss_all()
+                        for d in deltas:
+                            without = agg_all - dense_by_tx[d["txid"]]
+                            set_flat_params(model,
+                                            dequantize(to_torch(without)))
+                            wo_all = per_token_loss_all()
                             m = token_mask([int(p) for p in d.get("pages", [])])
                             if m is None:
-                                cm = float(sum(t.mean() for t in cand_all)
-                                           / len(cand_all))
-                                imp = base - cm
+                                wm = float(sum(t.mean() for t in wo_all)
+                                           / len(wo_all))
+                                am = float(sum(t.mean() for t in all_tok)
+                                           / len(all_tok))
+                                imp = wm - am
                             else:
-                                # mask applies to batch 0 (where routing was
-                                # captured); the other batches contribute their
-                                # full-token means to shrink the noise
-                                b0 = float(base_tok[m].mean()) \
-                                    - float(cand_all[0][m].mean())
-                                rest_b = sum(float(t.mean())
-                                             for t in base_all[1:])
-                                rest_c = sum(float(t.mean())
-                                             for t in cand_all[1:])
-                                n = len(cand_all)
-                                imp = (b0 + (rest_b - rest_c)) / n
+                                b0 = float(wo_all[0][m].mean()) \
+                                    - float(all_tok[0][m].mean())
+                                rest_w = sum(float(t.mean())
+                                             for t in wo_all[1:])
+                                rest_a = sum(float(t.mean())
+                                             for t in all_tok[1:])
+                                n = len(all_tok)
+                                imp = (b0 + (rest_w - rest_a)) / n
                             scores[d["txid"]] = max(0, int(round(imp * 1e6)))
                             # rev 8: the delta's integer influence sketch —
                             # exactly recomputable from the DA body by anyone
                             from rig.sketch import sketch_sparse
+                            sp = d["sparse"]
                             idx = np.frombuffer(base64.b64decode(sp["idx"]),
                                                 dtype="<u4")
                             val = np.frombuffer(base64.b64decode(sp["val"]),

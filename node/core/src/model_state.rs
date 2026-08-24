@@ -64,6 +64,12 @@ pub struct GenesisParams {
     /// quota: a rising quota narrows the claimable span (specialization)
     /// instead of fattening the wire. Bitcoin's block-size lesson.
     pub delta_max_nnz: u64,
+    /// PROTOCOL v3 (the learning gate): activation height for the scheduled
+    /// upgrade. From here the fold tracks the window's summed committed
+    /// scores and growth requires win_score_sum > 0 instead of the per-delta
+    /// staleness ceiling (which conflated junk with signal below the eval
+    /// noise floor — found live).
+    pub v3_height: u64,
 }
 
 impl GenesisParams {
@@ -79,6 +85,7 @@ impl GenesisParams {
             growth_bound: GROWTH_BOUND,
             announce_lead: ANNOUNCE_LEAD,
             delta_max_nnz: 1_000_000,
+            v3_height: 288,
         }
     }
 }
@@ -112,6 +119,11 @@ pub struct ModelState {
     pub window_id: u64,
     pub win_accepted: u64,
     pub win_zero_scored: u64,
+    /// v3: the window's summed committed scores (the learning gate) and the
+    /// state's protocol rev. Both enter the canonical JSON only from rev 3,
+    /// keeping every pre-activation model_root byte-identical.
+    pub win_score_sum: u64,
+    pub rev: u64,
     pub events_total: u64,
 }
 
@@ -150,6 +162,8 @@ impl ModelState {
             win_accepted: 0,
             win_zero_scored: 0,
             events_total: 0,
+            win_score_sum: 0,
+            rev: 2,
         }
     }
 
@@ -173,18 +187,35 @@ impl ModelState {
             .iter()
             .map(|(w, l, t)| format!("[{},{},\"{}\"]", w, l, t))
             .collect();
-        format!(
-            "{{\"events_total\":{},\"pages\":[{}],\"pending_growth\":[{}],\"pinned_streak\":{},\"quota_4dp\":{},\"slack_streak\":{},\"win_accepted\":{},\"win_zero_scored\":{},\"window_id\":{}}}",
-            self.events_total,
-            pages.join(","),
-            pending.join(","),
-            self.pinned_streak,
-            self.quota_4dp,
-            self.slack_streak,
-            self.win_accepted,
-            self.win_zero_scored,
-            self.window_id
-        )
+        if self.rev >= 3 {
+            format!(
+                "{{\"events_total\":{},\"pages\":[{}],\"pending_growth\":[{}],\"pinned_streak\":{},\"quota_4dp\":{},\"rev\":{},\"slack_streak\":{},\"win_accepted\":{},\"win_score_sum\":{},\"win_zero_scored\":{},\"window_id\":{}}}",
+                self.events_total,
+                pages.join(","),
+                pending.join(","),
+                self.pinned_streak,
+                self.quota_4dp,
+                self.rev,
+                self.slack_streak,
+                self.win_accepted,
+                self.win_score_sum,
+                self.win_zero_scored,
+                self.window_id
+            )
+        } else {
+            format!(
+                "{{\"events_total\":{},\"pages\":[{}],\"pending_growth\":[{}],\"pinned_streak\":{},\"quota_4dp\":{},\"slack_streak\":{},\"win_accepted\":{},\"win_zero_scored\":{},\"window_id\":{}}}",
+                self.events_total,
+                pages.join(","),
+                pending.join(","),
+                self.pinned_streak,
+                self.quota_4dp,
+                self.slack_streak,
+                self.win_accepted,
+                self.win_zero_scored,
+                self.window_id
+            )
+        }
     }
 
     pub fn model_root(&self) -> String {
@@ -228,6 +259,9 @@ impl ModelState {
             win_accepted: v.get("win_accepted")?.as_u64()?,
             win_zero_scored: v.get("win_zero_scored")?.as_u64()?,
             events_total: v.get("events_total")?.as_u64()?,
+            win_score_sum: v.get("win_score_sum").and_then(|x| x.as_u64())
+                .unwrap_or(0),
+            rev: v.get("rev").and_then(|x| x.as_u64()).unwrap_or(2),
         })
     }
 
@@ -329,10 +363,18 @@ pub fn fold(
     n_txs: u64,
     zero_scored: u64,
     prev_hash: &str,
+    score_sum: u64,
 ) -> (ModelState, Vec<Activation>) {
     let mut s = state.clone();
+    // v3 activates at its scheduled height (GenesisParams::v3_height)
+    if height >= params.v3_height {
+        s.rev = 3;
+    }
     s.win_accepted += n_txs;
     s.win_zero_scored += zero_scored;
+    if s.rev >= 3 {
+        s.win_score_sum += score_sum;
+    }
     let mut activations: Vec<Activation> = Vec::new();
 
     let w = params.retarget_window;
@@ -366,8 +408,14 @@ pub fn fold(
         }
 
         // 2. the window decision (shared math with capacity.rs)
-        let staleness_4dp = (s.win_zero_scored as i128 * 10_000)
+        let mut staleness_4dp = (s.win_zero_scored as i128 * 10_000)
             .div_euclid(1.max(s.win_accepted as i128)) as i64;
+        // v3 LEARNING GATE: growth requires the window to show the network
+        // improving at all (summed committed scores > 0); per-delta staleness
+        // conflated junk with signal below the eval noise floor (found live).
+        if s.rev >= 3 {
+            staleness_4dp = if s.win_score_sum > 0 { 0 } else { 10_000 };
+        }
         let d = retarget_decide(
             s.quota_4dp,
             s.pinned_streak,
@@ -417,6 +465,7 @@ pub fn fold(
         // 3. window accumulators reset
         s.win_accepted = 0;
         s.win_zero_scored = 0;
+        s.win_score_sum = 0;
     }
 
     (s, activations)

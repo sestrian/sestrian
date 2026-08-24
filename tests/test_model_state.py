@@ -191,3 +191,58 @@ def test_required_nnz_quota():
     assert s.required_nnz(all_pages) == s.dim() * 80_000 // 1_000_000
     # single-page claim scales with the page, not the model
     assert s.required_nnz([1]) == EXPERT_LEN * 80_000 // 1_000_000
+
+
+def test_v3_activation_and_learning_gate():
+    """The v3 boundary: rev + win_score_sum enter the canonical JSON exactly
+    at v3_height (pre-boundary roots byte-identical to v2), and the growth
+    gate switches from per-delta staleness to the window learning signal."""
+    from rig.model_state import fold, GenesisParams, ModelSpec, ModelState
+    spec = ModelSpec(n_layers=2, d_model=8, d_ff=16, n_experts_initial=2,
+                     e_max=4, backbone_params=100)
+    P = GenesisParams(spec=spec, retarget_window=2, target_deltas=2,
+                      k_sustain=1, announce_lead=1, v3_height=4)
+    s2 = ModelState.genesis(spec)
+    # pre-boundary: canonical json has no v3 keys
+    assert "win_score_sum" not in s2.canonical_json()
+    st = s2
+    # heights 1..3 (v2): all deltas ZERO-scored — under v2 rules staleness
+    # blocks surplus, no growth despite quota ramp
+    for h in (1, 2, 3):
+        st, acts = fold(st, P, h, 6, 6, f"{h:02x}" * 32, score_sum=0)
+        assert st.rev == 2 and not acts
+    assert st.pending_growth == []
+    # height 4: v3 activates — rev flips, json gains the keys
+    st, _ = fold(st, P, 4, 6, 6, "04" * 32, score_sum=0)
+    assert st.rev == 3
+    assert "win_score_sum" in st.canonical_json()
+    assert '"rev":3' in st.canonical_json()
+    # v3 gate: zero-scored window (score_sum 0) still refuses growth...
+    for h in (5, 6):
+        st, _ = fold(st, P, h, 6, 6, f"{h:02x}" * 32, score_sum=0)
+    assert st.pending_growth == []
+    # ...but a window with ANY positive learning signal schedules, even with
+    # every individual delta zero-scored (the exact live failure v3 fixes)
+    st.quota_4dp = P.quota_max_4dp
+    st, _ = fold(st, P, 7, 6, 6, "07" * 32, score_sum=123)
+    st, _ = fold(st, P, 8, 6, 6, "08" * 32, score_sum=0)
+    assert st.pending_growth, "learning window at pinned quota must schedule"
+
+
+def test_v3_fold_prefix_equivalence_across_boundary():
+    from rig.model_state import fold, GenesisParams, ModelSpec, ModelState
+    spec = ModelSpec(n_layers=2, d_model=8, d_ff=16, n_experts_initial=2,
+                     e_max=4, backbone_params=100)
+    P = GenesisParams(spec=spec, retarget_window=2, target_deltas=2,
+                      k_sustain=2, announce_lead=1, v3_height=3)
+    seq = [(1, 4, 1, 250), (2, 5, 2, 0), (3, 3, 0, 700), (4, 6, 6, 0),
+           (5, 2, 1, 90), (6, 7, 3, 40)]
+    a = ModelState.genesis(spec)
+    for h, n, z, sc in seq:
+        a, _ = fold(a, P, h, n, z, f"{h:02x}" * 32, score_sum=sc)
+    b = ModelState.genesis(spec)
+    for h, n, z, sc in seq[:3]:
+        b, _ = fold(b, P, h, n, z, f"{h:02x}" * 32, score_sum=sc)
+    for h, n, z, sc in seq[3:]:
+        b, _ = fold(b, P, h, n, z, f"{h:02x}" * 32, score_sum=sc)
+    assert a.model_root() == b.model_root()

@@ -401,6 +401,7 @@ fn params_from(spec: core::model_state::ModelSpec, p: &Value) -> core::model_sta
         growth_bound: p["growth_bound"].as_i64().unwrap(),
         announce_lead: p["announce_lead"].as_u64().unwrap(),
         delta_max_nnz: 1_000_000,
+        v3_height: 1_000_000_000,
     }
 }
 
@@ -515,10 +516,13 @@ fn full_chain_replay_matches_reference() {
                 .filter(|t| b["scores"][&t.txid()].as_u64().unwrap_or(0) == 0)
                 .count() as u64;
             let h = &b["header"];
+            let score_sum: u64 = txs.iter()
+                .map(|t| b["scores"][&t.txid()].as_u64().unwrap_or(0)).sum();
             let (next, activations) = fold(&model, &params,
                                            h["height"].as_u64().unwrap(),
                                            txs.len() as u64, zero_scored,
-                                           h["prev_hash"].as_str().unwrap());
+                                           h["prev_hash"].as_str().unwrap(),
+                                           score_sum);
             model = next;
             for (page_id, _l, _e, trigger) in &activations {
                 w.extend(page_init(trigger, *page_id, &params.spec));
@@ -553,6 +557,8 @@ fn page_root_matches_reference() {
             window_id: 0,
             win_accepted: 0,
             win_zero_scored: 0,
+            win_score_sum: 0,
+            rev: 2,
             events_total: 0,
         };
         assert_eq!(page_state_root(&w, &st), case["root"].as_str().unwrap(),
@@ -645,7 +651,7 @@ fn controller_fold_matches_reference() {
                 step["height"].as_u64().unwrap(),
                 step["n_txs"].as_u64().unwrap(),
                 step["zero_scored"].as_u64().unwrap(),
-                step["prev_hash"].as_str().unwrap());
+                step["prev_hash"].as_str().unwrap(), 0);
             st = next;
             let want_acts: Vec<Value> = step["activations"].as_array().unwrap().clone();
             assert_eq!(activations.len(), want_acts.len(),
@@ -885,4 +891,42 @@ fn sketches_match_reference() {
         assert_eq!(led.fee_data_pool, n["fee_data_pool_after"].as_u64().unwrap());
         assert_eq!(led.root(), n["root_after"].as_str().unwrap());
     }
+}
+
+
+#[test]
+fn v3_fold_matches_reference() {
+    // v3: the scheduled-upgrade boundary (rev + win_score_sum enter the
+    // canonical JSON exactly at v3_height) and the LEARNING GATE (growth
+    // requires the window's summed committed scores > 0). Pins the entire
+    // activation sequence to the Python reference.
+    use sestrian_core::model_state::{fold, GenesisParams, ModelState};
+    let v = vectors();
+    let case = &v["v3_fold"][0];
+    let spec = spec_from(&v["controller_fold"][0]["spec"]);
+    let mut params = GenesisParams::new(spec);
+    params.retarget_window = case["retarget_window"].as_u64().unwrap();
+    params.target_deltas = case["target_deltas"].as_i64().unwrap();
+    params.quota_max_4dp = case["quota_max_4dp"].as_i64().unwrap();
+    params.k_sustain = case["k_sustain"].as_i64().unwrap();
+    params.announce_lead = case["announce_lead"].as_u64().unwrap();
+    params.v3_height = case["v3_height"].as_u64().unwrap();
+    let mut st = ModelState::genesis(&params.spec);
+    for step in case["steps"].as_array().unwrap() {
+        let (next, acts) = fold(&st, &params,
+                                step["height"].as_u64().unwrap(),
+                                step["n_txs"].as_u64().unwrap(),
+                                step["zero_scored"].as_u64().unwrap(),
+                                step["prev_hash"].as_str().unwrap(),
+                                step["score_sum"].as_u64().unwrap());
+        st = next;
+        assert_eq!(st.rev, step["rev"].as_u64().unwrap());
+        assert_eq!(st.model_root(), step["model_root"].as_str().unwrap(),
+                   "v3 fold diverged at h{}", step["height"]);
+        assert_eq!(acts.len(),
+                   step["activations"].as_array().unwrap().len());
+    }
+    assert_eq!(st.events_total, case["final_events"].as_u64().unwrap());
+    assert_eq!(st.pending_growth.len(),
+               case["final_pending"].as_array().unwrap().len());
 }

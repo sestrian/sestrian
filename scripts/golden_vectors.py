@@ -526,6 +526,29 @@ def main():
                            "prev_hash": f"{fh:02x}" * 32,
                            "activations": [[p, l, e, t] for p, l, e, t in facts],
                            "model_root": fst.model_root()})
+    # --- v3: activation boundary + the learning gate ---------------------
+    p3 = _GP(spec=spec, retarget_window=2, target_deltas=4,
+             quota_max_4dp=20_000, k_sustain=2, announce_lead=1, v3_height=5)
+    st3 = _MSt.genesis(spec)
+    v3_steps = []
+    scores_seq = [0, 0, 0, 0, 350, 0, 4200, 0, 0, 990, 0, 0]
+    for fh in range(1, 13):
+        st3, facts = _fold(st3, p3, fh, 6, 6, f"{fh:02x}" * 32,
+                           score_sum=scores_seq[fh - 1])
+        v3_steps.append({"height": fh, "n_txs": 6, "zero_scored": 6,
+                         "score_sum": scores_seq[fh - 1],
+                         "prev_hash": f"{fh:02x}" * 32,
+                         "rev": st3.rev,
+                         "activations": [[p, l, e, t] for p, l, e, t in facts],
+                         "model_root": st3.model_root()})
+    v["v3_fold"] = [{
+        "v3_height": 5, "retarget_window": 2, "target_deltas": 4,
+        "quota_max_4dp": 20_000, "k_sustain": 2, "announce_lead": 1,
+        "steps": v3_steps,
+        "final_pending": st3.pending_growth,
+        "final_events": st3.events_total,
+    }]
+
     v["controller_fold"] = [{
         "spec": {"n_layers": spec.n_layers, "d_model": spec.d_model,
                  "d_ff": spec.d_ff, "n_experts_initial": spec.n_experts_initial,

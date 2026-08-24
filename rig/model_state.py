@@ -85,6 +85,13 @@ class GenesisParams:
     # by delta_max_nnz * 1e6 / q_4dp params. Growth events relieve sustained
     # saturation by widening the model — bytes per block stay bounded forever.
     delta_max_nnz: int = 1_000_000
+    # PROTOCOL v3 (page committees, stage 1): the LEARNING GATE. From this
+    # height the fold tracks the window's summed committed scores and growth
+    # requires the network to be measurably learning (win_score_sum > 0)
+    # instead of the per-delta staleness ceiling — which conflated "junk work"
+    # with "signal below the eval noise floor" (found live). Scheduled via the
+    # version schedule: a coordinated upgrade, not a re-genesis.
+    v3_height: int = 288
 
 
 ACTIVE, FROZEN = "A", "F"
@@ -97,7 +104,8 @@ class ModelState:
 
     def __init__(self, pages, quota_4dp=QUOTA_ONE_4DP, pinned_streak=0,
                  slack_streak=0, pending_growth=None, window_id=0,
-                 win_accepted=0, win_zero_scored=0, events_total=0):
+                 win_accepted=0, win_zero_scored=0, events_total=0,
+                 win_score_sum=0, rev=2):
         self.pages = [list(p) for p in pages]
         self.quota_4dp = int(quota_4dp)
         self.pinned_streak = int(pinned_streak)
@@ -106,6 +114,11 @@ class ModelState:
         self.window_id = int(window_id)
         self.win_accepted = int(win_accepted)
         self.win_zero_scored = int(win_zero_scored)
+        # v3: the window's summed committed scores (the learning gate) and the
+        # state's protocol rev. BOTH enter the canonical JSON only from rev 3,
+        # so every pre-activation model_root is byte-identical to v2.
+        self.win_score_sum = int(win_score_sum)
+        self.rev = int(rev)
         self.events_total = int(events_total)
 
     # ---- construction ----------------------------------------------------
@@ -122,11 +135,12 @@ class ModelState:
     def copy(self) -> "ModelState":
         return ModelState(self.pages, self.quota_4dp, self.pinned_streak,
                           self.slack_streak, self.pending_growth, self.window_id,
-                          self.win_accepted, self.win_zero_scored, self.events_total)
+                          self.win_accepted, self.win_zero_scored,
+                          self.events_total, self.win_score_sum, self.rev)
 
     # ---- commitments -----------------------------------------------------
     def canonical_json(self) -> str:
-        return json.dumps({
+        d = {
             "events_total": self.events_total,
             "pages": self.pages,
             "pending_growth": self.pending_growth,
@@ -136,7 +150,11 @@ class ModelState:
             "win_accepted": self.win_accepted,
             "win_zero_scored": self.win_zero_scored,
             "window_id": self.window_id,
-        }, sort_keys=True, separators=(",", ":"))
+        }
+        if self.rev >= 3:
+            d["rev"] = self.rev
+            d["win_score_sum"] = self.win_score_sum
+        return json.dumps(d, sort_keys=True, separators=(",", ":"))
 
     def model_root(self) -> str:
         return hashlib.sha256(self.canonical_json().encode()).hexdigest()
@@ -201,7 +219,8 @@ def page_init(trigger_hex: str, page_id: int, spec: ModelSpec) -> np.ndarray:
 
 
 def fold(state: ModelState, params: GenesisParams, height: int, n_txs: int,
-         zero_scored: int, prev_hash: str) -> tuple[ModelState, list]:
+         zero_scored: int, prev_hash: str,
+         score_sum: int = 0) -> tuple[ModelState, list]:
     """The deterministic per-block ModelState transition. Returns
     (post_state, activations) where activations = [(page_id, layer, expert_idx,
     trigger_hex), ...] for expert pages appended by THIS block — the caller
@@ -212,8 +231,15 @@ def fold(state: ModelState, params: GenesisParams, height: int, n_txs: int,
     state must equal folding them all from genesis (tests/test_model_state.py).
     """
     s = state.copy()
+    # v3 activates at its scheduled height: the state carries rev + the
+    # window's score sum from then on (both enter the canonical JSON, so the
+    # first v3 block's model_root is the coordinated-upgrade boundary).
+    if height >= params.v3_height:
+        s.rev = 3
     s.win_accepted += n_txs
     s.win_zero_scored += zero_scored
+    if s.rev >= 3:
+        s.win_score_sum += int(score_sum)
     activations: list = []
 
     W = params.retarget_window
@@ -234,6 +260,12 @@ def fold(state: ModelState, params: GenesisParams, height: int, n_txs: int,
 
         # 2. the window decision (shared math with rig/capacity.py)
         staleness_4dp = s.win_zero_scored * 10_000 // max(1, s.win_accepted)
+        # v3 LEARNING GATE: the window must show the network improving at all
+        # (summed committed scores > 0) — per-delta staleness conflated junk
+        # with signal-below-noise-floor. Encoded as a staleness override so
+        # retarget_decide's surplus math is shared verbatim across revs.
+        if s.rev >= 3:
+            staleness_4dp = 0 if s.win_score_sum > 0 else 10_000
         d = retarget_decide(s.quota_4dp, s.pinned_streak, s.slack_streak,
                             s.win_accepted, staleness_4dp,
                             quota_min=params.quota_min_4dp,
@@ -273,5 +305,6 @@ def fold(state: ModelState, params: GenesisParams, height: int, n_txs: int,
         # 3. window accumulators reset
         s.win_accepted = 0
         s.win_zero_scored = 0
+        s.win_score_sum = 0
 
     return s, activations

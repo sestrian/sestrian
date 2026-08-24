@@ -293,7 +293,7 @@ pub fn txset_root(txids: &[String]) -> String {
 /// version, and validation requires it to equal the scheduled version for its
 /// height. A future upgrade appends (activation_height, version) here; nodes
 /// that don't know a version reject its blocks with "upgrade your node".
-pub const VERSION_SCHEDULE: &[(u64, u64)] = &[(0, 2)]; // v2: the delta envelope
+pub const VERSION_SCHEDULE: &[(u64, u64)] = &[(0, 2)]; // base at genesis: v2
 
 pub fn expected_version(height: u64) -> u64 {
     let mut v = VERSION_SCHEDULE[0].1;
@@ -303,6 +303,18 @@ pub fn expected_version(height: u64) -> u64 {
         }
     }
     v
+}
+
+/// v3 (the learning gate) activates at `params.v3_height` — the scheduled
+/// coordinated upgrade, first live use of the version mechanism.
+pub fn expected_version_at(
+    height: u64,
+    params: &crate::model_state::GenesisParams,
+) -> u64 {
+    if height >= params.v3_height {
+        return 3;
+    }
+    expected_version(height)
 }
 
 /// Protocol v1 state transition (mirrors `rig/chain.py::paged_transition`):

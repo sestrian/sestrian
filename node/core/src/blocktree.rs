@@ -13,7 +13,7 @@ use crate::token::{
 };
 use crate::model_state::Activation;
 use crate::{
-    delta_hash, delta_hash_sparse, expected_version, int64_bytes, paged_transition,
+    delta_hash, delta_hash_sparse, int64_bytes, paged_transition,
     trimmed_mean_scalar, txset_root, BackpropTx, Header,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -142,11 +142,11 @@ fn validate_inner(
     // 0. STRUCTURAL invariants binding the header to its parent and body.
     //    v1: the version must be the scheduled version for this height — the
     //    whole upgrade mechanism (unknown-to-us versions fail loudly upstream).
-    if h.version != expected_version(h.height) {
+    if h.version != crate::expected_version_at(h.height, params) {
         return Err(ValidationError(format!(
             "header version {} != scheduled {}",
             h.version,
-            expected_version(h.height)
+            crate::expected_version_at(h.height, params)
         )));
     }
     //    height must advance by exactly one — otherwise a miner could pin a low
@@ -288,6 +288,7 @@ fn validate_inner(
         .iter()
         .filter(|t| *block.scores.get(&t.txid()).unwrap_or(&0) == 0)
         .count() as u64;
+    let score_sum: u64 = block.scores.values().sum();
     let (post_model, activations) = model_fold(
         parent_model,
         params,
@@ -295,6 +296,7 @@ fn validate_inner(
         block.txs.len() as u64,
         zero_scored,
         &h.prev_hash,
+        score_sum,
     );
     let w: Option<Vec<i64>> = if let Some(parent_w) = parent_w {
         let bodies: Vec<Vec<i64>> = block

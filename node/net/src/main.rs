@@ -95,6 +95,7 @@ fn genesis_params(net: &NetworkParams) -> core::model_state::GenesisParams {
         if let Some(v) = env_i64("SESTRIAN_LOCAL_K_SUSTAIN") { gp.k_sustain = v; }
         if let Some(v) = env_u64("SESTRIAN_LOCAL_ANNOUNCE_LEAD") { gp.announce_lead = v; }
         if let Some(v) = env_u64("SESTRIAN_LOCAL_DELTA_MAX_NNZ") { gp.delta_max_nnz = v; }
+        if let Some(v) = env_u64("SESTRIAN_LOCAL_V3_HEIGHT") { gp.v3_height = v; }
     }
     gp
 }

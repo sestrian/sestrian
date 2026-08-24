@@ -42,10 +42,14 @@ def _sha(b: bytes) -> str:
 # version, and validation requires it to equal the scheduled version for its
 # height. A future upgrade appends (activation_height, version) here; nodes
 # that don't know a version reject its blocks with "upgrade your node".
-VERSION_SCHEDULE: tuple = ((0, 2),)   # protocol v2: the delta envelope
+VERSION_SCHEDULE: tuple = ((0, 2),)   # base protocol at genesis: v2 (envelope)
 
 
-def expected_version(height: int) -> int:
+def expected_version(height: int, params=None) -> int:
+    # v3 (the learning gate) activates at params.v3_height — a coordinated
+    # scheduled upgrade, the first use of the version mechanism in anger.
+    if params is not None and height >= params.v3_height:
+        return 3
     v = VERSION_SCHEDULE[0][1]
     for h0, ver in VERSION_SCHEDULE:
         if height >= h0:
@@ -273,9 +277,10 @@ def validate_block(block: Block, parent_w_int: np.ndarray, parent_height: int,
     # 0. STRUCTURAL invariants that bind the header to its parent and body.
     #    v1: the version must be the scheduled version for this height — the
     #    whole upgrade mechanism (unknown-to-us versions fail loudly upstream).
-    if v1 and h.version != expected_version(h.height):
+    if v1 and h.version != expected_version(h.height, params):
         raise ValidationError(
-            f"header version {h.version} != scheduled {expected_version(h.height)}")
+            f"header version {h.version} != scheduled "
+            f"{expected_version(h.height, params)}")
     #    height must advance by exactly one — otherwise a miner could pin a low
     #    height on every block and mint the height-keyed reward forever (the
     #    halving/sunset are only meaningful if height is monotone), and a
@@ -399,9 +404,10 @@ def validate_block(block: Block, parent_w_int: np.ndarray, parent_height: int,
         w = paged_transition(parent_w_int, bodies, claims, spans)
         zero_scored = sum(1 for t in block.txs
                           if int(block.scores.get(t.txid(), 0)) == 0)
+        score_sum = sum(int(v) for v in block.scores.values())
         post_model, activations = model_fold(parent_model, params, h.height,
                                              len(block.txs), zero_scored,
-                                             h.prev_hash)
+                                             h.prev_hash, score_sum)
         for page_id, _layer, _expert, trigger in activations:
             w = np.concatenate([w, page_init(trigger, page_id, params.spec)])
         if page_state_root(w, post_model) != h.state_root:
@@ -572,7 +578,8 @@ class BlockTree:
             zero_scored = sum(1 for t in b.txs
                               if int(b.scores.get(t.txid(), 0)) == 0)
             model, activations = model_fold(model, self.params, h.height,
-                                            len(b.txs), zero_scored, h.prev_hash)
+                                            len(b.txs), zero_scored, h.prev_hash,
+                                            sum(int(v) for v in b.scores.values()))
             for page_id, _l, _e, trigger in activations:
                 w = np.concatenate([w, page_init(trigger, page_id,
                                                  self.params.spec)])
@@ -611,7 +618,8 @@ def build_block(tree: BlockTree, parent_hash: str, accepted: list, bodies: dict,
         zero_scored = sum(1 for t in accepted if blk_scores[t.txid()] == 0)
         post_model, activations = model_fold(parent_model, tree.params, height,
                                              len(accepted), zero_scored,
-                                             parent_hash)
+                                             parent_hash,
+                                             sum(blk_scores.values()))
         for page_id, _l, _e, trigger in activations:
             w = np.concatenate([w, page_init(trigger, page_id,
                                              tree.params.spec)])
@@ -632,7 +640,7 @@ def build_block(tree: BlockTree, parent_hash: str, accepted: list, bodies: dict,
         vrf_proof=vrf_proof.hex(), score_root=scores_root(blk_scores),
         sketch_root=sketch_root(blk_sketches),
         model_root=m_root, vrf_attempt=attempt,
-        version=expected_version(height))
+        version=expected_version(height, tree.params))
     block = Block(header, accepted,
                   {t.da_pointer: bodies[t.da_pointer] for t in accepted},
                   transfers, data_txs, blk_scores, blk_sketches)

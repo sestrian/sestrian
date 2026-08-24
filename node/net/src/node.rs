@@ -875,9 +875,11 @@ impl Node {
         // order (one ordering slip here forks the chain at the first growth).
         let zero_scored = chosen.iter()
             .filter(|t| blk_scores[&t.txid()] == 0).count() as u64;
+        let score_sum: u64 = chosen.iter()
+            .map(|t| blk_scores[&t.txid()]).sum();
         let (post_model, activations) = core::model_state::fold(
             parent_model, &self.tree.params, hh + 1,
-            chosen.len() as u64, zero_scored, &head);
+            chosen.len() as u64, zero_scored, &head, score_sum);
         for (page_id, layer, _expert, trigger) in &activations {
             info!(height = hh + 1, page_id, layer,
                   "GROWTH EVENT activates in our candidate block");
@@ -904,7 +906,7 @@ impl Node {
             sketch_root: core::blocktree::sketch_root(&blk_sketches),
             model_root: post_model.model_root(),
             vrf_attempt: attempt,
-            version: core::expected_version(hh + 1),
+            version: core::expected_version_at(hh + 1, &self.tree.params),
         };
         let stored = StoredBlock {
             header: WireHeader::from_core(&header),

@@ -2338,6 +2338,147 @@
    ]
   }
  ],
+ "v3_fold": [
+  {
+   "v3_height": 5,
+   "retarget_window": 2,
+   "target_deltas": 4,
+   "quota_max_4dp": 20000,
+   "k_sustain": 2,
+   "announce_lead": 1,
+   "steps": [
+    {
+     "height": 1,
+     "n_txs": 6,
+     "zero_scored": 6,
+     "score_sum": 0,
+     "prev_hash": "0101010101010101010101010101010101010101010101010101010101010101",
+     "rev": 2,
+     "activations": [],
+     "model_root": "1dbbf11596b843d7ceeef50d03eebb76a274ec9b4a477d0d2d739c790f53775e"
+    },
+    {
+     "height": 2,
+     "n_txs": 6,
+     "zero_scored": 6,
+     "score_sum": 0,
+     "prev_hash": "0202020202020202020202020202020202020202020202020202020202020202",
+     "rev": 2,
+     "activations": [],
+     "model_root": "6be4505479acb20042dbe34a79995387f1efc627fd1f4c6002e340b7cdd7ea9e"
+    },
+    {
+     "height": 3,
+     "n_txs": 6,
+     "zero_scored": 6,
+     "score_sum": 0,
+     "prev_hash": "0303030303030303030303030303030303030303030303030303030303030303",
+     "rev": 2,
+     "activations": [],
+     "model_root": "361add287599b70870b55fad35449374eb83f640717d003080a4e6036f8d8de0"
+    },
+    {
+     "height": 4,
+     "n_txs": 6,
+     "zero_scored": 6,
+     "score_sum": 0,
+     "prev_hash": "0404040404040404040404040404040404040404040404040404040404040404",
+     "rev": 2,
+     "activations": [],
+     "model_root": "9d7dd5ae7c5a7e811d3b70df8edea86c366311afe0fc978de9ec74e8d99069ea"
+    },
+    {
+     "height": 5,
+     "n_txs": 6,
+     "zero_scored": 6,
+     "score_sum": 350,
+     "prev_hash": "0505050505050505050505050505050505050505050505050505050505050505",
+     "rev": 3,
+     "activations": [],
+     "model_root": "77cddbc87857b2a022648d62b3f435837449ac14b61d5351c3c828d7f8c06622"
+    },
+    {
+     "height": 6,
+     "n_txs": 6,
+     "zero_scored": 6,
+     "score_sum": 0,
+     "prev_hash": "0606060606060606060606060606060606060606060606060606060606060606",
+     "rev": 3,
+     "activations": [],
+     "model_root": "dde2c0f458f93bea9fe3f1a249fc36bf637e342f480f7caf2bd52962defe346a"
+    },
+    {
+     "height": 7,
+     "n_txs": 6,
+     "zero_scored": 6,
+     "score_sum": 4200,
+     "prev_hash": "0707070707070707070707070707070707070707070707070707070707070707",
+     "rev": 3,
+     "activations": [],
+     "model_root": "e69ea126d192f4f8f8da9759887e55eafd3fab30a201b0f6aefa06df06274a21"
+    },
+    {
+     "height": 8,
+     "n_txs": 6,
+     "zero_scored": 6,
+     "score_sum": 0,
+     "prev_hash": "0808080808080808080808080808080808080808080808080808080808080808",
+     "rev": 3,
+     "activations": [],
+     "model_root": "2bdef6ede819c56e4890c98e9bd1756b576403ad9fe2d049d134419deddf3b91"
+    },
+    {
+     "height": 9,
+     "n_txs": 6,
+     "zero_scored": 6,
+     "score_sum": 0,
+     "prev_hash": "0909090909090909090909090909090909090909090909090909090909090909",
+     "rev": 3,
+     "activations": [],
+     "model_root": "731d859140874f6f579a6ed3d793ebeafcaf620ef5cad54e67f608029c42c41f"
+    },
+    {
+     "height": 10,
+     "n_txs": 6,
+     "zero_scored": 6,
+     "score_sum": 990,
+     "prev_hash": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+     "rev": 3,
+     "activations": [
+      [
+       5,
+       0,
+       2,
+       "0808080808080808080808080808080808080808080808080808080808080808"
+      ]
+     ],
+     "model_root": "27a467a9f6fef376f363511595a0fe551d2414230c359cac5a30eef113713dba"
+    },
+    {
+     "height": 11,
+     "n_txs": 6,
+     "zero_scored": 6,
+     "score_sum": 0,
+     "prev_hash": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+     "rev": 3,
+     "activations": [],
+     "model_root": "70f10c4b663979752e63b087dee631b5b1c8ded4f63dbbd04394237f019b5f22"
+    },
+    {
+     "height": 12,
+     "n_txs": 6,
+     "zero_scored": 6,
+     "score_sum": 0,
+     "prev_hash": "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
+     "rev": 3,
+     "activations": [],
+     "model_root": "062c1ba26e6950f79c93333d07913a10b339454fde7f7ee64abd7a5cf73580e5"
+    }
+   ],
+   "final_pending": [],
+   "final_events": 1
+  }
+ ],
  "controller_fold": [
   {
    "spec": {
