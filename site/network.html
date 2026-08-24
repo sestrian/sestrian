@@ -322,7 +322,10 @@
     if(meta.live){
       dot.classList.remove("cold");
       txt("state", "Live · devnet");
-      $("src").textContent = "Polled from " + SestrianChain.LIVE +
+      // Name the anchor actually serving us, not the preferred one — if we
+      // have failed over, saying otherwise would hide exactly the fact worth
+      // knowing.
+      $("src").textContent = "Polled from " + (meta.endpoint || "an anchor") +
         " every " + (SestrianChain.POLL/1000) + "s.";
     } else {
       dot.classList.add("cold");

@@ -18,9 +18,19 @@
 (function (global) {
   "use strict";
 
-  var LIVE = "https://api.sestrian.com";
+  // Every anchor, in preference order. Each terminates its own TLS and holds a
+  // certificate for its own name, so the browser can fail over between them.
+  //
+  // Caddy on each anchor already falls back to the other anchor's NODE, but
+  // that cannot help if the whole box is gone: api.sestrian.com resolves only
+  // to anchor1. A second name here is what survives losing that machine. It is
+  // also why each anchor has its own hostname rather than several A records on
+  // one name — round-robin records make ACME validation a coin flip, since the
+  // CA may challenge the box that is not currently requesting the certificate.
+  var LIVE = ["https://api.sestrian.com", "https://anchor2.sestrian.com"];
   var POLL = 20000;
-  var GIVE_UP_AFTER = 3;      // consecutive live failures before we stop asking
+  var RETRY = 3000;           // after a failure, try the next anchor promptly
+  var GIVE_UP_AFTER = 3;      // consecutive whole-sweep failures before stopping
 
   var nf = new Intl.NumberFormat("en-US");
 
@@ -100,23 +110,36 @@
       .finally(goLive);
 
     function goLive() {
-      var misses = 0;
+      var misses = 0;      // consecutive failures, counted across all anchors
+      var idx = 0;         // which anchor to try next
       (function poll() {
-        fetchJSON(LIVE + "/status", 6000)
+        var base = LIVE[idx];
+        var failed = false;
+        fetchJSON(base + "/status", 6000)
           .then(function (d) {
             misses = 0;
-            return fetchJSON(LIVE + "/miners", 6000)
+            // Miners is a nice-to-have: a failure there must not cost us the
+            // chain numbers, and must not push us off a working anchor.
+            return fetchJSON(base + "/miners", 6000)
               .then(minerList, function () { return null; })
               .then(function (lst) {
                 if (lst) { d.miners = lst.length; d.miner_rows = lst; }
-                draw(d, { live: true, ok: true, endpoints: endpoints });
+                draw(d, { live: true, ok: true, endpoints: endpoints, endpoint: base });
               });
           })
-          .catch(function () { misses++; })
+          .catch(function () {
+            failed = true;
+            misses++;
+            idx = (idx + 1) % LIVE.length;   // next tick asks the other anchor
+          })
           .finally(function () {
-            // Stop hammering a host that is not deployed; a few misses tells
-            // "does not exist" apart from "one dropped request".
-            if (misses < GIVE_UP_AFTER) setTimeout(poll, POLL);
+            // Give up only once every anchor has failed GIVE_UP_AFTER times in
+            // a row — otherwise one flaky host would silence a healthy one. A
+            // failure retries sooner than a success, so failing over to the
+            // second anchor is quick rather than a full poll interval away.
+            if (misses < GIVE_UP_AFTER * LIVE.length) {
+              setTimeout(poll, failed ? RETRY : POLL);
+            }
           });
       })();
     }

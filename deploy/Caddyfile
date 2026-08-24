@@ -1,13 +1,27 @@
-# Sestrian public API — https in front of the node, and nothing else.
+# Sestrian anchor — https in front of the node, and nothing else.
 #
 # The node API is deliberately public: signed transaction submission has to be
 # reachable, which is how a decentralized mempool works. So this is NOT hiding
 # an origin. The one thing it adds is TLS — sestrian.com is https, and a browser
 # refuses to fetch http:// from an https page, so the site could never read the
-# chain without a certificate somewhere in the path.
+# chain without a certificate somewhere in the path. No CDN sits in front of it.
 #
 # Port 8080 stays open and unchanged: the joining docs publish it, other nodes
 # use it, and the snapshot collector reads it. Closing it would break all three.
+#
+# ONE file for every anchor. The two values that differ per host come from
+# /etc/caddy/anchor.env, loaded by the systemd drop-in in this directory:
+#
+#   anchor1:  SESTRIAN_HOSTNAMES="api.sestrian.com, anchor1.sestrian.com"
+#             SESTRIAN_PEER=13.140.32.27
+#   anchor2:  SESTRIAN_HOSTNAMES="anchor2.sestrian.com"
+#             SESTRIAN_PEER=169.58.211.248
+#
+# Only anchor1 carries api.sestrian.com, because that A record points at it.
+# Putting the same name on both would have each box answer ACME challenges for
+# a hostname that resolves to the other — validation would fail about half the
+# time. Each anchor holding its OWN name, with the client failing over between
+# them, gets real redundancy without that coin flip.
 
 # NOTE: do NOT set `admin off` here. It looks like hardening and is not:
 # the admin endpoint binds loopback only and ufw does not expose 2019, so it
@@ -16,17 +30,14 @@
 # drops in-flight requests. Measured: one failed request per restart, zero per
 # graceful reload.
 
-# Both names, deliberately. api.sestrian.com is what the website polls;
-# anchor1.sestrian.com is this box's own stable address, which is useful for
-# debugging a single anchor and means the API keeps working under a name even
-# if the shared `api` record is being changed.
-api.sestrian.com, anchor1.sestrian.com {
+{$SESTRIAN_HOSTNAMES} {
 	encode zstd gzip
 
-	reverse_proxy localhost:8080 13.140.32.27:8080 {
+	reverse_proxy localhost:8080 {$SESTRIAN_PEER}:8080 {
 		# Preferred order, not round-robin: normal traffic stays on the local node
-		# and only crosses to anchor2 when this one is actually failing. Avoiding
-		# that WAN hop is the whole reason we are not proxying through a third box.
+		# and only crosses to the other anchor when this one is actually failing.
+		# Avoiding that WAN hop is the whole reason we are not proxying through a
+		# third box.
 		lb_policy first
 
 		# PASSIVE health checking, deliberately. Active checks (health_uri) leave
@@ -38,7 +49,7 @@ api.sestrian.com, anchor1.sestrian.com {
 		max_fails 2
 
 		# Failover within a single request: if the local node refuses, retry the
-		# other upstream before the client ever sees an error.
+		# other anchor before the client ever sees an error.
 		lb_try_duration 5s
 		lb_try_interval 250ms
 	}

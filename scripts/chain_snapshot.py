@@ -46,6 +46,7 @@ MINER_FIELDS = ("address", "blocks_proposed", "deltas", "share_pct",
 # never points at something that does not answer — the page renders it as
 # "soon" until this says otherwise, and lights up on the next deploy.
 ENDPOINTS = {"api": "https://api.sestrian.com/status",
+             "anchor2": "https://anchor2.sestrian.com/status",
              "chat": "https://chat.sestrian.com/"}
 
 
