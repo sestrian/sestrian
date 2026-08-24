@@ -466,7 +466,7 @@ fn full_chain_replay_matches_reference() {
                         )))
                         .collect())
                     .unwrap_or_default();
-            tree.add_block(Block { header, txs, bodies, transfers, data_txs, scores,
+            tree.add_block(Block { header, txs, bodies, sparse: HashMap::new(), transfers, data_txs, scores,
                                    sketches })
                 .expect("reference block must validate");
         }

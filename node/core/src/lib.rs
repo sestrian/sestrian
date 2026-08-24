@@ -75,19 +75,65 @@ pub fn delta_hash(body: &[u8]) -> String {
 /// Byzantine-robust aggregation (§3.4): per-coordinate sort, trim the top and
 /// bottom `trim` fraction, integer mean with FLOOR division (matches
 /// np.floor_divide, which floors; Rust `/` truncates — use div_euclid).
-pub fn trimmed_mean(deltas: &[Vec<i64>], trim: f64) -> Vec<i64> {
-    let k = deltas.len();
-    assert!(k > 0);
-    let n = deltas[0].len();
+/// The trim bounds for k contributors — THE consensus rule, shared by the
+/// dense reference (`trimmed_mean`) and the incremental per-coordinate path.
+pub fn trim_bounds(k: usize, trim: f64) -> (usize, usize) {
     let mut lo = (k as f64 * trim).floor() as usize;
-    // Byzantine robustness at low miner counts: once k >= 3, always drop >= 1
-    // from each end so a lone adversarial delta can't be averaged straight in
-    // (matches rig/chain.py). k < 3 cannot be made robust.
     if k >= 3 {
         lo = lo.max(1);
     }
     let hi = k - lo;
-    let (lo, hi) = if hi > lo { (lo, hi) } else { (0, k) };
+    if hi > lo { (lo, hi) } else { (0, k) }
+}
+
+/// One coordinate of the trimmed mean: sort the k contributor values, drop the
+/// trim bounds, average with WRAPPING sum + floor division — byte-identical to
+/// the dense reference (which mirrors numpy int64 semantics).
+pub fn trimmed_mean_scalar(col: &mut [i64], trim: f64) -> i64 {
+    let (lo, hi) = trim_bounds(col.len(), trim);
+    col.sort_unstable();
+    let m = (hi - lo) as i64;
+    let sum: i64 = col[lo..hi].iter().fold(0i64, |a, &b| a.wrapping_add(b));
+    sum.div_euclid(m)
+}
+
+/// delta_hash of a SPARSE body without materializing the dense vector: stream
+/// the canonical little-endian int64 byte image (zeros between coordinates)
+/// through SHA-256. `coords` must be sorted by index with unique indices.
+/// Byte-identical to `delta_hash(&int64_bytes(&dense))`.
+pub fn delta_hash_sparse(n: usize, coords: &[(u32, i64)]) -> String {
+    use sha2::{Digest, Sha256};
+    const ZEROS: [u8; 65536] = [0u8; 65536];
+    let mut h = Sha256::new();
+    let mut pos = 0usize; // coordinate index, not byte
+    for &(i, v) in coords {
+        let i = i as usize;
+        let mut gap = (i - pos) * 8;
+        while gap > 0 {
+            let take = gap.min(ZEROS.len());
+            h.update(&ZEROS[..take]);
+            gap -= take;
+        }
+        h.update(v.to_le_bytes());
+        pos = i + 1;
+    }
+    let mut gap = (n - pos) * 8;
+    while gap > 0 {
+        let take = gap.min(ZEROS.len());
+        h.update(&ZEROS[..take]);
+        gap -= take;
+    }
+    hex::encode(h.finalize())
+}
+
+pub fn trimmed_mean(deltas: &[Vec<i64>], trim: f64) -> Vec<i64> {
+    let k = deltas.len();
+    assert!(k > 0);
+    let n = deltas[0].len();
+    // Byzantine robustness at low miner counts: once k >= 3, always drop >= 1
+    // from each end so a lone adversarial delta can't be averaged straight in
+    // (matches rig/chain.py). k < 3 cannot be made robust.
+    let (lo, hi) = trim_bounds(k, trim);
     let m = (hi - lo) as i64;
     let mut out = vec![0i64; n];
     let mut col = vec![0i64; k];

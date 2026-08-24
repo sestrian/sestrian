@@ -565,8 +565,8 @@ impl Node {
         if self.seen.contains(&txid) || !tx.verify() {
             return false;
         }
-        let Some(dense) = payload.dense() else { return false };
-        if core::delta_hash(&core::int64_bytes(&dense)) != tx.delta_hash {
+        let Some(coords) = payload.coords() else { return false };
+        if core::delta_hash_sparse(payload.n, &coords) != tx.delta_hash {
             warn!("delta payload hash mismatch from {}", &tx.miner[..8]);
             return false;
         }
@@ -588,15 +588,15 @@ impl Node {
                 self.quota_rejects += 1; // visible: frozen/missing-page claim
                 return false;
             }
-            if dense.len() as u64 != model.dim() {
+            if payload.n as u64 != model.dim() {
                 return false;
             }
             let mut nnz: u64 = 0;
             let mut outside = false;
             let spans: Vec<(u64, u64)> = pages.iter()
                 .map(|p| model.page_span(*p as usize)).collect();
-            'coords: for (i, x) in dense.iter().enumerate() {
-                if *x == 0 {
+            'coords: for &(i, x) in &coords {
+                if x == 0 {
                     continue;
                 }
                 let i = i as u64;
@@ -615,6 +615,9 @@ impl Node {
                 return false;
             }
         }
+        // the tx's (body, hash) pair is now verified — connect need not
+        // repeat the O(dim) streaming hash for this txid
+        self.tree.hash_verified.insert(txid.clone());
         self.mark_seen(txid.clone());
         self.store.put_payload(&txid, &payload);
         // Disperse oversized bodies into erasure shards NOW, not at prune time:
@@ -704,7 +707,7 @@ impl Node {
         // actual claimants, chunked within pages for bounded memory — bit-
         // identical to core::paged_transition over the full dense bodies, so
         // the committed state_root reproduces on any validator.
-        let parent_w = &self.tree.state[&head];
+        let parent_w = self.tree.head_state();
         let mut mean = vec![0i64; parent_w.len()];
         for (pid, page) in parent_model.pages.iter().enumerate() {
             let claimants: Vec<&Payload> = chosen.iter()
@@ -885,6 +888,7 @@ impl Node {
         }
         let block = sestrian_core::blocktree::Block {
             header, txs: chosen, bodies,
+            sparse: Default::default(),
             transfers: core_transfers, data_txs: core_data,
             scores: blk_scores, sketches: blk_sketches,
         };
@@ -915,7 +919,9 @@ impl Node {
                 }
             }
         }
-        let Some(block) = sb.to_core(&self.payloads) else {
+        // SPARSE bodies straight from payloads — the incremental engine's
+        // native input; no dense materialization on the install path
+        let Some(block) = sb.to_core_sparse(&self.payloads) else {
             // body missing: try to reconstruct it from erasure shards we already
             // hold, and if we can't, ask ALL peers for its shards (any one may
             // hold a few) in parallel with the full-block sync fallback.
@@ -1070,54 +1076,60 @@ impl Node {
         // TRUNCATED on a length change, which would have desynced the trainer
         // exactly at the first growth event.)
         if self.bridge_synced {
-            match (self.tree.state.get(&self.tree.head), self.tree.state.get(old_head)) {
-                (Some(new_w), Some(old_w)) if new_w.len() == old_w.len() => {
-                    let diff: Vec<i64> = new_w.iter().zip(old_w)
-                        .map(|(a, b)| a - b).collect();
-                    let sparse = Payload::from_dense_i64(&diff);
+            // the incremental tree hands us the exact sparse delta the head
+            // block applied (its REDO log) plus any appended growth tail —
+            // no dense diff of two 860MB vectors ever again.
+            let sequential = self.tree.blocks.get(&self.tree.head)
+                .map(|hh| hh.prev_hash == *old_head).unwrap_or(false);
+            let applied = self.tree.applied_delta(&self.tree.head).cloned();
+            let tail = self.tree.appended_tail(&self.tree.head)
+                .map(|t| t.to_vec()).unwrap_or_default();
+            match (sequential, applied) {
+                (true, Some(coords)) if tail.is_empty() => {
+                    let dim = self.tree.head_state().len() as u64;
+                    let sparse = crate::proto::Payload::from_coords_i64(
+                        dim as usize, &coords);
                     let _ = self.bridge_tx.try_send(ToBridge::Advance {
-                        height: h, dim: new_w.len() as u64, sparse });
+                        height: h, dim, sparse });
                 }
-                (Some(new_w), Some(old_w)) => {
-                    // dimension changed: single-page growth gets the fast path
-                    // (advance over the old span, then Grow with the appended
-                    // page init); anything stranger falls back to full resync.
-                    let old_model = self.tree.model.get(old_head);
+                (true, Some(coords)) => {
                     let new_model = &self.tree.model[&self.tree.head];
-                    let grew_one = old_model.map(|m|
-                        new_model.pages.len() == m.pages.len() + 1
-                        && new_w.len() > old_w.len()).unwrap_or(false);
+                    let new_len = self.tree.head_state().len();
+                    let old_len = new_len - tail.len();
+                    let grew_one = tail.len() > 0
+                        && new_model.pages.last()
+                            .map(|p| (p.end - p.start) as usize == tail.len())
+                            .unwrap_or(false);
                     if grew_one {
-                        let diff: Vec<i64> = new_w[..old_w.len()].iter().zip(old_w)
-                            .map(|(a, b)| a - b).collect();
-                        let sparse = Payload::from_dense_i64(&diff);
+                        let sparse = crate::proto::Payload::from_coords_i64(
+                            old_len, &coords);
                         let _ = self.bridge_tx.try_send(ToBridge::Advance {
-                            height: h, dim: old_w.len() as u64, sparse });
+                            height: h, dim: old_len as u64, sparse });
                         let page = new_model.pages.last().unwrap();
                         info!(height = h, page_id = new_model.pages.len() - 1,
                               layer = page.layer,
                               "GROWTH: syncing the new expert page to the trainer");
                         let _ = self.bridge_tx.try_send(ToBridge::Grow {
                             height: h,
-                            new_dim: new_w.len() as u64,
+                            new_dim: new_len as u64,
                             page_id: (new_model.pages.len() - 1) as u64,
                             layer: page.layer,
                             expert: page.expert,
-                            init: new_w[old_w.len()..].to_vec(),
+                            init: tail,
                         });
                     } else {
                         self.send_bridge_state();
                     }
                 }
                 _ => {
-                    // reorg past pruned state — bridge must resync from scratch
+                    // reorg or unknown diff — bridge resyncs from scratch
                     self.send_bridge_state();
                 }
             }
         }
         if h % SNAPSHOT_EVERY == 0 {
             self.store.write_snapshot(&self.tree.head, h,
-                                      &self.tree.state[&self.tree.head],
+                                      self.tree.head_state(),
                                       self.tree.head_ledger(),
                                       &self.tree.model[&self.tree.head]);
         }
@@ -1204,7 +1216,7 @@ impl Node {
 
     fn send_bridge_state(&mut self) {
         let h = self.head_height();
-        let state = self.tree.state[&self.tree.head].clone();
+        let state = self.tree.head_state().clone();
         let model = &self.tree.model[&self.tree.head];
         // v1: per-layer expert counts so the trainer builds the exact (possibly
         // grown, ragged) architecture before loading the chain-order state.
@@ -2030,7 +2042,7 @@ pub async fn run(
                             // the requester's error tells them to generate it
                             // locally (it's deterministic).
                             let genesis = if request.want_genesis {
-                                let g = node.tree.state.get(&node.tree.genesis_hash);
+                                let g = node.tree.genesis_state();
                                 match g {
                                     Some(w) if w.len() * 8 <= SYNC_BYTE_BUDGET =>
                                         Some(w.clone()),
@@ -2403,7 +2415,7 @@ pub async fn run(
     // final report + snapshot
     let h = node.head_height();
     node.store.write_snapshot(&node.tree.head, h,
-                              &node.tree.state[&node.tree.head],
+                              node.tree.head_state(),
                               node.tree.head_ledger(),
                               &node.tree.model[&node.tree.head]);
     let mut lineage = Vec::new();

@@ -951,7 +951,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !matches!(store.read_snapshot(), Some((h, ..)) if h == tree.head) {
         let head = tree.head.clone();
         let height = tree.blocks[&head].height;
-        store.write_snapshot(&head, height, &tree.state[&head], tree.head_ledger(),
+        store.write_snapshot(&head, height, tree.head_state(), tree.head_ledger(),
                              &tree.model[&head]);
         info!(height, "wrote boot snapshot for fast-boot");
     }

@@ -26,7 +26,15 @@ fn node_hash(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
 /// table always has at least the backbone page).
 pub fn root(leaves: &[&[u8]]) -> [u8; 32] {
     assert!(!leaves.is_empty(), "need at least one leaf");
-    let mut level: Vec<[u8; 32]> = leaves.iter().map(|l| leaf_hash(l)).collect();
+    let level: Vec<[u8; 32]> = leaves.iter().map(|l| leaf_hash(l)).collect();
+    root_from_hashes(level)
+}
+
+/// Merkle root over PRECOMPUTED leaf hashes — the incremental engine caches a
+/// leaf hash per page and rehashes only pages a block touched, so the root is
+/// O(touched pages + log P) instead of O(model).
+pub fn root_from_hashes(mut level: Vec<[u8; 32]>) -> [u8; 32] {
+    assert!(!level.is_empty(), "need at least one leaf");
     while level.len() > 1 {
         let mut nxt = Vec::with_capacity(level.len().div_ceil(2));
         for i in (0..level.len()).step_by(2) {

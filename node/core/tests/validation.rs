@@ -63,7 +63,7 @@ fn header(tree: &BlockTree, height: u64, n_txs: u64) -> core::Header {
 }
 
 fn empty_block(header: core::Header) -> Block {
-    Block { header, txs: vec![], bodies: HashMap::new(), transfers: vec![], data_txs: vec![],
+    Block { header, txs: vec![], bodies: HashMap::new(), sparse: HashMap::new(), transfers: vec![], data_txs: vec![],
             scores: Default::default(), sketches: Default::default() }
 }
 
@@ -94,6 +94,7 @@ fn tx_block(tree: &BlockTree, tx: core::BackpropTx, body: Vec<i64>) -> Block {
         header: header(tree, 1, 1),
         txs: vec![tx],
         bodies,
+        sparse: HashMap::new(),
         transfers: vec![],
         data_txs: vec![],
         scores: Default::default(),
@@ -272,7 +273,7 @@ fn rejects_wrong_model_root() {
     // commitment must be validated independently of the weight commitment
     let mut h = header(&tree, 1, 0);
     let g = tree.genesis_hash.clone();
-    h.state_root = page_state_root(&tree.state[&g], &tree.model[&g]);
+    h.state_root = page_state_root(tree.head_state(), &tree.model[&g]);
     h.txset_root = core::txset_root(&[]);
     h.score_root = scores_root(&Default::default());
     h.sketch_root = sketch_root(&Default::default());

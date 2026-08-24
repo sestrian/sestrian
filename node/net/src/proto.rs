@@ -61,6 +61,38 @@ impl Payload {
 
     /// Sparse-encode an int64 vector (used for aggregate deltas to the bridge —
     /// values may exceed i32 so this variant carries i64 values).
+    /// Canonical sparse coords of this payload: sorted unique indices,
+    /// LAST WRITE WINS on duplicates (byte-identical to decompress), zeros
+    /// dropped. The incremental engine's native body form — no dense vector.
+    pub fn coords(&self) -> Option<Vec<(u32, i64)>> {
+        let idx = unb64(&self.idx)?;
+        let val = unb64(&self.val)?;
+        if idx.len() / 4 != val.len() / 4 {
+            return None;
+        }
+        let k = idx.len() / 4;
+        let mut m: std::collections::BTreeMap<u32, i64> = Default::default();
+        for i in 0..k {
+            let ix = u32::from_le_bytes(idx[i * 4..i * 4 + 4].try_into().ok()?);
+            if (ix as usize) >= self.n {
+                return None; // out-of-range index would panic dense paths
+            }
+            let v = i32::from_le_bytes(val[i * 4..i * 4 + 4].try_into().ok()?) as i64;
+            m.insert(ix, v);
+        }
+        Some(m.into_iter().filter(|(_, v)| *v != 0).collect())
+    }
+
+    pub fn from_coords_i64(n: usize, coords: &[(u32, i64)]) -> SparseI64 {
+        let mut idx = Vec::with_capacity(coords.len() * 4);
+        let mut val = Vec::with_capacity(coords.len() * 8);
+        for &(i, x) in coords {
+            idx.extend_from_slice(&i.to_le_bytes());
+            val.extend_from_slice(&x.to_le_bytes());
+        }
+        SparseI64 { n, idx: b64(&idx), val: b64(&val) }
+    }
+
     pub fn from_dense_i64(v: &[i64]) -> SparseI64 {
         let mut idx = Vec::new();
         let mut val = Vec::new();
@@ -286,13 +318,31 @@ impl StoredBlock {
 
     /// Materialize a validatable core Block by densifying bodies from payloads.
     /// Returns None if any payload is missing or malformed.
+    /// Like `to_core`, but bodies stay SPARSE — the incremental engine's
+    /// input. The connect path never materializes a dense vector per delta.
+    pub fn to_core_sparse(&self, payloads: &HashMap<String, Payload>) -> Option<Block> {
+        let mut b = self.to_core_inner(payloads, false)?;
+        for wt in &self.txs {
+            let t = wt.to_core()?;
+            let p = payloads.get(&t.txid())?;
+            b.sparse.insert(t.da_pointer.clone(), (p.n as u64, p.coords()?));
+        }
+        Some(b)
+    }
+
     pub fn to_core(&self, payloads: &HashMap<String, Payload>) -> Option<Block> {
+        self.to_core_inner(payloads, true)
+    }
+
+    fn to_core_inner(&self, payloads: &HashMap<String, Payload>, dense: bool) -> Option<Block> {
         let mut txs = Vec::new();
         let mut bodies = HashMap::new();
         for wt in &self.txs {
             let t = wt.to_core()?;
-            let p = payloads.get(&t.txid())?;
-            bodies.insert(t.da_pointer.clone(), p.dense()?);
+            if dense {
+                let p = payloads.get(&t.txid())?;
+                bodies.insert(t.da_pointer.clone(), p.dense()?);
+            }
             txs.push(t);
         }
         let mut transfers = Vec::new();
@@ -306,7 +356,8 @@ impl StoredBlock {
         for v in &self.data_txs {
             data_txs.push(account_tx_from_json(v)?);
         }
-        Some(Block { header: self.header.to_core(), txs, bodies, transfers, data_txs,
+        Some(Block { header: self.header.to_core(), txs, bodies,
+                     sparse: HashMap::new(), transfers, data_txs,
                      scores: self.scores.clone(), sketches: self.sketches.clone() })
     }
 }

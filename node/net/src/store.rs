@@ -545,10 +545,7 @@ impl Store {
         // 2. seed the checkpointed state + ledger + MODEL STATE at the
         //    snapshot block (v1: forward validation folds from this — the
         //    model_root commitment makes a divergent seed a loud failure)
-        tree.state.insert(snap_hash.to_string(), snap_state);
-        tree.ledger.insert(snap_hash.to_string(), snap_ledger);
-        tree.model.insert(snap_hash.to_string(), snap_model);
-        tree.head = snap_hash.to_string();
+        tree.adopt_checkpoint(snap_hash, snap_state, snap_ledger, snap_model);
 
         // 3. index every stored block so we can still serve old ones; validate
         //    FORWARD only the blocks after the snapshot (add_block validates
@@ -559,7 +556,7 @@ impl Store {
         let mut validated = 0u64;
         for sb in &sorted {
             if sb.header.height <= snap_h
-                || !tree.state.contains_key(&sb.header.prev_hash) {
+                || sb.header.prev_hash != tree.head {
                 continue;
             }
             let mut payloads = HashMap::new();
