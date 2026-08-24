@@ -182,6 +182,19 @@ token-gated/disabled.
   devnet-convergence job on every PR, soak on main + nightly
 - ✅ Threat model (132) · this readiness doc (133)
 
+## Open design question — the growth gate vs specialization (v2, live)
+Growth requires staleness <= 20% (zero-scored deltas are "junk" by design).
+Live observation at max quota: ~half of committed scores are ZERO with a
+systematic shape — the proposer's held-out eval scores its OWN delta positive
+and the rival's specialized claim zero (a delta training experts the
+evaluator's held-out batch barely routes to shows ~no improvement alone).
+Consequence: the quality gate blocks organic growth exactly when sustained
+saturation says the model needs capacity. Candidate fixes to DISCUSS (all
+consensus-adjacent): score deltas against held-out slices weighted to their
+CLAIMED pages; score the joint application; or exempt the staleness gate when
+every miner's aggregate across the window scored positive at least once.
+Decide before the next protocol rev; do not patch ad hoc.
+
 ## Remaining — testnet-phase extensions (need a multi-party network)
 The single-operator devnet can't validate these; the testnet is their gate.
 - DEEP-REORG LIMIT (found live, quota-fork incident): a node cannot reorg onto
