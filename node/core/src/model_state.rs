@@ -59,6 +59,11 @@ pub struct GenesisParams {
     pub k_sustain: i64,
     pub growth_bound: i64,
     pub announce_lead: u64,
+    /// PROTOCOL v2 — the delta ENVELOPE: a body may never carry more nonzero
+    /// coordinates than this (~8MB raw sparse). The payload never scales with
+    /// quota: a rising quota narrows the claimable span (specialization)
+    /// instead of fattening the wire. Bitcoin's block-size lesson.
+    pub delta_max_nnz: u64,
 }
 
 impl GenesisParams {
@@ -73,6 +78,7 @@ impl GenesisParams {
             k_sustain: K_SUSTAIN,
             growth_bound: GROWTH_BOUND,
             announce_lead: ANNOUNCE_LEAD,
+            delta_max_nnz: 1_000_000,
         }
     }
 }

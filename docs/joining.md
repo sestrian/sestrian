@@ -1,16 +1,16 @@
 # Join the Sestrian devnet
 
 ```bash
-SESTRIAN_GENESIS_TAG=devnet-genesis-2 npx sestrian run
+SESTRIAN_GENESIS_TAG=devnet-genesis-3 npx sestrian run
 ```
 
 That is the whole thing. It downloads a prebuilt node for your platform, creates
 your wallet, fetches the 860MB genesis weights and joins the network. No clone,
 no compiler, no Python. (The `SESTRIAN_GENESIS_TAG` override is temporary: the
-published npm package predates devnet-genesis-2 and defaults to the retired
+published npm package predates devnet-genesis-3 and defaults to the retired
 genesis — the env var points it at the current one, and the node verifies
 whatever arrives against the id compiled into the binary either way. It
-disappears once the 0.4.0 package is published.) Then:
+disappears once the 0.5.0 package is published.) Then:
 
 ```bash
 npx sestrian status     # height, peers, whether you are actually earning
@@ -58,8 +58,8 @@ The installer reproduces the genesis from scratch (~2–3 min of CPU, plus a tor
 install). Point it at the published copy instead:
 
 ```bash
-SESTRIAN_GENESIS_URL=https://github.com/sestrian/sestrian/releases/download/devnet-genesis-2/genesis.bin.zst \
-SESTRIAN_GENESIS_SHA256=<zstd sha256 from the devnet-genesis-2 release manifest> \
+SESTRIAN_GENESIS_URL=https://github.com/sestrian/sestrian/releases/download/devnet-genesis-3/genesis.bin.zst \
+SESTRIAN_GENESIS_SHA256=<zstd sha256 from the devnet-genesis-3 release manifest> \
   scripts/install.sh
 ```
 
@@ -71,7 +71,7 @@ verification on its own if you want the file without the installer.
 ### Or run the container (no toolchain at all)
 
 ```bash
-curl -fL -o genesis.bin.zst https://github.com/sestrian/sestrian/releases/download/devnet-genesis-2/genesis.bin.zst
+curl -fL -o genesis.bin.zst https://github.com/sestrian/sestrian/releases/download/devnet-genesis-3/genesis.bin.zst
 zstd -d genesis.bin.zst && mkdir -p sestrian-data
 
 docker run --rm -it \
@@ -133,11 +133,11 @@ The current values, so you can verify what your node is using:
 |---|---|
 | network | `devnet` |
 | bootstrap peers | `/ip4/169.58.211.248/udp/9800/quic-v1` (EU) · `/ip4/13.140.32.27/udp/9800/quic-v1` (US) — either alone is enough to join |
-| genesis id (state root) | `a597316003dbf12122b7cc6f39226ce7c8f7a871e58e7ddf364e56b08102527b` — the PAGE-MERKLE root over the model's page table (protocol v1) |
-| model | 107.4M-param growable MoE GPT (~32M active/token), from scratch (`--model small-moe --seed 20260822`); the chain can GROW it — see /status `model` |
+| genesis id (state root) | `91bdcc281c0dbbd7b3bea3d38003e4c61565bcaa5fd8e7bfca296e6a4994ddb1` — the PAGE-MERKLE root over the model's page table (protocol v2) |
+| model | 107.4M-param growable MoE GPT (~32M active/token), from scratch (`--model small-moe --seed 20260824`); the chain can GROW it — see /status `model` |
 | genesis-ledger contributor | `3432d48fd6878b4f2e7a1e40cc15e112c512fae7` |
 | block interval | 180s |
-| protocol version | 1 |
+| protocol version | 2 — the DELTA ENVELOPE: a training update may never exceed 1M nonzero coordinates (~8MB), no matter the quota. Capacity pressure makes miners specialize on fewer experts, and sustained pressure grows the model — bytes per block stay bounded forever |
 | public API | http://169.58.211.248:8080/status |
 
 Running your own chain instead: `--network local`, and supply everything yourself.

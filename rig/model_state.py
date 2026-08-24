@@ -77,6 +77,14 @@ class GenesisParams:
     k_sustain: int = K_SUSTAIN
     growth_bound: int = GROWTH_BOUND
     announce_lead: int = ANNOUNCE_LEAD
+    # PROTOCOL v2 — the delta ENVELOPE (Bitcoin's block-size lesson): a delta
+    # body may never carry more than this many nonzero coordinates (~8MB raw
+    # sparse). Consensus must never scale the payload: a rising quota therefore
+    # forces miners to claim FEWER pages and train them DENSER (specialization)
+    # instead of uploading more bytes. At quota q the claimable span is bounded
+    # by delta_max_nnz * 1e6 / q_4dp params. Growth events relieve sustained
+    # saturation by widening the model — bytes per block stay bounded forever.
+    delta_max_nnz: int = 1_000_000
 
 
 ACTIVE, FROZEN = "A", "F"

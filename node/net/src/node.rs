@@ -602,8 +602,9 @@ impl Node {
                 outside = true;
                 break;
             }
-            if outside || nnz < model.required_nnz(&pages) {
-                self.quota_rejects += 1; // visible: below-quota / stray coords
+            if outside || nnz < model.required_nnz(&pages)
+                || nnz > self.tree.params.delta_max_nnz {
+                self.quota_rejects += 1; // below-quota / stray / over-envelope
                 return false;
             }
         }
@@ -671,6 +672,7 @@ impl Node {
                 .filter(|c| i32::from_le_bytes((*c).try_into().unwrap()) != 0)
                 .count() as u64;
             nnz >= parent_model.required_nnz(&pages)
+                && nnz <= self.tree.params.delta_max_nnz
         };
         let mut cands: Vec<&core::BackpropTx> = self.delta_pool.values()
             .filter(|t| t.base_height == hh)
@@ -1614,6 +1616,11 @@ pub async fn run(
                         let active_pages: Vec<u32> = model.pages.iter().enumerate()
                             .filter(|(_, p)| p.status == "A")
                             .map(|(i, _)| i as u32).collect();
+                        // v2: the trainer plans its CLAIM under the envelope —
+                        // budget params = delta_max_nnz * 1e6 / quota — so
+                        // min_nnz here is the floor for the WHOLE model only
+                        // when it fits the budget; the bridge recomputes the
+                        // real floor for the pages it actually claims.
                         let min_nnz = model.required_nnz(&active_pages);
                         let _ = node.bridge_tx.try_send(ToBridge::Train {
                             height: node.head_height(),
@@ -1624,6 +1631,8 @@ pub async fn run(
                             // includable rather than arriving stale.
                             budget_s: node.cfg.interval * 0.6,
                             min_nnz,
+                            max_nnz: node.tree.params.delta_max_nnz,
+                            quota_4dp: model.quota_4dp as u64,
                             active_pages,
                         });
                     }

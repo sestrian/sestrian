@@ -504,9 +504,15 @@ def main():
                            "all_pages": stq.required_nnz(list(range(len(st0.pages)))),
                            "one_expert": stq.required_nnz([1]),
                            "backbone": stq.required_nnz([0])})
+    # v2 ENVELOPE: budget = delta_max_nnz * 1e6 / quota_4dp — the claimable
+    # param bound that turns capacity pressure into specialization
+    env_rows = [{"quota_4dp": q, "delta_max_nnz": 1_000_000,
+                 "claim_budget_params": 1_000_000 * 1_000_000 // q}
+                for q in (2_500, 10_000, 46_844, 80_000)]
     v["quota"] = [{"spec_dim": st0.dim(),
                    "expert_page_len": spec.expert_page_len,
-                   "rows": quota_rows}]
+                   "rows": quota_rows,
+                   "envelope": env_rows}]
 
     # --- v1 controller fold: scripted per-block signals -> ModelState roots ---
     fparams = _GP(spec=spec, retarget_window=2, target_deltas=4,

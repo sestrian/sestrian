@@ -11,9 +11,9 @@ set -euo pipefail
 
 # --- live devnet parameters (see docs/joining.md) ---------------------------
 NETWORK="${SESTRIAN_NETWORK:-devnet}"
-GENESIS_ID="${SESTRIAN_GENESIS_ID:-a597316003dbf12122b7cc6f39226ce7c8f7a871e58e7ddf364e56b08102527b}"  # devnet-genesis-2 (page-Merkle root; PREVIEW until ceremony)
+GENESIS_ID="${SESTRIAN_GENESIS_ID:-91bdcc281c0dbbd7b3bea3d38003e4c61565bcaa5fd8e7bfca296e6a4994ddb1}"  # devnet-genesis-3 (page-Merkle root; PREVIEW until ceremony)
 MODEL="${SESTRIAN_MODEL:-small-moe}"
-GENESIS_SEED="${SESTRIAN_GENESIS_SEED:-20260822}"
+GENESIS_SEED="${SESTRIAN_GENESIS_SEED:-20260824}"
 INTERVAL="${SESTRIAN_INTERVAL:-180}"
 
 MINE=0; SERVICE=0

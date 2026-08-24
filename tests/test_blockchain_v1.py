@@ -89,7 +89,7 @@ def test_v1_chain_builds_and_replays_bit_exact():
     _grow_chain(tree, 6, _miners())
     head = tree.blocks[tree.head]
     assert head.header.height == 6
-    assert head.header.version == expected_version(6) == 1
+    assert head.header.version == expected_version(6) == 2
     m = tree.head_model()
     assert page_state_root(tree.replay_head(), m) == head.header.state_root
     assert m.model_root() == head.header.model_root
@@ -184,6 +184,48 @@ def test_quota_and_claim_rules():
     assert tree.add_block(send(_body(rng, model, [1]), [1])) is not None
 
 
+def test_v2_delta_envelope():
+    """The payload never scales with quota: nnz above delta_max_nnz is
+    invalid no matter how much work it represents. Specialization math: at a
+    high quota the envelope bounds the claimable span."""
+    spec = SPEC
+    tight = GenesisParams(spec=spec, retarget_window=PARAMS.retarget_window,
+                          target_deltas=PARAMS.target_deltas,
+                          delta_max_nnz=8)
+    tree = BlockTree(quantize(np.zeros(DIM0)), params=tight,
+                     data_contributor=FOUNDER)
+    m = _miners(1)
+    rng = np.random.default_rng(23)
+    model = tree.head_model()
+    # a dense-enough claim whose nnz exceeds the tiny envelope -> rejected
+    body = np.zeros(model.dim(), dtype=np.int64)
+    s0, e0 = model.page_span(0)
+    body[s0:s0 + 9] = 7                                # nnz=9 > cap 8
+    ptr = "da://env/1"
+    tx = BackpropTx(miner=m[0].pub, base_height=0,
+                    delta_hash=delta_hash(body.tobytes()), da_pointer=ptr,
+                    pages=[0], data_refs=["genesis"]).signed(m[0])
+    att = _eligible_attempt(tree, tree.head, m[0])
+    blk = build_block(tree, tree.head, [tx], {ptr: body}, {}, m[0],
+                      scores={tx.txid(): 1000}, attempt=att)
+    with pytest.raises(ValidationError, match="envelope"):
+        tree.add_block(blk)
+    # same claim within the envelope -> accepted
+    body2 = np.zeros(model.dim(), dtype=np.int64)
+    body2[s0:s0 + 8] = 7                               # nnz=8 == cap
+    ptr2 = "da://env/2"
+    tx2 = BackpropTx(miner=m[0].pub, base_height=0,
+                     delta_hash=delta_hash(body2.tobytes()), da_pointer=ptr2,
+                     pages=[0], data_refs=["genesis"]).signed(m[0])
+    blk2 = build_block(tree, tree.head, [tx2], {ptr2: body2}, {}, m[0],
+                       scores={tx2.txid(): 1000}, attempt=att)
+    assert tree.add_block(blk2) is not None
+    # specialization bound: claimable params shrink as quota rises
+    hi_q = 80000
+    budget = tight.delta_max_nnz * 1_000_000 // hi_q
+    assert budget < model.dim()  # cannot claim the whole model at 8x
+
+
 def test_eligibility_and_version_enforced():
     tree = _tree()
     miners = _miners(2)
@@ -216,6 +258,6 @@ def test_eligibility_and_version_enforced():
                             0, led.supply())
     # a wrong header version is rejected
     good = _block(tree, parent, [key], rng)
-    good.header.version = 2
+    good.header.version = 3
     with pytest.raises(ValidationError, match="version"):
         tree.add_block(good)

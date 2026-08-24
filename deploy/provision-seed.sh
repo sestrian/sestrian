@@ -23,9 +23,9 @@ REPO_HTTPS="https://github.com/sestrian/sestrian.git"
 # A re-genesis is a values-only change: flip these three (env or defaults) and
 # re-run. GENESIS_ID is the published genesis_state_root the generated artifact
 # MUST hash to; $APP/genesis.id records which identity this box currently holds.
-GENESIS_ID=${SESTRIAN_GENESIS_ID:-a597316003dbf12122b7cc6f39226ce7c8f7a871e58e7ddf364e56b08102527b}
+GENESIS_ID=${SESTRIAN_GENESIS_ID:-91bdcc281c0dbbd7b3bea3d38003e4c61565bcaa5fd8e7bfca296e6a4994ddb1}
 GENESIS_MODEL=${SESTRIAN_MODEL:-small-moe}
-GENESIS_SEED=${SESTRIAN_GENESIS_SEED:-20260822}
+GENESIS_SEED=${SESTRIAN_GENESIS_SEED:-20260824}
 
 DATA_CONTRIBUTOR="3432d48fd6878b4f2e7a1e40cc15e112c512fae7"
 # Optional: comma-separated multiaddrs of the OTHER anchors. The first seed runs

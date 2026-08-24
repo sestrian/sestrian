@@ -58,7 +58,7 @@ fn header(tree: &BlockTree, height: u64, n_txs: u64) -> core::Header {
         sketch_root: String::new(),
         model_root: String::new(),
         vrf_attempt: 0,
-        version: 1,
+        version: 2,
     }
 }
 
@@ -163,7 +163,7 @@ fn rejects_wrong_length_delta_body() {
 fn rejects_wrong_version() {
     let mut tree = genesis_tree();
     let mut h = header(&tree, 1, 0);
-    h.version = 2; // not the scheduled version for this height
+    h.version = 3; // not the scheduled version for this height
     let e = tree.add_block(empty_block(h)).unwrap_err();
     assert!(e.0.contains("header version"), "got: {}", e.0);
 }

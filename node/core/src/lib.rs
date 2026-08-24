@@ -247,7 +247,7 @@ pub fn txset_root(txids: &[String]) -> String {
 /// version, and validation requires it to equal the scheduled version for its
 /// height. A future upgrade appends (activation_height, version) here; nodes
 /// that don't know a version reject its blocks with "upgrade your node".
-pub const VERSION_SCHEDULE: &[(u64, u64)] = &[(0, 1)];
+pub const VERSION_SCHEDULE: &[(u64, u64)] = &[(0, 2)]; // v2: the delta envelope
 
 pub fn expected_version(height: u64) -> u64 {
     let mut v = VERSION_SCHEDULE[0].1;

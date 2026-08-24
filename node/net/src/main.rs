@@ -94,11 +94,12 @@ fn genesis_params(net: &NetworkParams) -> core::model_state::GenesisParams {
         if let Some(v) = env_i64("SESTRIAN_LOCAL_QUOTA_MAX_4DP") { gp.quota_max_4dp = v; }
         if let Some(v) = env_i64("SESTRIAN_LOCAL_K_SUSTAIN") { gp.k_sustain = v; }
         if let Some(v) = env_u64("SESTRIAN_LOCAL_ANNOUNCE_LEAD") { gp.announce_lead = v; }
+        if let Some(v) = env_u64("SESTRIAN_LOCAL_DELTA_MAX_NNZ") { gp.delta_max_nnz = v; }
     }
     gp
 }
 
-// devnet-genesis-2 (protocol v1): the ~107.4M-param MoE model, page-Merkle
+// devnet-genesis-3 (protocol v2 — the delta envelope): ~107.4M-param MoE,
 // state commitment. CEREMONY NOTE: genesis_state_root below is the PREVIEW
 // value from the pre-release build — docs/genesis-ceremony.md requires it to be
 // regenerated and cross-verified on BOTH founder machines (MPS + CUDA) against
@@ -106,11 +107,11 @@ fn genesis_params(net: &NetworkParams) -> core::model_state::GenesisParams {
 // refuses to publish on any mismatch.
 const DEVNET: NetworkParams = NetworkParams {
     name: "devnet",
-    genesis_state_root: "a597316003dbf12122b7cc6f39226ce7c8f7a871e58e7ddf364e56b08102527b",
+    genesis_state_root: "91bdcc281c0dbbd7b3bea3d38003e4c61565bcaa5fd8e7bfca296e6a4994ddb1",
     data_contributor: "3432d48fd6878b4f2e7a1e40cc15e112c512fae7",
     genesis_model: "small-moe",
-    genesis_seed: 20260822,
-    genesis_url: "https://github.com/sestrian/sestrian/releases/download/devnet-genesis-2/genesis.bin.zst",
+    genesis_seed: 20260824,
+    genesis_url: "https://github.com/sestrian/sestrian/releases/download/devnet-genesis-3/genesis.bin.zst",
     // Names first, then the literal IPs they currently point at. The names are
     // what let an anchor move hosts — repoint DNS instead of cutting a release
     // and hoping everyone upgrades. The IPs stay as a floor so this build still

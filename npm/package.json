@@ -1,6 +1,6 @@
 {
   "name": "sestrian",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Run a Sestrian node \u2014 a blockchain whose state is the weights of a public neural network.",
   "bin": {
     "sestrian": "bin/sestrian.js"

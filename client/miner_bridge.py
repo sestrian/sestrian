@@ -203,25 +203,54 @@ def run(a):
                     # least the node's work-quota floor (min_nnz).
                     chain_delta = to_chain(delta_int)
                     min_nnz = int(msg.get("min_nnz", 0))
+                    max_nnz = int(msg.get("max_nnz", 0))
+                    quota_4dp = int(msg.get("quota_4dp", 0))
                     if layout is not None:
                         active = msg.get("active_pages")
                         active = list(range(layout.n_pages())) if active is None \
                             else [int(p) for p in active]
-                        chain_delta = layout.zero_outside(chain_delta, active)
+                        # PROTOCOL v2 — CLAIM PLANNING under the delta envelope:
+                        # the payload never grows with quota, so a rising quota
+                        # shrinks the claimable span. Budget the claim in params
+                        # (max_nnz * 1e6 / quota), rank active pages by the
+                        # gradient mass this round actually produced, and claim
+                        # greedily — the miner SPECIALIZES on the experts its
+                        # data teaches best instead of spraying the whole model.
+                        if max_nnz and quota_4dp:
+                            budget = max_nnz * 1_000_000 // quota_4dp
+                            spans = {p: layout.page_span(p) for p in active}
+                            mass = {p: int(np.abs(
+                                        chain_delta[spans[p][0]:spans[p][1]]
+                                    ).sum()) for p in active}
+                            ranked = sorted(active,
+                                            key=lambda p: (-mass[p], p))
+                            claim, used = [], 0
+                            for pg in ranked:
+                                plen = spans[pg][1] - spans[pg][0]
+                                if used + plen <= budget and mass[pg] > 0:
+                                    claim.append(pg)
+                                    used += plen
+                            if not claim:            # degenerate round: claim
+                                claim = [ranked[0]]  # the strongest page anyway
+                            claim.sort()
+                            min_nnz = used * quota_4dp // 1_000_000
+                        else:
+                            claim = active
+                        chain_delta = layout.zero_outside(chain_delta, claim)
                         if comp.residual is not None and \
                                 comp.residual.shape[0] == layout.n:
-                            # error feedback must not resurrect frozen-page
-                            # coordinates — the tx couldn't claim them
+                            # error feedback must not resurrect coordinates the
+                            # tx couldn't claim (frozen or outside this claim)
                             comp.residual = layout.zero_outside(
-                                comp.residual, active)
+                                comp.residual, claim)
                         payload = comp.compress(dequantize(chain_delta),
-                                                min_keep=min_nnz)
-                        pages = layout.pages_touched(
-                            _sparse_dense_local(payload))
-                        pages = sorted(set(pages) & set(active)) or active[:1]
+                                                min_keep=min_nnz,
+                                                max_keep=max_nnz)
+                        pages = sorted(claim)
                     else:
                         payload = comp.compress(dequantize(chain_delta),
-                                                min_keep=min_nnz)
+                                                min_keep=min_nnz,
+                                                max_keep=max_nnz)
                         pages = [0]
                     # inner_train mutated the model; restore chain state so the
                     # next round trains from the agreed head, not our drift

@@ -5,6 +5,26 @@ and verifiable **before** block 1 exists — credibility is set at launch and
 cannot be retrofitted (WHITEPAPER §9.8). This document is the checklist and the
 script; each item names the mechanism that already implements it.
 
+## Ceremony 3 — devnet-genesis-3 (protocol v2, 2026-08-24)
+
+**Why.** The first live capacity retarget exposed a design inversion: the work
+quota scaled the *payload*, so rising capacity made every delta bigger until no
+transport path could carry one (~92MB at 4.7x) and the network forked. Protocol
+v2 applies Bitcoin's block-size lesson: **consensus never scales the payload.**
+A delta may never exceed `delta_max_nnz = 1,000,000` nonzero coordinates
+(~8MB). A rising quota now narrows the claimable span — miners specialize on
+the experts their data teaches best — and sustained saturation still grows the
+model on-chain. Bytes per block are bounded forever (~3Mbit/s worst case).
+
+**Ceremony-3 deltas from the table below:** `genesis_seed` **20260824**;
+`genesis_state_root` **`91bdcc281c0dbbd7b3bea3d38003e4c61565bcaa5fd8e7bfca296e6a4994ddb1`**
+(model spec unchanged — small-moe, model_root identical to ceremony 2);
+`protocol_version` **2** (`VERSION_SCHEDULE` [(0, 2)]); `delta_max_nnz`
+1,000,000 joins the retarget row as a consensus parameter. Anchors unchanged.
+devnet-2 record: forked at height 64 by the quota rise (the incident this
+ceremony fixes); final unified branch height ~165; both miner identities were
+the founders'. Backups retained on every operator machine.
+
 ## Ceremony 2 — devnet-genesis-2 (protocol v1, 2026-08-22)
 
 **Why a re-genesis.** Protocol v1 changed the chain's consensus surface in ways

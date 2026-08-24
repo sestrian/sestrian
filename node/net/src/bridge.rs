@@ -32,6 +32,7 @@ pub enum ToBridge {
     /// `active_pages` is the claimable set — deltas must be zero on frozen
     /// pages or validation rejects them.
     Train { height: u64, seed: u64, budget_s: f64, min_nnz: u64,
+            max_nnz: u64, quota_4dp: u64,
             active_pages: Vec<u32> },
     Advance { height: u64, dim: u64, sparse: SparseI64 },
     /// v1 GROWTH EVENT: the chain appended one expert page; the bridge appends
@@ -168,9 +169,11 @@ async fn serve_one(
                             e => e,
                         }
                     }
-                    ToBridge::Train { height, seed, budget_s, min_nnz, active_pages } => {
+                    ToBridge::Train { height, seed, budget_s, min_nnz,
+                                      max_nnz, quota_4dp, active_pages } => {
                         let m = json!({"t": "train", "height": height, "seed": seed,
                                        "budget_s": budget_s, "min_nnz": min_nnz,
+                                       "max_nnz": max_nnz, "quota_4dp": quota_4dp,
                                        "active_pages": active_pages});
                         write_frame(&mut wr, m.to_string().as_bytes()).await
                     }

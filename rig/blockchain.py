@@ -42,7 +42,7 @@ def _sha(b: bytes) -> str:
 # version, and validation requires it to equal the scheduled version for its
 # height. A future upgrade appends (activation_height, version) here; nodes
 # that don't know a version reject its blocks with "upgrade your node".
-VERSION_SCHEDULE: tuple = ((0, 1),)
+VERSION_SCHEDULE: tuple = ((0, 2),)   # protocol v2: the delta envelope
 
 
 def expected_version(height: int) -> int:
@@ -352,6 +352,11 @@ def validate_block(block: Block, parent_w_int: np.ndarray, parent_height: int,
             nnz = int(np.count_nonzero(body))
             if nnz < parent_model.required_nnz(pages):
                 raise ValidationError("delta below work quota")
+            # v2 ENVELOPE: the payload never scales with quota. A delta over
+            # the cap is invalid no matter how much work it carries — a rising
+            # quota narrows the claimable span instead of fattening the wire.
+            if params is not None and nnz > params.delta_max_nnz:
+                raise ValidationError("delta exceeds the envelope (max nnz)")
     # 2. tx-set root matches
     if txset_root(block.txs) != h.txset_root:
         raise ValidationError("txset_root mismatch")

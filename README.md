@@ -50,7 +50,7 @@ python -m client.wallet new                      # your identity AND your balanc
 
 # reproduce the genesis — must print state_root a5973160…527b (the page-Merkle root)
 uv run --with torch --with numpy --with pynacl \
-    python -m client.make_genesis --model small-moe --seed 20260822 --out genesis.bin
+    python -m client.make_genesis --model small-moe --seed 20260824 --out genesis.bin
 
 # check you can actually contribute BEFORE committing hours to it
 node/target/release/sestrian-node --check \

@@ -159,7 +159,7 @@ async function ensureBinary() {
 // genesis state root — checking the download IS checking the chain identity,
 // not merely that a file arrived intact.
 
-const GENESIS_TAG = process.env.SESTRIAN_GENESIS_TAG || 'devnet-genesis-2';
+const GENESIS_TAG = process.env.SESTRIAN_GENESIS_TAG || 'devnet-genesis-3';
 
 function human(n) {
   return n >= 1 << 30 ? `${(n / 2 ** 30).toFixed(2)}GB` : `${Math.round(n / 2 ** 20)}MB`;

@@ -400,6 +400,7 @@ fn params_from(spec: core::model_state::ModelSpec, p: &Value) -> core::model_sta
         k_sustain: p["k_sustain"].as_i64().unwrap(),
         growth_bound: p["growth_bound"].as_i64().unwrap(),
         announce_lead: p["announce_lead"].as_u64().unwrap(),
+        delta_max_nnz: 1_000_000,
     }
 }
 
@@ -614,6 +615,16 @@ fn quota_matches_reference() {
             assert_eq!(st.required_nnz(&all), row["all_pages"].as_u64().unwrap());
             assert_eq!(st.required_nnz(&[1]), row["one_expert"].as_u64().unwrap());
             assert_eq!(st.required_nnz(&[0]), row["backbone"].as_u64().unwrap());
+        }
+        // v2 ENVELOPE: budget = delta_max_nnz * 1e6 / quota_4dp (floor) — the
+        // claimable-params bound that turns capacity pressure into
+        // specialization instead of bigger payloads
+        for row in case["envelope"].as_array().unwrap() {
+            let cap = row["delta_max_nnz"].as_u64().unwrap() as u128;
+            let q = row["quota_4dp"].as_u64().unwrap() as u128;
+            let budget = cap * 1_000_000 / q;
+            assert_eq!(budget as u64,
+                       row["claim_budget_params"].as_u64().unwrap());
         }
     }
 }

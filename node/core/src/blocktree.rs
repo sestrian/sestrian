@@ -198,6 +198,11 @@ pub fn validate_block(
         if nnz < parent_model.required_nnz(&pages) {
             return Err(err("delta below work quota"));
         }
+        // v2 ENVELOPE: over the cap is invalid no matter how much work it
+        // carries — capacity pressure narrows claims, never fattens the wire
+        if nnz > params.delta_max_nnz {
+            return Err(err("delta exceeds the envelope (max nnz)"));
+        }
     }
     // 2. tx-set root
     let ids: Vec<String> = block.txs.iter().map(|t| t.txid()).collect();

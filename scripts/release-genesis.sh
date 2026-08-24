@@ -18,12 +18,12 @@
 set -euo pipefail
 
 MODEL="${SESTRIAN_MODEL:-small-moe}"
-SEED="${SESTRIAN_GENESIS_SEED:-20260822}"
-# devnet-genesis-2 (protocol v1): state_root is the PAGE-MERKLE root over the
+SEED="${SESTRIAN_GENESIS_SEED:-20260824}"
+# devnet-genesis-3 (protocol v1): state_root is the PAGE-MERKLE root over the
 # consensus page table — the value node/net/src/main.rs bakes in. The default
 # below is the pre-ceremony PREVIEW; docs/genesis-ceremony.md requires the
 # ceremony to regenerate on BOTH founder machines and update it before publish.
-EXPECT="${SESTRIAN_GENESIS_ID:-a597316003dbf12122b7cc6f39226ce7c8f7a871e58e7ddf364e56b08102527b}"
+EXPECT="${SESTRIAN_GENESIS_ID:-91bdcc281c0dbbd7b3bea3d38003e4c61565bcaa5fd8e7bfca296e6a4994ddb1}"
 OUT="${1:-dist}"
 
 cd "$(dirname "$0")/.."

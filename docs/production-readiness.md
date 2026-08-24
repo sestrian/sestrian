@@ -39,6 +39,17 @@ each phase.
 - ✅ Trainer watchdog + clock guard (107)
 - ✅ SIGTERM graceful shutdown → final snapshot (131)
 
+## Protocol v2 — the delta envelope (devnet-genesis-3)
+- ✅ `delta_max_nnz` consensus cap (1M coords ≈ 8MB): the payload never scales
+  with quota — capacity pressure produces SPECIALIZATION (miners claim fewer
+  pages, train them denser; claim budget = cap × 1e6 / quota) and sustained
+  saturation still triggers on-chain growth. Bitcoin's block-size lesson,
+  applied after the quota-fork incident proved the inverse design fails.
+  Enforced in rig + core validation, mempool admission, producer filter;
+  golden-vectored (quota family envelope rows); trainer plans claims by
+  gradient mass under the budget. Proven live locally: devnet convergence with
+  a forced tight envelope + growth-proof both green under v2.
+
 ## Trust model — 🧪/📐 (blocks Phase 3; a small monitored devnet mitigates Phase 1/2)
 - 🧪 DA layer primitive: erasure coding + Merkle sampling (`core::da`) (111)
   - ☐ node routing: disperse on submit, sample on validate, reconstruct on
