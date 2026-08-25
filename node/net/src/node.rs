@@ -1530,14 +1530,6 @@ pub async fn run(
 
     // ---- net-side state ----
     let mut cached_head = initial_head;
-    // SERVE MEMORY BOUND: outstanding big responses per peer. A stalled or
-    // churning client can otherwise pin one ~31MB response per request in
-    // the behaviour's outbound queues until the wire drains — the US anchor
-    // was OOM-killed at ~7.7GB doing exactly that while solo-serving a
-    // 290-block join. Over the cap, requests get an EMPTY response, which
-    // the client's catch-up loop treats as a no-op and simply retries.
-    const MAX_SERVES_PER_PEER: u32 = 2;
-    let mut serving: HashMap<PeerId, u32> = HashMap::new();
     let mut last_announced_round: i64 = -1;
     let mut last_foreign_head = now();
     let mut silent_rounds: u64 = 0;
@@ -1663,7 +1655,6 @@ pub async fn run(
                                 let _ = swarm.disconnect_peer_id(*p);
                             }
                             last_sync_req.clear();
-                            serving.clear();
                             sync_req_id.clear();
                             silent_rounds = 0;
                             dial_peers(&mut swarm, &cfg_peers);
@@ -1727,33 +1718,16 @@ pub async fn run(
                 SwarmEvent::Behaviour(BehaviourEvent::Sync(
                         request_response::Event::InboundFailure { peer, error, .. })) => {
                     warn!(%peer, %error, "sync response delivery failed");
-                    serving.entry(peer).and_modify(|n| *n = n.saturating_sub(1));
-                }
-                SwarmEvent::Behaviour(BehaviourEvent::Sync(
-                        request_response::Event::ResponseSent { peer, .. })) => {
-                    serving.entry(peer).and_modify(|n| *n = n.saturating_sub(1));
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Sync(
                         request_response::Event::Message { peer, message, .. })) => {
                     match message {
                         request_response::Message::Request { request, channel, .. } => {
-                            let n = serving.entry(peer).or_insert(0);
-                            if *n >= MAX_SERVES_PER_PEER {
-                                let _ = swarm.behaviour_mut().sync.send_response(
-                                    channel, SyncResponse {
-                                        blocks: Vec::new(),
-                                        payloads: HashMap::new(),
-                                        head_height: cached_head.1,
-                                        genesis: None,
-                                    });
-                            } else {
-                                *n += 1;
-                                let (otx, orx) = tokio::sync::oneshot::channel();
-                                let _ = chain_tx.send(ToChain::SyncServe(request, otx));
-                                replies.push(Box::pin(async move {
-                                    Reply::Sync(channel, orx.await.ok())
-                                }));
-                            }
+                            let (otx, orx) = tokio::sync::oneshot::channel();
+                            let _ = chain_tx.send(ToChain::SyncServe(request, otx));
+                            replies.push(Box::pin(async move {
+                                Reply::Sync(channel, orx.await.ok())
+                            }));
                         }
                         request_response::Message::Response {
                                 response, request_id, .. } => {
@@ -1785,28 +1759,16 @@ pub async fn run(
                 SwarmEvent::Behaviour(BehaviourEvent::Shards(
                         request_response::Event::InboundFailure { peer, error, .. })) => {
                     warn!(%peer, %error, "shard response delivery failed");
-                    serving.entry(peer).and_modify(|n| *n = n.saturating_sub(1));
-                }
-                SwarmEvent::Behaviour(BehaviourEvent::Shards(
-                        request_response::Event::ResponseSent { peer, .. })) => {
-                    serving.entry(peer).and_modify(|n| *n = n.saturating_sub(1));
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Shards(
                         request_response::Event::Message { peer, message, .. })) => {
                     match message {
                         request_response::Message::Request { request, channel, .. } => {
-                            let n = serving.entry(peer).or_insert(0);
-                            if *n >= MAX_SERVES_PER_PEER {
-                                let _ = swarm.behaviour_mut().shards.send_response(
-                                    channel, ShardResponse { bodies: Vec::new() });
-                            } else {
-                                *n += 1;
-                                let (otx, orx) = tokio::sync::oneshot::channel();
-                                let _ = chain_tx.send(ToChain::ShardServe(request, otx));
-                                replies.push(Box::pin(async move {
-                                    Reply::Shards(channel, orx.await.ok())
-                                }));
-                            }
+                            let (otx, orx) = tokio::sync::oneshot::channel();
+                            let _ = chain_tx.send(ToChain::ShardServe(request, otx));
+                            replies.push(Box::pin(async move {
+                                Reply::Shards(channel, orx.await.ok())
+                            }));
                         }
                         request_response::Message::Response {
                                 response, request_id, .. } => {
