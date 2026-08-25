@@ -33,6 +33,49 @@
 {$SESTRIAN_HOSTNAMES} {
 	encode zstd gzip
 
+	# ── chat ────────────────────────────────────────────────────────────
+	# The one route that needs a secret. /chat is an OPERATOR endpoint on the
+	# node — it monopolises the inference bridge — so it is bearer-token gated.
+	# A static page cannot hold a secret, so Caddy attaches the token here and
+	# the browser never sees it. The token lives in /opt/sestrian/node.env
+	# (0600) and reaches Caddy through the systemd drop-in.
+	#
+	# No fallback to the other anchor: only the anchor running a serve-only
+	# bridge has a model attached, and a peer without one answers "no model
+	# attached to this node yet" — a confusing error rather than a useful one.
+	handle /chat {
+		# The node truncates prompts to 1000 chars anyway; refuse absurd bodies
+		# before they reach it.
+		request_body {
+			max_size 8KB
+		}
+
+		# A JSON POST is not a "simple" cross-origin request, so the browser
+		# sends a preflight first. Answer it here: the node adds CORS only to
+		# its read-only routes, and deliberately not to this one.
+		@preflight method OPTIONS
+		handle @preflight {
+			header {
+				Access-Control-Allow-Origin "*"
+				Access-Control-Allow-Methods "POST, OPTIONS"
+				Access-Control-Allow-Headers "Content-Type"
+				Access-Control-Max-Age "86400"
+			}
+			respond 204
+		}
+
+		header Access-Control-Allow-Origin "*"
+		reverse_proxy localhost:8080 {
+			header_up Authorization "Bearer {$SESTRIAN_API_TOKEN}"
+			# A CPU generation is ~18s for 120 tokens on this box, and the node
+			# serialises them. Give it room rather than cutting off an answer the
+			# model already spent the cycles producing.
+			transport http {
+				read_timeout 180s
+			}
+		}
+	}
+
 	reverse_proxy localhost:8080 {$SESTRIAN_PEER}:8080 {
 		# Preferred order, not round-robin: normal traffic stays on the local node
 		# and only crosses to the other anchor when this one is actually failing.
