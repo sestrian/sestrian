@@ -1056,6 +1056,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         peers_connected: 0,
         chat_pending: Vec::new(),
         chat_inflight: false,
+        chat_deadline: 0.0,
         stale_deltas: 0,
         quota_rejects: 0,
         serve_shard_cursor: Default::default(),

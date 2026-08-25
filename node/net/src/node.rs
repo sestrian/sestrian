@@ -44,6 +44,10 @@ const MAX_SEEN: usize = 100_000;
 // (~18MB/block) sends only a few (protects small peers / slow uplinks). We keep
 // at most one request in flight per peer, but re-request as soon as the previous
 // response lands — so a node that fell behind actually recovers.
+/// How long a generation may run before a new request may reclaim the bridge.
+/// Generously above the ~18s a 120-token CPU generation takes on an anchor, so
+/// a slow answer is never stolen from the person waiting on it.
+const CHAT_TIMEOUT_S: f64 = 150.0;
 const SYNC_MAX_BLOCKS: usize = 64;
 // 16MB (was 48): with the catch-up cursor + immediate re-request, small batches
 // cost only an extra round-trip each, while a giant response is exactly what
@@ -658,6 +662,12 @@ pub struct Node {
     pub peers_connected: usize,
     pub chat_pending: Vec<tokio::sync::oneshot::Sender<Value>>,
     pub chat_inflight: bool,
+    /// Wall-clock deadline for the in-flight generation. Without it a single
+    /// dropped reply from the bridge wedges chat until the node restarts:
+    /// `chat_inflight` clears only on Generated or a bridge reconnect, so a
+    /// generation that never comes back leaves every later request answered
+    /// "generating for someone else" forever. Observed live.
+    pub chat_deadline: f64,
     /// consecutive deltas dropped as stale — a slow trainer mining for nothing.
     /// Surfaced in /status + /metrics so the failure is visible, not silent.
     pub stale_deltas: u64,
@@ -2707,11 +2717,22 @@ impl Node {
                 if !self.bridge_synced {
                     let _ = o.send(json!({"ok": false,
                         "error": "no model attached to this node yet"}));
-                } else if self.chat_inflight {
+                } else if self.chat_inflight && now() < self.chat_deadline {
                     let _ = o.send(json!({"ok": false,
                         "error": "model is generating for someone else — try again"}));
                 } else {
+                    // Past the deadline, TAKE OVER instead of staying stuck. Any
+                    // earlier waiter has long since timed out client-side, but
+                    // answer it rather than dropping its channel silently.
+                    if self.chat_inflight {
+                        warn!("previous generation never returned — reclaiming the bridge");
+                        for tx in self.chat_pending.drain(..) {
+                            let _ = tx.send(json!({"ok": false,
+                                "error": "previous generation timed out"}));
+                        }
+                    }
                     self.chat_inflight = true;
+                    self.chat_deadline = now() + CHAT_TIMEOUT_S;
                     self.chat_pending.push(o);
                     let _ = self.bridge_tx.try_send(ToBridge::Generate {
                         prompt, n: 120,
