@@ -1041,3 +1041,26 @@ fn corpus_da_matches_reference() {
                    "da_root diverged at size {n}");
     }
 }
+
+#[test]
+fn version_schedule_matches_reference() {
+    // The rig and the node must agree on which header version a height
+    // requires. Nothing pinned this before, and a one-sided v4 bump shipped:
+    // the rig started expecting version 4 at its activation height while
+    // expected_version_at never learned about v4, so the reference would have
+    // rejected the live chain and golden-parity passed anyway. Any future
+    // bump has to move both implementations or fail right here.
+    use sestrian_core::model_state::GenesisParams;
+    let v = vectors();
+    let case = &v["version_schedule"][0];
+    let spec = spec_from(&v["controller_fold"][0]["spec"]);
+    let mut params = GenesisParams::new(spec);
+    params.v3_height = case["v3_height"].as_u64().unwrap();
+    params.v4_height = case["v4_height"].as_u64().unwrap();
+    for row in case["rows"].as_array().unwrap() {
+        let h = row["height"].as_u64().unwrap();
+        assert_eq!(sestrian_core::expected_version_at(h, &params),
+                   row["version"].as_u64().unwrap(),
+                   "version schedule diverges from the reference at height {h}");
+    }
+}

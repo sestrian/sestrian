@@ -48,10 +48,18 @@ VERSION_SCHEDULE: tuple = ((0, 2),)   # base protocol at genesis: v2 (envelope)
 def expected_version(height: int, params=None) -> int:
     # v3 (the learning gate) activates at params.v3_height — a coordinated
     # scheduled upgrade, the first use of the version mechanism in anger.
-    # v4 (the quorum gate) is the second scheduled upgrade; check it first so
-    # the newest applicable rule wins.
-    if params is not None and height >= params.v4_height:
-        return 4
+    # NOTE (v4): the quorum gate deliberately does NOT bump the header
+    # version. It shipped without one — the Rust mirror's expected_version_at
+    # was never updated — and by the time that was found the live devnet had
+    # already folded v4 rules from its activation height, so moving either
+    # height would have invalidated real history. The version field must
+    # never claim rules that are not in force, so the spec records what is
+    # true: v4 is signalled by the ModelState rev instead, which is inside
+    # the canonical JSON and therefore committed via model_root. A pre-v4
+    # node still fails loudly at the first v4 block, with "model_root
+    # mismatch" rather than "upgrade your node". Version bumps resume at v5,
+    # and the version_schedule golden family now pins rig == Rust so a
+    # one-sided bump can never pass CI again.
     if params is not None and height >= params.v3_height:
         return 3
     v = VERSION_SCHEDULE[0][1]

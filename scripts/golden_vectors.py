@@ -616,6 +616,20 @@ def main():
                          "win_scorers": list(st4.win_scorers),
                          "activations": [[a, l, e, t] for a, l, e, t in facts],
                          "model_root": st4.model_root()})
+    # --- version schedule: rig == Rust, pinned ------------------------------
+    # This family exists because its absence let a one-sided version bump ship:
+    # the rig gained a v4 branch, expected_version_at never did, and
+    # golden-parity passed while the two implementations disagreed about which
+    # header version a live height requires. Any future bump must move BOTH or
+    # fail here.
+    from rig.blockchain import expected_version as _expver
+    ver_params = _GP(spec=spec, v3_height=288, v4_height=416)
+    v["version_schedule"] = [{
+        "v3_height": 288, "v4_height": 416,
+        "rows": [{"height": h, "version": _expver(h, ver_params)}
+                 for h in (0, 1, 287, 288, 289, 415, 416, 417, 1000, 10**6)],
+    }]
+
     v["v4_fold"] = [{
         "v3_height": 0, "v4_height": 3, "growth_quorum": 2,
         "retarget_window": 4, "target_deltas": 4, "quota_max_4dp": 20_000,

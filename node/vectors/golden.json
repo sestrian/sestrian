@@ -2537,6 +2537,54 @@
    "final_events": 1
   }
  ],
+ "version_schedule": [
+  {
+   "v3_height": 288,
+   "v4_height": 416,
+   "rows": [
+    {
+     "height": 0,
+     "version": 2
+    },
+    {
+     "height": 1,
+     "version": 2
+    },
+    {
+     "height": 287,
+     "version": 2
+    },
+    {
+     "height": 288,
+     "version": 3
+    },
+    {
+     "height": 289,
+     "version": 3
+    },
+    {
+     "height": 415,
+     "version": 3
+    },
+    {
+     "height": 416,
+     "version": 3
+    },
+    {
+     "height": 417,
+     "version": 3
+    },
+    {
+     "height": 1000,
+     "version": 3
+    },
+    {
+     "height": 1000000,
+     "version": 3
+    }
+   ]
+  }
+ ],
  "v4_fold": [
   {
    "v3_height": 0,

@@ -116,6 +116,21 @@ by 17 golden-vector families, including an overflow case.
   heuristic against an honest plateau, not a control against a Byzantine
   proposer.
 
+- **v4 does not bump the header version (shipped that way, spec corrected to
+  match).** The rig gained a v4 branch in `expected_version`; the Rust mirror's
+  `expected_version_at` never did, so the node kept producing version-3 headers
+  past the activation height while the reference expected version 4 — the
+  reference would have rejected the live chain. Found by inspecting live
+  headers, NOT by CI: no golden family covered the version schedule, so
+  golden-parity passed while the two implementations disagreed. Since the live
+  chain had already folded v4 rules from its activation height, moving either
+  height would have invalidated real history, so the spec now records reality:
+  **v4 is signalled by the ModelState rev, which is in the canonical JSON and
+  therefore committed via model_root.** A pre-v4 node still fails loudly at the
+  first v4 block ("model_root mismatch" instead of "upgrade your node") — same
+  safety, worse diagnostics. The `version_schedule` golden family now pins
+  rig == Rust across every boundary; version bumps resume at v5.
+
 ## Residual risk / do-not-do
 
 - Do **not** expose an unauthenticated node's mutating endpoints to the open
