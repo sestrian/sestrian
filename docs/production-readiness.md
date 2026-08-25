@@ -107,6 +107,14 @@ each phase.
   in-flight throttle + cursor (it used to fire a duplicate ~50MB transfer on
   every reconnect), and request-response failures / connection closes are now
   logged with their cause instead of being silently swallowed.
+- ☐ BLOCK RATE runs ~2x the configured interval: 180s configured, ~360s
+  observed on the live fleet (454→457 each ~6 min apart). The chain is healthy
+  and all nodes agree — this is throughput, not safety — but roughly every
+  other round produces no block. Candidates not yet separated: eligibility
+  gaps between the two miners' stake shares, the phase/ladder interaction, or
+  validation+propagation of ~8MB deltas exceeding the round. fleet-health's
+  liveness window is set from the OBSERVED rate (420s) rather than the
+  configured one so it does not false-alarm; the underlying cause is open.
 - ✅ SERVE BACKPRESSURE (second attempt, after the first was reverted). Keyed
   on the inbound REQUEST ID and released on the single path every reply takes,
   so the leak that broke the first version — releasing only on swarm events

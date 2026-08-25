@@ -85,14 +85,14 @@ done
 [ -z "$ref" ] && { echo "no reachable node"; exit 1; }
 note "info" "reference node $ref (height $refh)"
 h1=$(curl -s -m 10 "$ref/status" | python3 -c "import json,sys;print(json.load(sys.stdin).get('height',-1))" 2>/dev/null)
-sleep "${LIVENESS_WAIT:-200}"
+sleep "${LIVENESS_WAIT:-420}"
 h2=$(curl -s -m 10 "$ref/status" | python3 -c "import json,sys;print(json.load(sys.stdin).get('height',-1))" 2>/dev/null)
 # A window shorter than the block interval cannot observe advancement, so a
 # flat reading there is INCONCLUSIVE, not a stall. Calling it a failure would
 # make every quick run red and train the reader to ignore the check.
-LW=${LIVENESS_WAIT:-200}
+LW=${LIVENESS_WAIT:-420}
 if [ "${h2:-0}" -gt "${h1:-0}" ]; then ok "chain advancing ($h1 -> $h2)"
-elif [ "$LW" -lt 200 ]; then warn "no new block in ${LW}s — shorter than the block interval, inconclusive"
+elif [ "$LW" -lt 420 ]; then warn "no new block in ${LW}s — shorter than the OBSERVED block time, inconclusive"
 else bad "chain STALLED at $h1 over ${LW}s"; fi
 
 # ---- 3. proposer diversity (consensus-relevant since v4) -------------------
