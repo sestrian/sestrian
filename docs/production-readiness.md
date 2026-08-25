@@ -122,6 +122,14 @@ each phase.
   impossible. Over-cap requests now get an explicit `busy: true` reply instead
   of an empty body list: BUSY is not ABSENT, and conflating them is exactly
   what stopped delta bodies flowing and left a routine head tie unhealable.
+- ✅ ISOLATION GATE + additive `--peers`. `--peers` used to REPLACE the baked-in
+  bootstrap (the adjacent comment claimed otherwise), so giving the mac miner a
+  single LAN peer silently dropped both anchors; that address turned out to be
+  UDP-filtered, leaving the node with ZERO peers. Being a producer, it then
+  minted its own chain for an hour — the second mac fork of the day, and caused
+  by the fix for the first. `--peers` is now a union with the bootstrap, and a
+  producer with no connected peers (when peers were configured) refuses to
+  extend the chain: halting is recoverable, a silent fork costs a full resync.
 - ✅ PEER DISCOVERY (peer exchange over `/sestrian/peerx/1`). A node asks a
   connected peer who else it knows and dials a bounded number of them, so a
   star through the anchors closes itself into a mesh without a DHT. Addresses
