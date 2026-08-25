@@ -407,6 +407,32 @@ pub struct ShardRequest {
     pub txids: Vec<String>,
 }
 
+/// PEER EXCHANGE. Nodes previously knew only the baked-in anchors plus any
+/// explicit `--peers`, so the topology was a STAR through two hosts: joiners
+/// could not find each other, every node's traffic funnelled through the
+/// anchors, and two miners on the same LAN sat with no direct link — which is
+/// how they forked when anchor connectivity churned. A node asks a peer who
+/// else it is connected to and dials a bounded number of them, so the mesh
+/// closes itself without a DHT.
+#[derive(Clone, Serialize, Deserialize, Debug, Default)]
+pub struct PeerRequest {
+    /// The asker's OWN dialable multiaddr (ending /p2p/<id>), self-declared.
+    /// libp2p identify advertises only CONFIRMED external addresses, which on
+    /// a private or NAT'd network is nothing at all — measured: identify
+    /// returned zero addresses, so peer exchange had nothing to hand out.
+    /// Self-declaring is exactly what identify does when it works, and the
+    /// responder verifies the embedded peer id matches the actual sender.
+    #[serde(default)]
+    pub me: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, Default)]
+pub struct PeerResponse {
+    /// dialable multiaddrs, each ending in /p2p/<peer-id>. Bounded by the
+    /// responder; a peer that floods this is simply ignored past the cap.
+    pub peers: Vec<String>,
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct ShardResponse {
     pub bodies: Vec<BodyShards>,

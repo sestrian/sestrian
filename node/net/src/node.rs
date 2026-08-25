@@ -439,6 +439,8 @@ pub struct Behaviour {
     pub identify: identify::Behaviour,
     pub sync: request_response::Behaviour<JsonCodec<SyncRequest, SyncResponse>>,
     pub shards: request_response::Behaviour<JsonCodec<ShardRequest, ShardResponse>>,
+    /// peer exchange — see proto::PeerRequest
+    pub peerx: request_response::Behaviour<JsonCodec<PeerRequest, PeerResponse>>,
     pub autonat: autonat::Behaviour,
     pub dcutr: dcutr::Behaviour,
     pub relay_client: relay::client::Behaviour,
@@ -489,6 +491,12 @@ pub fn behaviour(
             [(StreamProtocol::new("/sestrian/shards/1"), ProtocolSupport::Full)],
             request_response::Config::default()
                 .with_request_timeout(Duration::from_secs(120)),
+        ),
+        peerx: request_response::Behaviour::with_codec(
+            JsonCodec::new(4096, 64 * 1024),
+            [(StreamProtocol::new("/sestrian/peerx/1"), ProtocolSupport::Full)],
+            request_response::Config::default()
+                .with_request_timeout(Duration::from_secs(20)),
         ),
         autonat: autonat::Behaviour::new(peer_id, autonat::Config::default()),
         dcutr: dcutr::Behaviour::new(peer_id),
@@ -1737,6 +1745,19 @@ pub async fn run(
 
     // ---- net-side state ----
     let mut cached_head = initial_head;
+    // PEER EXCHANGE state. `known_addrs` is filled from identify (the peer
+    // tells us its own listen addresses); we serve those to others and dial
+    // what they serve us. Bounded so a hostile peer cannot grow it without
+    // limit, and we never dial past TARGET_PEERS — the goal is a mesh, not a
+    // full graph.
+    const TARGET_PEERS: usize = 8;
+    const PEERX_SHARE_MAX: usize = 24;
+    let mut known_addrs: HashMap<PeerId, Multiaddr> = HashMap::new();
+    let mut peerx_dialed: std::collections::HashSet<PeerId> =
+        std::collections::HashSet::new();
+    let mut last_peerx_round: i64 = -1;
+    // our own dialable address, learned from our listeners (QUIC preferred)
+    let mut my_addr: Option<Multiaddr> = None;
     let mut last_announced_round: i64 = -1;
     let mut last_foreign_head = now();
     let mut silent_rounds: u64 = 0;
@@ -1846,6 +1867,21 @@ pub async fn run(
                     if swarm.network_info().num_peers() < expected {
                         dial_peers(&mut swarm, &cfg_peers);
                     }
+                    // PEER EXCHANGE: while short of a healthy mesh, ask one
+                    // connected peer who else it knows. Once per round so it
+                    // costs nothing when the mesh is already formed.
+                    if round >= 0 && round != last_peerx_round
+                        && swarm.network_info().num_peers() < TARGET_PEERS {
+                        last_peerx_round = round;
+                        let ask = swarm.connected_peers().next().copied();
+                        let me = my_addr.as_ref()
+                            .map(|a| format!("{a}/p2p/{}", swarm.local_peer_id()))
+                            .unwrap_or_default();
+                        if let Some(p) = ask {
+                            swarm.behaviour_mut().peerx
+                                .send_request(&p, PeerRequest { me });
+                        }
+                    }
                     // MESH-BLINDNESS + STALE-TRANSPORT RECYCLING (net-owned:
                     // it is a statement about connections, not the chain)
                     let connected: Vec<PeerId> =
@@ -1954,6 +1990,66 @@ pub async fn run(
                         }
                     }
                 }
+                SwarmEvent::Behaviour(BehaviourEvent::Peerx(
+                        request_response::Event::Message { peer, message, .. })) => {
+                    match message {
+                        request_response::Message::Request { channel, request, .. } => {
+                            // record the asker's self-declared address, but only
+                            // if the peer id inside it is actually theirs
+                            if let Ok(ma) = request.me.parse::<Multiaddr>() {
+                                let claims = ma.iter().find_map(|c| match c {
+                                    libp2p::multiaddr::Protocol::P2p(h) => Some(h),
+                                    _ => None,
+                                });
+                                if claims == Some(peer) {
+                                    let mut bare = ma.clone();
+                                    while matches!(bare.iter().last(),
+                                        Some(libp2p::multiaddr::Protocol::P2p(_))) {
+                                        bare.pop();
+                                    }
+                                    known_addrs.insert(peer, bare);
+                                }
+                            }
+                            // share who we can actually reach, minus the asker
+                            let peers: Vec<String> = known_addrs.iter()
+                                .filter(|(p, _)| **p != peer)
+                                .take(PEERX_SHARE_MAX)
+                                .map(|(p, a)| format!("{a}/p2p/{p}"))
+                                .collect();
+                            debug!(shared = peers.len(), known = known_addrs.len(),
+                                   "peer exchange: served a peer list");
+                            let _ = swarm.behaviour_mut().peerx
+                                .send_response(channel, PeerResponse { peers });
+                        }
+                        request_response::Message::Response { response, .. } => {
+                            debug!(offered = response.peers.len(),
+                                   "peer exchange: received a peer list");
+                            let have = swarm.network_info().num_peers();
+                            let mut dialed = 0usize;
+                            for addr in response.peers.iter().take(PEERX_SHARE_MAX) {
+                                if have + dialed >= TARGET_PEERS { break; }
+                                let Ok(ma) = addr.parse::<Multiaddr>() else { continue };
+                                // never dial ourselves, and try each peer once
+                                let pid = ma.iter().find_map(|c| match c {
+                                    libp2p::multiaddr::Protocol::P2p(h) => Some(h),
+                                    _ => None,
+                                });
+                                let Some(pid) = pid else { continue };
+                                if pid == *swarm.local_peer_id()
+                                    || peerx_dialed.contains(&pid)
+                                    || swarm.connected_peers().any(|c| *c == pid) {
+                                    continue;
+                                }
+                                peerx_dialed.insert(pid);
+                                if swarm.dial(ma.clone()).is_ok() {
+                                    dialed += 1;
+                                    info!(%addr, "peer exchange: dialing a peer we \
+                                          were never configured with");
+                                }
+                            }
+                        }
+                    }
+                }
                 SwarmEvent::Behaviour(BehaviourEvent::Shards(
                         request_response::Event::OutboundFailure {
                             peer, error, request_id, .. })) => {
@@ -1992,10 +2088,46 @@ pub async fn run(
                 }
                 SwarmEvent::NewListenAddr { address, .. } => {
                     info!(%address, "listening");
+                    // Advertise our routable listen addresses as EXTERNAL, or
+                    // identify sends an empty address list and peer exchange
+                    // has nothing to hand out. Modern libp2p only advertises
+                    // CONFIRMED external addresses, so without this a node is
+                    // undiscoverable even to peers that could reach it — the
+                    // measured cause of peer exchange returning offered=0.
+                    // Loopback is skipped (useless to anyone else); a LAN
+                    // address is kept because same-LAN peers can use it, which
+                    // is exactly the two-miners-on-one-LAN case. An address a
+                    // remote peer cannot reach just costs it one failed dial.
+                    let routable = !address.iter().any(|c| matches!(&c,
+                        libp2p::multiaddr::Protocol::Ip4(ip)
+                            if ip.is_loopback() || ip.is_unspecified()));
+                    if routable {
+                        swarm.add_external_address(address.clone());
+                        let is_quic = address.iter().any(|c| matches!(c,
+                            libp2p::multiaddr::Protocol::QuicV1));
+                        if is_quic || my_addr.is_none() {
+                            my_addr = Some(address.clone());
+                        }
+                    }
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Identify(
                         identify::Event::Received { peer_id, info, .. })) => {
-                    debug!(%peer_id, agent = %info.agent_version, "peer identified");
+                    debug!(%peer_id, n_addrs = info.listen_addrs.len(),
+                           "peer identified");
+                    // Remember one PUBLICLY dialable address per peer. Loopback
+                    // and unspecified addresses are useless to anyone else, and
+                    // sharing them would send peers chasing their own machine.
+                    let usable = |a: &&Multiaddr| !a.iter().any(|c| matches!(&c,
+                        libp2p::multiaddr::Protocol::Ip4(ip)
+                            if ip.is_loopback() || ip.is_unspecified()));
+                    // QUIC is the transport we actually dial; fall back to any
+                    // routable address rather than sharing nothing.
+                    let quic = info.listen_addrs.iter().filter(usable)
+                        .find(|a| a.iter().any(|c| matches!(c,
+                            libp2p::multiaddr::Protocol::QuicV1)));
+                    if let Some(a) = quic.or_else(|| info.listen_addrs.iter().find(usable)) {
+                        known_addrs.insert(peer_id, a.clone());
+                    }
                 }
                 SwarmEvent::ConnectionClosed { peer_id, cause, num_established, .. } => {
                     info!(%peer_id, remaining = num_established,

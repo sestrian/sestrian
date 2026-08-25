@@ -107,7 +107,17 @@ each phase.
   in-flight throttle + cursor (it used to fire a duplicate ~50MB transfer on
   every reconnect), and request-response failures / connection closes are now
   logged with their cause instead of being silently swallowed.
-- ☐ NO PEER DISCOVERY — bounds how many operators can safely join. The
+- ✅ PEER DISCOVERY (peer exchange over `/sestrian/peerx/1`). A node asks a
+  connected peer who else it knows and dials a bounded number of them, so a
+  star through the anchors closes itself into a mesh without a DHT. Addresses
+  are SELF-DECLARED in the request and verified against the sender's peer id:
+  libp2p identify advertises only CONFIRMED external addresses, which on a
+  private/NAT'd network is nothing — measured, identify returned zero
+  addresses and peer exchange had nothing to hand out, which is why the first
+  implementation silently did nothing. Bounded by TARGET_PEERS (8) and a
+  24-address share cap; loopback is never shared. Proven by
+  `scripts/peerx-proof.sh`: two nodes configured with only a shared hub end up
+  connected to each other. Was: ☐ NO PEER DISCOVERY — bounds how many operators can safely join. The
   behaviour set is gossipsub + identify + autonat/dcutr/relay + ping: there
   is no Kademlia, no gossipsub peer exchange, no mDNS. A node therefore knows
   only the baked-in bootstrap anchors plus whatever `--peers` it was given,
