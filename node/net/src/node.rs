@@ -2368,11 +2368,18 @@ impl Node {
                 // and the v4 quorum makes proposer DIVERSITY consensus-relevant
                 // (growth needs `growth_quorum` distinct proposers per window).
                 let elig = self.eligible_attempt(max_allowed);
-                if round != self.last_produce_log_round {
+                // Log ONCE per round, and late in it, when the attempt ladder
+                // has fully widened. Sampling the first post-phase tick (the
+                // original form) reports max_allowed=0 and reads as "not
+                // eligible" even for a node that proposes moments later — it
+                // sent me chasing the wrong cause for an hour.
+                if round != self.last_produce_log_round
+                    && elapsed_in_round >= self.cfg.interval * 0.75 {
                     self.last_produce_log_round = round;
                     info!(round, max_allowed, phase = format!("{phase:.1}"),
                           eligible = ?elig, pool = self.delta_pool.len(),
-                          "proposal round: eligibility checked");
+                          proposed = (self.last_proposed_round == round),
+                          "proposal round summary (widest ladder)");
                 }
                 if let Some(attempt) = elig {
                     self.last_proposed_round = round;
