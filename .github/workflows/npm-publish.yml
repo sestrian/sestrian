@@ -1,0 +1,97 @@
+name: npm-publish
+
+# Publish the `sestrian` CLI to npm via TRUSTED PUBLISHING (OIDC) — no token
+# lives anywhere. GitHub mints a short-lived identity token for this exact
+# workflow, and npm publishes only if the package's trusted-publisher config
+# names this repo and this filename.
+#
+# The npm side is web-UI only (no CLI/API), and it is keyed on the FILENAME of
+# this workflow. Renaming this file breaks publishing until the config on
+# npmjs.com is updated to match.
+#
+#   npmjs.com -> sestrian -> Settings -> Trusted Publisher -> GitHub Actions
+#     organization or user : sestrian
+#     repository           : sestrian
+#     workflow filename    : npm-publish.yml
+#     environment          : (leave blank)
+#
+# Trusted publishing also gets provenance for free: npm records which workflow
+# and commit produced the tarball, so a consumer can verify the CLI they ran
+# came from this repository rather than someone's laptop.
+
+on:
+  push:
+    tags: ['v*']          # same tags that cut the node binaries
+  workflow_dispatch:
+
+permissions:
+  id-token: write         # REQUIRED: without it there is no OIDC token to send
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Trusted publishing needs npm >= 11.5.1 on Node >= 22.14.0. Pinning the
+      # major and then upgrading npm is deliberate: the bundled npm on any given
+      # Node image drifts, and an older one fails with a confusing auth error
+      # rather than saying it cannot do OIDC.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - name: npm new enough for OIDC
+        run: |
+          npm install -g npm@latest
+          echo "npm $(npm --version) on node $(node --version)"
+          node -e 'const [a,b,c]=process.versions.node.split(".").map(Number);
+                   if (a<22 || (a===22 && b<14)) { console.error("node too old for trusted publishing"); process.exit(1) }'
+
+      # The tag is the source of truth for what we are shipping. Publishing a
+      # version that disagrees with the tag would put a CLI on npm that resolves
+      # its binary from a release that does not exist — the CLI downloads from
+      # v{version}, so a mismatch is a broken install, not a cosmetic one.
+      - name: package version must equal the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: npm
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          pkg=$(node -p "require('./package.json').version")
+          echo "tag=$tag package.json=$pkg"
+          [ "$tag" = "$pkg" ] || {
+            echo "::error::tag v$tag does not match npm/package.json $pkg — the CLI resolves its binary from v{version}, so these must agree"
+            exit 1
+          }
+
+      - name: test
+        working-directory: npm
+        run: npm test
+
+      # Do not fail the run when the version is already on npm: this workflow
+      # shares its trigger with the binary release, so a re-run of a tag is
+      # normal and should be a no-op rather than a red X.
+      - name: publish
+        working-directory: npm
+        run: |
+          set -euo pipefail
+          pkg=$(node -p "require('./package.json').version")
+          if npm view "sestrian@$pkg" version >/dev/null 2>&1; then
+            echo "sestrian@$pkg already published — nothing to do"
+            exit 0
+          fi
+          npm publish --access public
+
+      - name: confirm it is live
+        run: |
+          set -euo pipefail
+          pkg=$(node -p "require('./npm/package.json').version")
+          for i in $(seq 1 10); do
+            got=$(npm view "sestrian@$pkg" version 2>/dev/null || true)
+            [ "$got" = "$pkg" ] && { echo "sestrian@$pkg is on the registry"; exit 0; }
+            sleep 6
+          done
+          echo "::error::sestrian@$pkg did not appear on the registry"
+          exit 1
