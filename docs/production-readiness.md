@@ -107,6 +107,26 @@ each phase.
   in-flight throttle + cursor (it used to fire a duplicate ~50MB transfer on
   every reconnect), and request-response failures / connection closes are now
   logged with their cause instead of being silently swallowed.
+- ✅ PROPOSAL FAIRNESS (two interacting bugs; found only because v4 made it
+  consensus-relevant). (a) The per-miner phase offset was a fixed function of
+  the pubkey, so the lowest-hashing miner proposed first every round; now
+  bound to (key, height) so the order rotates. (b) THE BINDING CONSTRAINT:
+  `t0` defaulted to each node's OWN boot time, giving every node a private
+  round metronome — two miners started at different moments had permanently
+  offset boundaries and the earlier one proposed first forever. Live effect:
+  cuda last proposed at h372 and mac took the next 60+ blocks unbroken while
+  cuda was provably eligible throughout. Harmless under v3; FATAL under v4,
+  whose quorum needs `growth_quorum` distinct proposers per window — the gate
+  meant to make growth honest would have made it impossible. Epoch now
+  anchored at unix time. Diagnosis required adding once-per-round eligibility
+  logging: two plausible theories (phase bias, stake feedback) were both
+  wrong, and only the log settled it.
+- ✅ Corpora STAKED with real §7.2a availability commitments: the founding
+  corpus (18,087,897,989 B, da_root a3d4cb2a…, 4313 chunks) verified to hash
+  85aa06fb…e3ae — byte-identical to the genesis-ceremony record, the first
+  independent check since it was built — plus the 1.8GB mac subset. The
+  registry was previously a single hollow `genesis` chainparam with no hash,
+  size or commitment; deltas now carry real data_refs.
 - ✅ REGRESSION COVER for the recovery paths (added after four live
   catch-up/restart failures in one day, every one of which passed the whole
   suite on the way to production). The gap was structural: devnet and soak
