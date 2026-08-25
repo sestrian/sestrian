@@ -1147,10 +1147,12 @@ impl Node {
             }
         }
         if h % SNAPSHOT_EVERY == 0 {
-            self.store.write_snapshot(&self.tree.head, h,
-                                      self.tree.head_state(),
-                                      self.tree.head_ledger(),
-                                      &self.tree.model[&self.tree.head]);
+            // checkpoint the head's PARENT — see BlockTree::snapshot_basis
+            let (sh, sstate) = self.tree.snapshot_basis();
+            let sheight = self.tree.blocks.get(&sh).map(|b| b.height).unwrap_or(h);
+            self.store.write_snapshot(&sh, sheight, &sstate,
+                                      &self.tree.ledger[&sh],
+                                      &self.tree.model[&sh]);
         }
         // the head moved: prune mempools + pending against it
         self.evict_delta_pool();
@@ -1823,11 +1825,12 @@ async fn run_chain(
         }
     }
     // final report + snapshot (moved here from the old single loop)
-    let h = node.head_height();
-    node.store.write_snapshot(&node.tree.head, h,
-                              node.tree.head_state(),
-                              node.tree.head_ledger(),
-                              &node.tree.model[&node.tree.head]);
+    let (sh, sstate) = node.tree.snapshot_basis();
+    let sheight = node.tree.blocks.get(&sh).map(|b| b.height)
+        .unwrap_or_else(|| node.head_height());
+    node.store.write_snapshot(&sh, sheight, &sstate,
+                              &node.tree.ledger[&sh],
+                              &node.tree.model[&sh]);
     let mut lineage = Vec::new();
     let mut cur = node.tree.head.clone();
     while cur != node.tree.genesis_hash {

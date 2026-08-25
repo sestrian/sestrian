@@ -107,6 +107,13 @@ each phase.
   in-flight throttle + cursor (it used to fire a duplicate ~50MB transfer on
   every reconnect), and request-response failures / connection closes are now
   logged with their cause instead of being silently swallowed.
+- ✅ SNAPSHOT LAG (the durable close-out of the restart-wedge): checkpoints
+  are now written at the head's PARENT, so a live proposal tie at the head
+  can never sit on fast-boot's state floor. Second live occurrence (US
+  anchor, OOM-killed while solo-serving a 290-block join, rebooted onto a
+  276 tie) confirmed the class before the fix landed. Follow-ups still
+  open: serve-path memory bound (the OOM), catch-up request-supersede
+  churn, divergence deeper than the prune window stays a resync.
 - ✅ Restart-wedge at a head tie (found live: the EU anchor, restarted for a
   deploy during a live 252 tie, could never rejoin): fast-boot replay walked
   one branch linearly and shed the stored rival tie + children, while the

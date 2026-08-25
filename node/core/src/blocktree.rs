@@ -983,6 +983,26 @@ impl BlockTree {
         &self.canon
     }
 
+    /// The block to CHECKPOINT: the head's PARENT, not the head. A snapshot
+    /// taken at the head puts the state floor at exactly the height where a
+    /// live proposal tie can exist, and a node fast-booted onto the losing
+    /// side of that tie can never adopt the winner — connecting the rival
+    /// needs the parent state, which lies below the floor. Found live twice
+    /// in one night (the EU anchor at a 252 tie, the US anchor at 276). One
+    /// block of lag puts any head tie above the floor; divergence deeper
+    /// than the prune window remains a resync, as documented. Falls back to
+    /// the head itself when the parent is unavailable (genesis, pruned).
+    pub fn snapshot_basis(&self) -> (String, Vec<i64>) {
+        if let Some(hdr) = self.blocks.get(&self.head) {
+            if hdr.height >= 1 && hdr.prev_hash != self.genesis_hash {
+                if let Ok(state) = self.state_at(&hdr.prev_hash) {
+                    return (hdr.prev_hash.clone(), state);
+                }
+            }
+        }
+        (self.head.clone(), self.canon.clone())
+    }
+
     pub fn head_ledger(&self) -> &TokenLedger {
         &self.ledger[&self.head]
     }
