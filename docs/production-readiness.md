@@ -107,6 +107,13 @@ each phase.
   in-flight throttle + cursor (it used to fire a duplicate ~50MB transfer on
   every reconnect), and request-response failures / connection closes are now
   logged with their cause instead of being silently swallowed.
+- ✅ SERVE BACKPRESSURE (second attempt, after the first was reverted). Keyed
+  on the inbound REQUEST ID and released on the single path every reply takes,
+  so the leak that broke the first version — releasing only on swarm events
+  that never fire when the reply pump drops a channel — is structurally
+  impossible. Over-cap requests now get an explicit `busy: true` reply instead
+  of an empty body list: BUSY is not ABSENT, and conflating them is exactly
+  what stopped delta bodies flowing and left a routine head tie unhealable.
 - ✅ PEER DISCOVERY (peer exchange over `/sestrian/peerx/1`). A node asks a
   connected peer who else it knows and dials a bounded number of them, so a
   star through the anchors closes itself into a mesh without a DHT. Addresses

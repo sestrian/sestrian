@@ -1758,6 +1758,20 @@ pub async fn run(
     let mut last_peerx_round: i64 = -1;
     // our own dialable address, learned from our listeners (QUIC preferred)
     let mut my_addr: Option<Multiaddr> = None;
+    // SERVE BACKPRESSURE, second attempt. A stalled peer can otherwise pin a
+    // multi-MB response per request in the outbound queue until the wire
+    // drains; an anchor was OOM-killed at 7.7GB doing exactly that while
+    // solo-serving a 290-block join. The first attempt counted outstanding
+    // serves and LEAKED, because the count was released only on ResponseSent
+    // or InboundFailure while the reply pump can also drop a channel — after
+    // two leaks a peer was refused permanently. This version keys on the
+    // REQUEST ID and releases on every terminal path including the drop, so a
+    // leak is structurally impossible, and an over-cap request gets an
+    // explicit BUSY reply the client retries rather than an empty one it
+    // mistakes for "absent".
+    const MAX_INFLIGHT_SERVES: usize = 3;
+    let mut serving: std::collections::HashSet<request_response::InboundRequestId> =
+        std::collections::HashSet::new();
     let mut last_announced_round: i64 = -1;
     let mut last_foreign_head = now();
     let mut silent_rounds: u64 = 0;
@@ -1770,7 +1784,8 @@ pub async fn run(
 
     enum Reply {
         Sync(request_response::ResponseChannel<SyncResponse>, Option<SyncResponse>),
-        Shards(request_response::ResponseChannel<ShardResponse>, Option<ShardResponse>),
+        Shards(request_response::ResponseChannel<ShardResponse>, Option<ShardResponse>,
+               Option<request_response::InboundRequestId>),
     }
     let mut replies: FuturesUnordered<
         std::pin::Pin<Box<dyn std::future::Future<Output = Reply> + Send>>,
@@ -1818,8 +1833,15 @@ pub async fn run(
                 Reply::Sync(ch, Some(resp)) => {
                     let _ = swarm.behaviour_mut().sync.send_response(ch, resp);
                 }
-                Reply::Shards(ch, Some(resp)) => {
-                    let _ = swarm.behaviour_mut().shards.send_response(ch, resp);
+                Reply::Shards(ch, resp, rid) => {
+                    // Release the slot here, on the ONE path every shard reply
+                    // takes — sent, or dropped because the chain actor is gone.
+                    // The previous attempt released on swarm events that do not
+                    // fire when a channel is dropped, which is how it leaked.
+                    if let Some(id) = rid { serving.remove(&id); }
+                    if let Some(r) = resp {
+                        let _ = swarm.behaviour_mut().shards.send_response(ch, r);
+                    }
                 }
                 _ => {} // chain actor gone — shutting down
             },
@@ -2066,12 +2088,19 @@ pub async fn run(
                 SwarmEvent::Behaviour(BehaviourEvent::Shards(
                         request_response::Event::Message { peer, message, .. })) => {
                     match message {
-                        request_response::Message::Request { request, channel, .. } => {
-                            let (otx, orx) = tokio::sync::oneshot::channel();
-                            let _ = chain_tx.send(ToChain::ShardServe(request, otx));
-                            replies.push(Box::pin(async move {
-                                Reply::Shards(channel, orx.await.ok())
-                            }));
+                        request_response::Message::Request { request, channel, request_id, .. } => {
+                            if serving.len() >= MAX_INFLIGHT_SERVES {
+                                let _ = swarm.behaviour_mut().shards.send_response(
+                                    channel,
+                                    ShardResponse { bodies: Vec::new(), busy: true });
+                            } else {
+                                serving.insert(request_id);
+                                let (otx, orx) = tokio::sync::oneshot::channel();
+                                let _ = chain_tx.send(ToChain::ShardServe(request, otx));
+                                replies.push(Box::pin(async move {
+                                    Reply::Shards(channel, orx.await.ok(), Some(request_id))
+                                }));
+                            }
                         }
                         request_response::Message::Response {
                                 response, request_id, .. } => {
@@ -2080,6 +2109,13 @@ pub async fn run(
                             if current {
                                 shard_req_id.remove(&peer);
                                 last_shard_req.remove(&peer);
+                            }
+                            if response.busy {
+                                // Distinct from "absent": the peer has these
+                                // bodies but is at its serve cap. The in-flight
+                                // gate was just cleared, so the next round
+                                // refetch retries instead of giving up.
+                                debug!(%peer, "shard peer is BUSY — will retry");
                             }
                             let _ = chain_tx.send(ToChain::ShardBatch {
                                 peer, current, bodies: response.bodies });
@@ -2788,7 +2824,7 @@ impl Node {
         }
         info!(asked = request.txids.len(), served = bodies.len(),
               kb = budget_used / 1024, "serving shard request");
-        ShardResponse { bodies }
+        ShardResponse { bodies, busy: false }
     }
 }
 

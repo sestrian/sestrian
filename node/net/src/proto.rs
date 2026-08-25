@@ -436,6 +436,13 @@ pub struct PeerResponse {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct ShardResponse {
     pub bodies: Vec<BodyShards>,
+    /// BUSY is not ABSENT. The first backpressure attempt replied with an
+    /// EMPTY body list when over its cap, which a client cannot distinguish
+    /// from "I do not have these" — so it stopped asking, delta bodies
+    /// stopped flowing, and a routine head tie could not heal. An explicit
+    /// flag lets the client retry instead of giving up.
+    #[serde(default)]
+    pub busy: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
