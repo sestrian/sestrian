@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sestrian · not found</title>
+<meta name="description" content="That page does not exist on sestrian.com.">
+<!-- A 404 must never be indexed: it dilutes the site's real pages and answer
+     engines will happily quote an error page if you let them. -->
+<meta name="robots" content="noindex,follow">
+<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="%230e0d0b"/><text x="32" y="46" font-family="Arial,sans-serif" font-weight="900" font-size="40" text-anchor="middle" fill="%23ff4d00">S</text></svg>'>
+<style>
+  /* Self-contained and webfont-free: an error page that waits on a font CDN is
+     an error page that renders twice. Same palette as the rest of the site. */
+  :root{
+    --black:#0e0d0b; --bone:#ecebe4; --dim:#b4b1a6; --line:#2c2a25; --signal:#ff4d00;
+    --sans:system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100svh;background:var(--black);color:var(--bone);
+    font-family:var(--sans);display:flex;align-items:center;
+    padding:clamp(24px,6vw,80px);line-height:1.6}
+  a{color:inherit}
+  .code{font-family:var(--mono);font-size:13px;letter-spacing:.22em;
+    text-transform:uppercase;color:var(--signal);margin:0 0 18px}
+  h1{font-size:clamp(40px,9vw,110px);line-height:.95;margin:0 0 20px;
+    font-weight:900;text-transform:uppercase;letter-spacing:-.02em}
+  p{color:var(--dim);max-width:52ch;margin:0 0 30px;font-size:clamp(16px,2vw,19px)}
+  .links{display:flex;gap:26px;flex-wrap:wrap;font-family:var(--mono);
+    font-size:13px;letter-spacing:.12em;text-transform:uppercase}
+  .links a{text-decoration:none;border-bottom:1px solid var(--line);padding-bottom:3px}
+  .links a:hover{color:var(--signal);border-color:var(--signal)}
+</style>
+</head>
+<body>
+<main>
+  <p class="code">Error 404</p>
+  <h1>No such page.</h1>
+  <p>The chain is still running, but this address is not part of it. Try one of
+    these instead.</p>
+  <div class="links">
+    <a href="/">Home</a>
+    <a href="/network.html">The network</a>
+    <a href="/technical.html">Technical brief</a>
+    <a href="https://github.com/sestrian/sestrian">GitHub</a>
+  </div>
+</main>
+</body>
+</html>

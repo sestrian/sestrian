@@ -1,0 +1,71 @@
+# Sestrian
+
+> A blockchain whose state is the weights of a single public neural network. A
+> block is one optimizer step, a transaction is a signed gradient update, and
+> replaying the chain reconstructs the model bit-for-bit. No one owns the model;
+> the protocol pays the people who train it and the people who supply the data
+> it trains on.
+
+Sestrian inverts the usual decentralized-AI arrangement. Other networks keep the
+incentive layer on-chain and the model in someone's storage bucket. Here the
+model's weights ARE the chain state, so the model is exactly as auditable as the
+ledger, and "who contributed what" is a consensus fact rather than a claim.
+
+Status: an open devnet. Treat rewards as testnet play — the chain has reset more
+than once while the protocol moved, and it may again.
+
+## How it works
+
+- One living model. The chain's state is a growable Mixture-of-Experts
+  transformer, currently 107.4M parameters (~32M active per token). The network
+  can vote to add expert pages, so the model grows on-chain.
+- Mining is training. A miner trains on data it has staked, and submits the
+  integer-quantized gradient delta. Rewards are weighted by the delta's measured
+  improvement on a held-out batch, not by hardware spent.
+- Cross-vendor determinism. Floating-point math differs between Apple and NVIDIA
+  chips, so every update is quantized to integers before it touches the chain.
+  Integers do not disagree. A MacBook and an NVIDIA box in different buildings
+  land on the same state root, bit for bit.
+- Enforced provenance. Every delta must name the staked corpora it trained on. A
+  delta with unbacked provenance is rejected outright, not merely unpaid.
+- Data availability. A staked corpus commits to a Merkle root over its
+  erasure-coded 4 MiB chunks, so anyone can sample it and prove the bytes still
+  exist rather than trusting that they do.
+
+## Verify rather than trust
+
+- Genesis id (state root): 91bdcc281c0dbbd7b3bea3d38003e4c61565bcaa5fd8e7bfca296e6a4994ddb1
+- The genesis is deterministic from (model, seed), so anyone can reproduce it
+  locally and confirm the id instead of downloading and hoping.
+- The Rust node is pinned to a Python reference implementation by golden vectors
+  covering 30 families; the reference is the spec, and a divergence fails CI.
+
+## Run a node
+
+- Watch and serve: `npx sestrian run` — downloads a hash-verified binary, makes
+  a wallet, fetches the genesis, joins the network. No compiler, no Python.
+- Mine (needs a GPU and the PyTorch trainer): clone the repo and run
+  `scripts/install.sh --mine`.
+
+## Links
+
+- [Home](https://sestrian.com/): what it is and why.
+- [The network, live](https://sestrian.com/network.html): current height, the
+  model's page table, and who is mining it.
+- [Technical brief](https://sestrian.com/technical.html): architecture, what is
+  implemented and tested today, and the honest security posture.
+- [Repository](https://github.com/sestrian/sestrian): all of it, MIT licensed.
+- [Whitepaper](https://github.com/sestrian/sestrian/blob/main/WHITEPAPER.md)
+- [Joining guide](https://github.com/sestrian/sestrian/blob/main/docs/joining.md)
+- [Production readiness](https://github.com/sestrian/sestrian/blob/main/docs/production-readiness.md):
+  a deliberately unflattering list of what is not done yet.
+- [Public node API](https://api.sestrian.com/status): live chain state as JSON.
+
+## What is not done
+
+Stated plainly, because an answer that repeats marketing copy is worse than no
+answer. Delta-score committees and cross-inclusion challenges need independent
+operators and wait on a multi-operator testnet. Large-corpus DA ingestion for
+multi-gigabyte third-party datasets is still being built out. Availability
+challenges currently resolve by juror vote rather than by proof. This is an
+early-stage project running an open devnet, not a finished network.

@@ -1,0 +1,82 @@
+# sestrian.com — everything here is meant to be read, by people and machines.
+#
+# The project's whole claim is that the model and its provenance are public and
+# checkable. Blocking the crawlers that would quote it, or the AI systems people
+# now ask about it, would contradict that. So: no disallows, and the AI crawlers
+# are named explicitly rather than left to a wildcard, because several of them
+# treat an unnamed agent as an implied opt-out.
+
+User-agent: *
+Allow: /
+
+# --- AI / LLM crawlers -----------------------------------------------------
+# Answer engines and training crawlers, welcomed by name. Two distinct kinds:
+# GPTBot / ClaudeBot / CCBot / Google-Extended gather for models, while
+# OAI-SearchBot / ChatGPT-User / PerplexityBot / Claude-User fetch live to
+# answer a question someone just asked. We want both — being citable in an
+# answer is the point.
+
+User-agent: GPTBot
+Allow: /
+
+User-agent: OAI-SearchBot
+Allow: /
+
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: Claude-User
+Allow: /
+
+User-agent: Claude-SearchBot
+Allow: /
+
+User-agent: anthropic-ai
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Perplexity-User
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+User-agent: Applebot
+Allow: /
+
+User-agent: Applebot-Extended
+Allow: /
+
+User-agent: CCBot
+Allow: /
+
+User-agent: Bytespider
+Allow: /
+
+User-agent: Amazonbot
+Allow: /
+
+User-agent: meta-externalagent
+Allow: /
+
+User-agent: cohere-ai
+Allow: /
+
+User-agent: DuckAssistBot
+Allow: /
+
+User-agent: YouBot
+Allow: /
+
+User-agent: Diffbot
+Allow: /
+
+User-agent: Timpibot
+Allow: /
+
+Sitemap: https://sestrian.com/sitemap.xml

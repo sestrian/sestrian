@@ -30,6 +30,10 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # sitemap lastmod reads `git log` per page; the default depth-1
+          # checkout would date every page to the tip commit.
+          fetch-depth: 0
       - name: Sanity-check the site before publishing
         run: |
           test -f site/index.html || { echo "site/index.html missing"; exit 1; }
@@ -49,6 +53,15 @@ jobs:
       # change must never be blocked by node downtime.
       - name: snapshot the chain for the live panel
         run: python3 scripts/chain_snapshot.py site/chain.json
+
+      # Built here, not committed: a hand-maintained sitemap rots, its dates
+      # drift from the content, and crawlers learn to distrust lastmod. Derived
+      # from the last commit that actually touched each page, and discovered
+      # from site/*.html so a new page cannot silently miss it.
+      - name: generate sitemap
+        run: |
+          git log -1 --format=%cI >/dev/null   # fail loudly if history is shallow
+          python3 scripts/make_sitemap.py
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

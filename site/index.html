@@ -5,10 +5,22 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Sestrian · the AI everyone builds</title>
 <meta name="description" content="A blockchain whose state is the weights of a single public neural network. No one owns it. Everyone builds it. It pays the people who train it.">
-<meta property="og:title" content="Sestrian · the AI everyone builds">
-<meta property="og:description" content="One living model, trained on the world's spare GPUs, recorded on a public chain. It pays the people who train it.">
+<link rel="canonical" href="https://sestrian.com/">
+<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+<meta property="og:site_name" content="Sestrian">
+<meta property="og:locale" content="en_US">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://sestrian.com/">
+<meta property="og:title" content="Sestrian · the AI everyone builds">
+<meta property="og:description" content="A blockchain whose state is the weights of a single public neural network. No one owns it. Everyone builds it. It pays the people who train it.">
+<meta property="og:image" content="https://sestrian.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Sestrian — the AI everyone builds and no one owns.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Sestrian · the AI everyone builds">
+<meta name="twitter:description" content="A blockchain whose state is the weights of a single public neural network. No one owns it. Everyone builds it. It pays the people who train it.">
+<meta name="twitter:image" content="https://sestrian.com/og.png">
 <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="%230e0d0b"/><text x="32" y="46" font-family="Arial,sans-serif" font-weight="900" font-size="40" text-anchor="middle" fill="%23ff4d00">S</text></svg>'>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -230,6 +242,106 @@
     letter-spacing:.08em;text-transform:uppercase;align-items:flex-start}
   footer .fin{margin-top:40px;font-family:var(--mono);font-size:12.5px;letter-spacing:.2em;text-transform:uppercase}
 </style>
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@type": "Organization",
+ "name": "Sestrian",
+ "url": "https://sestrian.com/",
+ "logo": "https://sestrian.com/og.png",
+ "description": "An open protocol for a public neural network whose weights are the state of a blockchain.",
+ "sameAs": [
+  "https://github.com/sestrian/sestrian"
+ ]
+}
+</script>
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@type": "WebSite",
+ "name": "Sestrian",
+ "url": "https://sestrian.com/",
+ "publisher": {
+  "@type": "Organization",
+  "name": "Sestrian"
+ }
+}
+</script>
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@type": "SoftwareApplication",
+ "name": "sestrian-node",
+ "applicationCategory": "DeveloperApplication",
+ "operatingSystem": "Linux, macOS, Windows",
+ "url": "https://sestrian.com/",
+ "downloadUrl": "https://www.npmjs.com/package/sestrian",
+ "codeRepository": "https://github.com/sestrian/sestrian",
+ "license": "https://opensource.org/licenses/MIT",
+ "description": "Node for the Sestrian network: validates the chain, syncs the model, serves inference, and trains to earn.",
+ "offers": {
+  "@type": "Offer",
+  "price": "0",
+  "priceCurrency": "USD"
+ }
+}
+</script>
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@type": "FAQPage",
+ "mainEntity": [
+  {
+   "@type": "Question",
+   "name": "What is Sestrian?",
+   "acceptedAnswer": {
+    "@type": "Answer",
+    "text": "Sestrian is a blockchain whose state is the weights of a single public neural network. A block is one optimizer step and a transaction is a signed gradient update, so replaying the chain reconstructs the model bit-for-bit. No one owns the model, and the protocol pays the people who train it and supply its data."
+   }
+  },
+  {
+   "@type": "Question",
+   "name": "How is Sestrian different from other decentralized AI projects?",
+   "acceptedAnswer": {
+    "@type": "Answer",
+    "text": "Most keep the incentive layer on-chain and the model in a storage bucket. In Sestrian the weights are the chain state, so the model is as auditable as the ledger and contribution is a consensus fact rather than a claim."
+   }
+  },
+  {
+   "@type": "Question",
+   "name": "How do different GPUs agree on the same model?",
+   "acceptedAnswer": {
+    "@type": "Answer",
+    "text": "Floating-point math differs between vendors, so every update is quantized to integers before it touches the chain. Integers do not disagree. An Apple MPS device and an NVIDIA CUDA device produce the same state root bit-for-bit, which is verified live across two machines."
+   }
+  },
+  {
+   "@type": "Question",
+   "name": "How do I run a Sestrian node?",
+   "acceptedAnswer": {
+    "@type": "Answer",
+    "text": "Run 'npx sestrian run'. It downloads a hash-verified binary for your platform, creates a wallet, fetches the genesis weights and joins the network — no compiler and no Python. Mining additionally needs a GPU and the PyTorch trainer via scripts/install.sh --mine."
+   }
+  },
+  {
+   "@type": "Question",
+   "name": "Is Sestrian finished?",
+   "acceptedAnswer": {
+    "@type": "Answer",
+    "text": "No. It runs an open devnet. Consensus, provenance and the token economy are live and tested, while delta-score committees and cross-inclusion challenges wait on a multi-operator testnet. The chain has reset more than once as the protocol moved. Devnet rewards should be treated as testnet play, not as an asset."
+   }
+  },
+  {
+   "@type": "Question",
+   "name": "How does Sestrian know what data the model was trained on?",
+   "acceptedAnswer": {
+    "@type": "Answer",
+    "text": "Provenance is enforced by consensus: every gradient update must name the staked corpora it trained on, and an update with unbacked provenance is rejected outright rather than merely unpaid. A staked corpus commits to a Merkle root over its erasure-coded chunks, so its availability can be sampled rather than assumed."
+   }
+  }
+ ]
+}
+</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
