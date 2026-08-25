@@ -1944,8 +1944,23 @@ impl Node {
         if !current {
             return; // data absorbed; do not touch the catch-up state machine
         }
-        let last_from = Some(from);
+        // ONE monotone catch-up state machine (rewritten after the third
+        // live catch-up failure in one night). While behind: march the
+        // cursor forward from the TOP of every batch — learned or pure
+        // overlap, both mean "this window is done" — and on unconnectable
+        // evidence walk back anchored at OUR HEAD with a bounded, resetting
+        // step. The old logic re-anchored the walkback at the request's own
+        // `from` (one overshoot then pinned it at 0 forever), never reset
+        // the doubling step, and cleared the cursor mid-catch-up.
         let behind = their_head > self.head_height();
+        if !behind {
+            self.sync_cursor.remove(&peer);
+            self.sync_walkback.remove(&peer);
+            return;
+        }
+        if served == 0 {
+            return;
+        }
         // "orphaned": some served block's parent is nowhere — not applied,
         // not pending, not in this batch. Its ancestors are missing, so the
         // fork point is below the request window.
@@ -1957,45 +1972,28 @@ impl Node {
                 && !self.pending.contains_key(par)
                 && !batch_hashes.contains(par)
         });
-        if orphaned && served > 0 {
-            let base = last_from.unwrap_or_else(|| self.head_height());
+        let top = batch_blocks.iter().map(|sb| sb.header.height)
+            .max().unwrap_or(from);
+        let next = if orphaned && !learned {
+            // Walk back from OUR head, capped: divergence deeper than the
+            // cap is beyond any state window and needs a resync anyway.
+            let hh = self.head_height();
             let step = self.sync_walkback.entry(peer).or_insert(4);
-            let cur = base.saturating_sub(*step);
-            *step = (*step * 2).min(4096);
-            self.sync_cursor.insert(peer, cur);
+            let cur = hh.saturating_sub(*step);
+            *step = (*step * 2).min(64);
             warn!(peer = %peer, from = cur,
                   "sync batch unconnectable — walking back to find the fork point");
-        } else if learned {
-            // Still behind: keep marching from where this batch ended. Clearing
-            // the cursor here re-anchors the next request at head-2, which
-            // re-downloads the same overlap and livelocks a lagging node (each
-            // climb re-learns 2 blocks while the fleet mints one). The reorg
-            // margin is only needed once we are caught up, so clear it then.
-            if behind {
-                if let Some(f) = last_from {
-                    self.sync_cursor.insert(peer, (f + served).min(their_head));
-                }
-                self.sync_walkback.remove(&peer);
-            } else {
-                self.sync_cursor.remove(&peer);
+            cur
+        } else {
+            // Useful or pure-overlap window: march past it.
+            if learned {
                 self.sync_walkback.remove(&peer);
             }
-        } else if behind && served > 0 {
-            if let Some(f) = last_from {
-                let cur = (f + served).min(their_head);
-                self.sync_cursor.insert(peer, cur);
-                warn!(peer = %peer, cursor = cur, their_head,
-                      "sync batch taught nothing — advancing request cursor \
-                       past the overlap");
-            }
-        }
-        let cursor_now = self.sync_cursor.get(&peer).copied();
-        let moved = learned || (cursor_now.is_some() && cursor_now != last_from);
-        if (behind || orphaned) && served > 0 && moved {
-            let f = cursor_now.unwrap_or_else(||
-                self.head_height().min(their_head).saturating_sub(2));
-            let _ = self.net.send(ToNet::SendSync(peer, f));
-        }
+            (top + 1).min(their_head)
+        };
+        self.sync_cursor.insert(peer, next);
+        // keep pulling while behind (the per-peer inflight gate throttles)
+        let _ = self.net.send(ToNet::SendSync(peer, next));
     }
 
     fn handle_shard_batch(&mut self, peer: PeerId, current: bool,
