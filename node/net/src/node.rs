@@ -2511,7 +2511,20 @@ impl Node {
         }
         // v1 PROPOSING: the eligibility ladder widens inside the round; the
         // per-miner phase offset staggers proposals so ties are rare
-        if self.cfg.produce && round >= 0 && round != self.last_proposed_round {
+        // ISOLATION GATE. A producer that can reach nobody cannot know the real
+        // head, so every block it mints is a fork by construction — the mac
+        // miner sat isolated for an hour doing exactly that, twice in one day.
+        // If we were configured with peers and have none, do not extend the
+        // chain; halting is recoverable, a silent fork costs a resync. A node
+        // with no configured peers (a solo/local chain) is unaffected.
+        let isolated = !self.cfg.peers.trim().is_empty() && self.peers_connected == 0;
+        if isolated && round >= 0 && round != self.last_produce_log_round {
+            self.last_produce_log_round = round;
+            warn!("isolated: no peers connected — NOT producing (a block minted \
+                   now could only fork the chain)");
+        }
+        if self.cfg.produce && !isolated && round >= 0
+            && round != self.last_proposed_round {
             // Stagger proposals so miners rarely tie — but ROTATE the order
             // every height. A phase fixed per key made the lowest-hashing
             // miner propose first in EVERY round, so it won essentially every

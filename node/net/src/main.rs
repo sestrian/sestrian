@@ -230,8 +230,20 @@ fn apply_network(args: &mut Args) -> &'static NetworkParams {
     };
     adopt(&mut args.data_contributor, net.data_contributor, "data-contributor");
     adopt(&mut args.genesis_hash, net.genesis_state_root, "genesis-hash");
-    if args.peers.is_empty() && !net.bootstrap.is_empty() {
-        args.peers = net.bootstrap.to_string();       // extra peers may be added
+    // --peers is ADDITIVE, not a replacement. It used to override the baked-in
+    // bootstrap entirely, so adding one peer silently dropped the anchors: a
+    // node given a single unreachable LAN address ended up with ZERO peers,
+    // and — being a producer — quietly minted its own fork for an hour. The
+    // comment here always claimed "extra peers may be added"; now it is true.
+    if !net.bootstrap.is_empty() {
+        let mut merged: Vec<String> = net.bootstrap.split(',')
+            .map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        for p in args.peers.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            if !merged.iter().any(|m| m == p) {
+                merged.push(p.to_string());
+            }
+        }
+        args.peers = merged.join(",");
     }
     if args.interval <= 0.0 {
         args.interval = net.block_interval;           // cadence follows the network
