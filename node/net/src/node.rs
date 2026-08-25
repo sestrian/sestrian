@@ -1944,8 +1944,20 @@ impl Node {
             warn!(peer = %peer, from = cur,
                   "sync batch unconnectable — walking back to find the fork point");
         } else if learned {
-            self.sync_cursor.remove(&peer);
-            self.sync_walkback.remove(&peer);
+            // Still behind: keep marching from where this batch ended. Clearing
+            // the cursor here re-anchors the next request at head-2, which
+            // re-downloads the same overlap and livelocks a lagging node (each
+            // climb re-learns 2 blocks while the fleet mints one). The reorg
+            // margin is only needed once we are caught up, so clear it then.
+            if behind {
+                if let Some(f) = last_from {
+                    self.sync_cursor.insert(peer, (f + served).min(their_head));
+                }
+                self.sync_walkback.remove(&peer);
+            } else {
+                self.sync_cursor.remove(&peer);
+                self.sync_walkback.remove(&peer);
+            }
         } else if behind && served > 0 {
             if let Some(f) = last_from {
                 let cur = (f + served).min(their_head);

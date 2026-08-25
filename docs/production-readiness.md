@@ -107,6 +107,16 @@ each phase.
   in-flight throttle + cursor (it used to fire a duplicate ~50MB transfer on
   every reconnect), and request-response failures / connection closes are now
   logged with their cause instead of being silently swallowed.
+- ✅ Catch-up cursor livelock (found live: the EU anchor pinned 7+ blocks
+  behind at v2 payload sizes): the taught-nothing cursor advanced correctly,
+  but any batch that taught something CLEARED it, so the next head announce
+  re-anchored at head-2 and re-downloaded the same ~31MB overlap; each full
+  climb learned 2 blocks while the fleet minted one per interval. Net
+  progress ~zero, plus mutual walkback churn (peers exploring the laggard's
+  side branch) starving its shard body fetches. Fix: while still behind, a
+  useful batch continues the cursor (from + served); the cursor clears (and
+  the reorg margin returns) only once caught up. Regression: devnet + soak
+  (mid-run SIGKILL catch-up) both converge.
 - ✅ THE ACTOR SPLIT + INCREMENTAL STATE ENGINE (the structural close-out of
   every transport incident above): the swarm loop now owns transport ONLY
   (its worst-case pause is microseconds) while a chain actor owns all state
