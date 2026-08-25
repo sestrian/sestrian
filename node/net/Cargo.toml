@@ -1,6 +1,6 @@
 [package]
 name = "sestrian-node"
-version = "0.5.0"
+version = "0.7.0"
 edition = "2021"
 description = "The production Sestrian node: libp2p networking (NAT-traversing), PyTorch training bridge, persistence, HTTP API — over the bit-exact consensus core"
 
