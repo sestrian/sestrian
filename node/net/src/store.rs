@@ -573,6 +573,38 @@ impl Store {
                 validated += 1;
             }
         }
+        // RECONNECT PASS: the forward walk above follows one branch. Stored
+        // side blocks near the head (a rival tie and its children) must
+        // re-enter the tree, or a restart sheds fork context the node had
+        // already validated — and the node then cannot re-adopt the branch
+        // the rest of the network settled on (found live: the EU anchor,
+        // wedged at a height-252 tie through every restart). Fixpoint over
+        // the stored blocks; deep or unconnectable ones fail harmlessly.
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for sb in &sorted {
+                let h = sb.hash();
+                if tree.blocks.contains_key(&h)
+                    || !tree.blocks.contains_key(&sb.header.prev_hash) {
+                    continue;
+                }
+                let mut payloads = HashMap::new();
+                for wt in &sb.txs {
+                    if let Some(t) = wt.to_core() {
+                        if let Some(p) = self.get_payload(&t.txid()) {
+                            payloads.insert(t.txid(), p);
+                        }
+                    }
+                }
+                let Some(block) = sb.to_core(&payloads) else { continue };
+                if tree.add_block(block).is_ok() {
+                    for (txid, p) in payloads { cache.insert(txid, p); }
+                    validated += 1;
+                    changed = true;
+                }
+            }
+        }
         index.retain(|_, sb| sb.header.height <= tree.blocks[&tree.head].height);
         info!(from = snap_h, to = tree.blocks[&tree.head].height,
               validated, "FAST-BOOT from snapshot");

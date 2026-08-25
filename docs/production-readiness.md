@@ -107,6 +107,16 @@ each phase.
   in-flight throttle + cursor (it used to fire a duplicate ~50MB transfer on
   every reconnect), and request-response failures / connection closes are now
   logged with their cause instead of being silently swallowed.
+- ✅ Restart-wedge at a head tie (found live: the EU anchor, restarted for a
+  deploy during a live 252 tie, could never rejoin): fast-boot replay walked
+  one branch linearly and shed the stored rival tie + children, while the
+  serving cache kept them, and install() treated "in the cache" as "have it"
+  so the exact block the node needed was discarded on every arrival, across
+  every restart. Fixes: install() gates on tree membership (the cache is a
+  cache), and fast-boot runs a reconnect fixpoint over stored side blocks.
+  Note: the two prior sync-path attempts that night (cursor semantics,
+  current=false handling) treated symptoms of this; the cursor-march fix
+  was kept on its merits, the current=false change reverted by both agents.
 - ✅ Catch-up cursor livelock (found live: the EU anchor pinned 7+ blocks
   behind at v2 payload sizes): the taught-nothing cursor advanced correctly,
   but any batch that taught something CLEARED it, so the next head announce

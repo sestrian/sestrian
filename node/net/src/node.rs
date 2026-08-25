@@ -934,9 +934,15 @@ impl Node {
     /// true if installed; queues it as pending when payloads are missing.
     fn install(&mut self, sb: StoredBlock, from: Option<PeerId>) -> bool {
         let bh = sb.hash();
-        if self.blocks_full.contains_key(&bh) {
+        // Gate on the TREE, not the serving cache: after a restart the cache
+        // holds stored blocks the replay did not reconnect (a rival tie near
+        // the head), and treating "stored" as "have" made the one block a
+        // forked node needed the one block it refused to install (found
+        // live: the EU anchor wedged at a 252 tie through every restart).
+        if self.tree.blocks.contains_key(&bh) {
             return false;
         }
+        let already_stored = self.blocks_full.contains_key(&bh);
         // Bodies live on DISK between fetch and apply; RAM holds only what is
         // actively validating. During the quota-fork heal ~80 fetched 92MB
         // bodies accumulated in this map while their blocks waited for
@@ -992,10 +998,14 @@ impl Node {
                 // on the next boot, so a persist failure is fatal — halt loudly
                 // and let the operator fix the disk and restart (replay recovers
                 // the last durably-persisted head).
-                if let Err(e) = self.store.append_block(&sb) {
-                    error!("FATAL: cannot persist block h{}: {e}; halting to avoid \
-                            silent chain truncation", sb.header.height);
-                    std::process::exit(1);
+                // (already_stored: re-installing a stored block the replay did
+                // not reconnect must not append a duplicate record.)
+                if !already_stored {
+                    if let Err(e) = self.store.append_block(&sb) {
+                        error!("FATAL: cannot persist block h{}: {e}; halting to \
+                                avoid silent chain truncation", sb.header.height);
+                        std::process::exit(1);
+                    }
                 }
                 // #114 (observable half): a VALIDATED foreign block that omits
                 // deltas we had already gossiped for its height is censorship-
