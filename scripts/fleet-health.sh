@@ -49,20 +49,51 @@ for h in "${heights[@]}"; do
     [ "$h" -lt "$min" ] && min=$h
 done
 spread=$((max-min))
+# A FORK and a LAG look alike if you only compare heads. They are different
+# conditions with different responses: a fork needs operator action, a node
+# catching up needs patience. Distinguish them by height — nodes at (nearly)
+# the same height with different heads are forked; a node far behind is simply
+# behind. Getting this wrong makes the check cry wolf during every resync,
+# which is how a health check stops being read.
+same_h_diff_head=0
+for i in "${!heights[@]}"; do
+    for j in "${!heights[@]}"; do
+        [ "$i" -ge "$j" ] && continue
+        hi=${heights[$i]}; hj=${heights[$j]}
+        [ "$hi" -lt 0 ] 2>/dev/null && continue
+        [ "$hj" -lt 0 ] 2>/dev/null && continue
+        d=$((hi-hj)); d=${d#-}
+        if [ "$d" -le 2 ] && [ "${heads[$i]}" != "${heads[$j]}" ]; then same_h_diff_head=1; fi
+    done
+done
 if [ "$uniq_heads" -eq 1 ]; then ok "all reachable nodes on one head ($max)"
-elif [ "$spread" -le 2 ]; then warn "heads differ but heights within $spread — likely propagation, recheck"
-else bad "FORK: heights $min..$max across ${#NODES[@]} nodes, $uniq_heads distinct heads"; fi
+elif [ "$same_h_diff_head" = "1" ]; then
+    bad "FORK: nodes at the same height disagree on the head (heights $min..$max)"
+elif [ "$spread" -gt 2 ]; then
+    warn "a node is BEHIND (heights $min..$max) — catching up, not forked"
+else warn "heads differ but heights within $spread — propagation in flight"; fi
 
 # ---- 2. liveness ----------------------------------------------------------
-ref="${NODES[0]}"
-for n in "${NODES[@]}"; do
-    s=$(curl -s -m 10 "$n/status" 2>/dev/null) && [ -n "$s" ] && { ref="$n"; break; }
+# Reference node = the reachable node at the GREATEST height. Taking the first
+# reachable one meant a node resyncing from genesis became the reference, and
+# its empty registry / short chain then failed every downstream check.
+ref=""; refh=-1
+for i in "${!NODES[@]}"; do
+    [ "${heights[$i]}" -lt 0 ] 2>/dev/null && continue
+    if [ "${heights[$i]}" -gt "$refh" ]; then refh=${heights[$i]}; ref="${NODES[$i]}"; fi
 done
+[ -z "$ref" ] && { echo "no reachable node"; exit 1; }
+note "info" "reference node $ref (height $refh)"
 h1=$(curl -s -m 10 "$ref/status" | python3 -c "import json,sys;print(json.load(sys.stdin).get('height',-1))" 2>/dev/null)
 sleep "${LIVENESS_WAIT:-200}"
 h2=$(curl -s -m 10 "$ref/status" | python3 -c "import json,sys;print(json.load(sys.stdin).get('height',-1))" 2>/dev/null)
+# A window shorter than the block interval cannot observe advancement, so a
+# flat reading there is INCONCLUSIVE, not a stall. Calling it a failure would
+# make every quick run red and train the reader to ignore the check.
+LW=${LIVENESS_WAIT:-200}
 if [ "${h2:-0}" -gt "${h1:-0}" ]; then ok "chain advancing ($h1 -> $h2)"
-else bad "chain STALLED at $h1 over ${LIVENESS_WAIT:-200}s"; fi
+elif [ "$LW" -lt 200 ]; then warn "no new block in ${LW}s — shorter than the block interval, inconclusive"
+else bad "chain STALLED at $h1 over ${LW}s"; fi
 
 # ---- 3. proposer diversity (consensus-relevant since v4) -------------------
 # The v4 quorum gate needs `growth_quorum` DISTINCT proposers to score inside a
