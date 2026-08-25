@@ -1,4 +1,4 @@
-# Sestrian — Threat Model & Security Posture
+# Sestrian threat model & security posture
 
 Status as of the production-hardening pass. This is the brief for the external
 audit (a genesis-ceremony precondition) and the map from each attack to its
@@ -7,24 +7,24 @@ enforced in code today versus what is designed but awaits the testnet phase.
 
 ## Assets
 
-1. **Weight integrity** — the chain's state IS the model; corrupting it corrupts
+1. **Weight integrity**: the chain's state IS the model; corrupting it corrupts
    the product.
-2. **Token supply** — the emission schedule (halving + sunset) must be the only
+2. **Token supply**: the emission schedule (halving + sunset) must be the only
    source of new tokens.
-3. **Ledger correctness** — balances, nonces, staked registry, challenges.
-4. **Liveness** — the chain must keep advancing and converge to one head.
-5. **Data availability** — every accepted delta body must remain retrievable so
+3. **Ledger correctness**: balances, nonces, staked registry, challenges.
+4. **Liveness**: the chain must keep advancing and converge to one head.
+5. **Data availability**: every accepted delta body must remain retrievable so
    new nodes can validate from genesis.
 
 ## Actors
 
-- **Malicious miner** — submits deltas (any keypair, no permission).
-- **Malicious proposer** — builds blocks (open proposing on mainnet).
-- **Malicious peer** — sends gossip / sync traffic.
-- **Malicious uploader / API caller** — hits the node's HTTP API.
-- **Malicious trainer** — the PyTorch process the node trusts over the local
+- **Malicious miner**: submits deltas (any keypair, no permission).
+- **Malicious proposer**: builds blocks (open proposing on mainnet).
+- **Malicious peer**: sends gossip / sync traffic.
+- **Malicious uploader / API caller**: hits the node's HTTP API.
+- **Malicious trainer**: the PyTorch process the node trusts over the local
   bridge.
-- **Colluding coalition** — multiple of the above under one controller.
+- **Colluding coalition**: multiple of the above under one controller.
 
 ## Attack → mitigation
 
@@ -66,11 +66,11 @@ equilibrium, requires the multi-node testnet (Phase 2).
 
 | Property | Status |
 |---|---|
-| **Delta verification** — a delta must be a real, loss-reducing gradient, scored on a held-out shard via commit-reveal committee, with audit + slash for score fraud | REV 7: held-out-shard scoring ENFORCED at the committed-scores level — the proposer's trainer evaluates each delta on a seeded held-out batch, commits the scores in the block (header.score_root), and validation enforces structure/bounds/commitment; rewards split ∝ score. What remains for the testnet: the multi-evaluator commit-reveal COMMITTEE (removing trust in the lone proposer's evaluation) + automated slashing. Until then a proposer can inflate its own scores — bounded by SCORE_CAP, its bond, the challenge market, and `trimmed_mean` (robust for ≥3 honest miners) — so keep the devnet **small, monitored, low-value**. (tasks 108/109/110) |
-| **Data provenance** (rev 5) — every delta names the staked, DA-available corpora it trained on; the data share pays the named owners; "upload the hash then delete the data" is impossible because unnamable data earns nothing and vanished data is challengeable ("availability" reason → slash + revoke) | ENFORCED in validation + ledger, golden-tested. Deep byte-audit availability *sampling* is the testnet extension. |
-| **Data availability** — erasure-coded shards + Merkle availability sampling so a body is provably retrievable and survives some holders vanishing | PRIMITIVE built + golden-tested (`core::da`); node routing (disperse on submit, sample on validate, reconstruct on replay) is the integration (tasks 111/112) |
-| **Proposer sortition** — verifiable, stake-weighted per-height eligibility instead of fixed rotation | PRIMITIVE built + golden-tested (`core::lottery`, deterministic-Ed25519 VRF); the threshold-BLS beacon (`rig/beacon.py`) is the unbiasable upgrade; wiring into validate_block + produce is the integration (tasks 113/92) |
-| **Capacity retarget** — model size as difficulty | ENFORCED (protocol v1): work quota validated per delta (nnz floor over the signed page-claim set); controller state committed as `header.model_root`; growth events append deterministically-initialized expert pages on-chain (proven live: `scripts/growth-proof.sh`); frozen pages reject deltas. New consensus surface to watch: the growth trigger hash is the scheduling block's prev_hash — grindable in principle, worthless in practice (symmetric init distribution), closed for good by the threshold-BLS beacon |
+| **Delta verification**: a delta must be a real, loss-reducing gradient, scored on a held-out shard via commit-reveal committee, with audit + slash for score fraud | REV 7: held-out-shard scoring ENFORCED at the committed-scores level: the proposer's trainer evaluates each delta on a seeded held-out batch, commits the scores in the block (header.score_root), and validation enforces structure/bounds/commitment; rewards split ∝ score. What remains for the testnet: the multi-evaluator commit-reveal COMMITTEE (removing trust in the lone proposer's evaluation) + automated slashing. Until then a proposer can inflate its own scores, bounded by SCORE_CAP, its bond, the challenge market, and `trimmed_mean` (robust for ≥3 honest miners), so keep the devnet **small, monitored, low-value**. (tasks 108/109/110) |
+| **Data provenance** (rev 5): every delta names the staked, DA-available corpora it trained on; the data share pays the named owners; "upload the hash then delete the data" is impossible because unnamable data earns nothing and vanished data is challengeable ("availability" reason → slash + revoke) | ENFORCED in validation + ledger, golden-tested. Deep byte-audit availability *sampling* is the testnet extension. |
+| **Data availability**: erasure-coded shards + Merkle availability sampling so a body is provably retrievable and survives some holders vanishing | PRIMITIVE built + golden-tested (`core::da`); node routing (disperse on submit, sample on validate, reconstruct on replay) is the integration (tasks 111/112) |
+| **Proposer sortition**: verifiable, stake-weighted per-height eligibility instead of fixed rotation | PRIMITIVE built + golden-tested (`core::lottery`, deterministic-Ed25519 VRF); the threshold-BLS beacon (`rig/beacon.py`) is the unbiasable upgrade; wiring into validate_block + produce is the integration (tasks 113/92) |
+| **Capacity retarget**: model size as difficulty | ENFORCED (protocol v1): work quota validated per delta (nnz floor over the signed page-claim set); controller state committed as `header.model_root`; growth events append deterministically-initialized expert pages on-chain (proven live: `scripts/growth-proof.sh`); frozen pages reject deltas. New consensus surface to watch: the growth trigger hash is the scheduling block's prev_hash: grindable in principle, worthless in practice (symmetric init distribution), closed for good by the threshold-BLS beacon |
 | **Verified fee-bearing inference** | DESIGN only (task 116) |
 
 ## Cross-hardware determinism (holds)
@@ -87,7 +87,7 @@ by 17 golden-vector families, including an overflow case.
   internet; keep `/upload` + `/chat` token-gated (default: disabled).
 - Do **not** launch a high-value mainnet before delta scoring is enforced and
   the external audit is complete. The network is open, so mitigate by keeping the
-  early devnet **small, monitored, and low-value** (Phase 1/2) — an attacker
+  early devnet **small, monitored, and low-value** (Phase 1/2); an attacker
   gains little from a near-worthless early model.
 - The interim VRF sortition is grindable via the parent hash by the proposer;
   the threshold-BLS beacon closes this and is required before an open, high-value

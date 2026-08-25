@@ -1,8 +1,8 @@
-# Sestrian — Production Readiness
+# Sestrian production readiness
 
 The go/no-go tracker for the phased launch. Phase 0 = the rig (done). Phase 1 =
 a small, **monitored open devnet** run by known operators (the network is
-permissionless — see [joining.md](joining.md) — so "small" means few people
+permissionless (see [joining.md](joining.md)), so "small" means few people
 bother running nodes yet, not a cryptographic gate). Phase 2 = testnet.
 Phase 3 = open mainnet. This maps every hardening task to its state and gates
 each phase.
@@ -14,7 +14,7 @@ each phase.
 - 📐 designed (rig / whitepaper); not yet in the node
 - ☐ operational item; manifest/script written, applied per-environment
 
-## Consensus safety — ✅ COMPLETE (blocks Phase 1)
+## Consensus safety: ✅ COMPLETE (blocks Phase 1)
 - ✅ Block height linkage (90) · delta-length guard (91) · n_txs/height-0 (95)
 - ✅ Challenge quorum + disinterested jurors (93)
 - ✅ Snapshot ledger validation (94)
@@ -28,7 +28,7 @@ each phase.
   incl. negative, overflow, VRF-attempt, and low-count-robustness cases;
   Rust == Python. 67 Rust tests; devnet + soak (kill/restart) converge IN CI.
 
-## Runtime & DoS hardening — ✅ COMPLETE (blocks Phase 1)
+## Runtime & DoS hardening: ✅ COMPLETE (blocks Phase 1)
 - ✅ Bounded mempools/caches + admission gating (98/99)
 - ✅ Admin-token-gated mutating API; balance-before-write upload (100)
 - ✅ Byte-budgeted, continuous sync (101)
@@ -39,9 +39,9 @@ each phase.
 - ✅ Trainer watchdog + clock guard (107)
 - ✅ SIGTERM graceful shutdown → final snapshot (131)
 
-## Protocol v2 — the delta envelope (devnet-genesis-3)
+## Protocol v2: the delta envelope (devnet-genesis-3)
 - ✅ `delta_max_nnz` consensus cap (1M coords ≈ 8MB): the payload never scales
-  with quota — capacity pressure produces SPECIALIZATION (miners claim fewer
+  with quota; capacity pressure produces specialization (miners claim fewer
   pages, train them denser; claim budget = cap × 1e6 / quota) and sustained
   saturation still triggers on-chain growth. Bitcoin's block-size lesson,
   applied after the quota-fork incident proved the inverse design fails.
@@ -50,10 +50,10 @@ each phase.
   gradient mass under the budget. Proven live locally: devnet convergence with
   a forced tight envelope + growth-proof both green under v2.
 
-## Trust model — 🧪/📐 (blocks Phase 3; a small monitored devnet mitigates Phase 1/2)
+## Trust model: 🧪/📐 (blocks Phase 3; a small monitored devnet mitigates Phase 1/2)
 - 🧪 DA layer primitive: erasure coding + Merkle sampling (`core::da`) (111)
   - ☐ node routing: disperse on submit, sample on validate, reconstruct on
-    replay (112) — integration + testnet validation
+    replay (112); integration + testnet validation
 - ✅ Proposer sortition ENFORCED (protocol v1, devnet-genesis-2): stake-weighted
   VRF eligibility gates every block in `validate_block`, with a deterministic
   attempt-widening liveness ladder (seed binds (prev, height, attempt);
@@ -64,7 +64,7 @@ each phase.
 - ✅ Capacity retarget ENFORCED (protocol v1): the integer controller folds into
   consensus `ModelState` per block (committed as `header.model_root`), the WORK
   QUOTA (nnz floor over the claimed pages) is validated per delta, and GROWTH
-  EVENTS activate on-chain — a new expert page appended with a deterministic
+  events activate on-chain: a new expert page appended with a deterministic
   hash-stream init, replay bit-exact across the dimension change. Proven live:
   `scripts/growth-proof.sh` (2 nodes + 2 torch trainers grow the model and stay
   converged). Frozen pages reject deltas; genesis pages never freeze (117 →
@@ -75,25 +75,25 @@ each phase.
   parse (no serde defaults on v1 fields) instead of half-loading.
 - ✅ Stale-transport healing after churn (found live by the v1 soak, on CI):
   a SIGKILLed peer's QUIC connection lingers looking healthy under the SAME
-  PeerId as its restarted successor, black-holing both gossip and sync pulls —
+  PeerId as its restarted successor, black-holing both gossip and sync pulls;
   the partition looked permanent. Two-layer heal shipped: (1) MESH-BLINDNESS
-  PULL — if peers are connected but no foreign Head has been heard for 2+
+  PULL: if peers are connected but no foreign Head has been heard for 2+
   rounds, sync directly over request-response from every connected peer;
-  (2) CONNECTION RECYCLING — at 3 silent rounds, drop all connections and
+  (2) CONNECTION RECYCLING: at 3 silent rounds, drop all connections and
   redial the configured peers (guarded: inbound-only anchors never recycle).
   Liveness-only; fork choice reconciles on fresh transport. The soak asserts
   settled-prefix convergence through a mid-run SIGKILL.
 - ✅ Sync-window catch-up deadlock (found live: the first payload-heavy WAN
-  fresh-join — the second anchor wedged at height 3 forever): requests anchor at
+  fresh-join; the second anchor wedged at height 3 forever): requests anchor at
   head−2 for reorg safety, but the server packs oldest-first under a 48MB byte
   budget, and with ~20MB delta payloads a batch is EXACTLY the already-known
-  overlap — zero progress per round-trip. Fix: a per-peer request cursor jumps
+  overlap, zero progress per round-trip. Fix: a per-peer request cursor jumps
   past a batch that taught nothing while the peer is ahead (any batch containing
   a new block clears it, so the reorg margin holds exactly when it matters), and
   a node still behind re-requests immediately instead of once per Head gossip.
   CI never saw it: toy-moe payloads are tiny. Regression: devnet convergence ✓.
 - ✅ OOM during WAN catch-up (found live, same join): the ~860MB genesis state
-  was pinned in RAM forever "to serve joiners" — but sync already refuses to
+  was pinned in RAM forever "to serve joiners", but sync already refuses to
   serve a genesis that big, so the pin only burned a hard-won 8GB margin and
   the OOM killer took the anchor down mid-sync. Fix: prune an oversized genesis
   state like any block below the prune floor (still re-derivable from
@@ -108,52 +108,52 @@ each phase.
   every reconnect), and request-response failures / connection closes are now
   logged with their cause instead of being silently swallowed.
 - ✅ THE ACTOR SPLIT + INCREMENTAL STATE ENGINE (the structural close-out of
-  every transport incident above): the swarm loop now owns transport ONLY —
-  its worst-case pause is microseconds — while a chain actor owns all state
+  every transport incident above): the swarm loop now owns transport ONLY
+  (its worst-case pause is microseconds) while a chain actor owns all state
   behind typed channels. And validation itself became O(envelope): one
   resident weight vector mutated in place, sparse undo/redo per block,
   cached page leaves (only touched pages rehash), sparse bodies end to end
   with a streaming delta hash. Committed-root checks make the incremental
-  math self-verifying — divergence is loud rejection, never a fork. Proven:
+  math self-verifying: divergence is loud rejection, never a fork. Proven:
   golden chain replay (fork + growth) bit-exact, devnet + growth-proof +
   forced-announce + kill/restart soak all green on the new engine.
-- ✅ Delta scoring (rev 7) — held-out-shard loss scores COMMITTED per block
+- ✅ Delta scoring (rev 7): held-out-shard loss scores COMMITTED per block
   (header.score_root), enforced structure/bounds/commitment in validation;
   miner pool + data credits split ∝ score, uniform fallback; the trainer bridge
   evaluates candidates on a seeded held-out batch (108). Scores are bonded,
-  challengeable proposer claims — the commit-reveal COMMITTEE (multi-evaluator
+  challengeable proposer claims; the commit-reveal committee (multi-evaluator
   score verification + slashing automation) remains the testnet upgrade.
-- ✅ Provenance (rev 5) — deltas must name staked, active corpora (data_refs in
+- ✅ Provenance (rev 5): deltas must name staked, active corpora (data_refs in
   the signing preimage); the data share pays the named owners (139/140).
   "availability" is a documented challenge reason: vanished bytes → slash +
   revoke → unnamable. Deep byte-audit sampling is the testnet extension.
-- ✅ Economics (rev 6) — tail emission (never zero), 1M-block epochs, 60/20/20
+- ✅ Economics (rev 6): tail emission (never zero), 1M-block epochs, 60/20/20
   inference fee split with on-chain fee pools drained to named data owners +
   miners (see economics-lifecycle.md).
-- ✅ Delta stake bond (admission cost) — lock/return done + golden-tested (109);
+- ✅ Delta stake bond (admission cost): lock/return done + golden-tested (109);
   slashing on proven fraud couples to scoring (testnet)
-- ✅ Byzantine-robust aggregation at low miner counts (110) — trim ≥1 at k≥3
-- 🧪 Dtx cross-inclusion (anti-censorship) (114) — per-proposer omission
+- ✅ Byzantine-robust aggregation at low miner counts (110): trim ≥1 at k≥3
+- 🧪 Dtx cross-inclusion (anti-censorship) (114): per-proposer omission
   monitoring live in /metrics + /miners; the consensus-level inclusion
   challenge is testnet-phase (a validator can only expect deltas it saw)
-- ✅ Fee-bearing inference receipts (116) — on-chain fee payer→server + receipt
+- ✅ Fee-bearing inference receipts (116): on-chain fee payer→server + receipt
   done + golden-tested; off-chain output attestation is the challenge-market
   extension (testnet)
 
 **Phase-1 mitigation:** the network is open, so instead of gating *who* joins,
-launch **small and monitored** on a low-value model — run it with people you can
+launch **small and monitored** on a low-value model, run with people you can
 watch, treat rewards as testnet play, and watch for bad deltas. An attacker
 gains little from a near-worthless early model, and delta scoring (108) closes
 the gap before the model is worth attacking. Keep mutating API endpoints
 token-gated/disabled.
 
-## Operations — ☐ manifests/scripts ready; apply per environment
-- ☐ Persistent-volume StatefulSet (118) — written; the live network runs the
+## Operations: ☐ manifests/scripts ready; apply per environment
+- ☐ Persistent-volume StatefulSet (118): written; the live network runs the
   bare-VPS anchor model instead (provision-seed.sh), so this applies when a
   k8s environment returns
-- ✅ Prebuilt image + CI push (120) — images job green on main
+- ✅ Prebuilt image + CI push (120): images job green on main
 - ✅ Prometheus /metrics endpoint + alert rules (121)
-- ✅ Backup/restore script (122) — APPLIED: nightly cron on both anchors
+- ✅ Backup/restore script (122) APPLIED: nightly cron on both anchors
   (deploy/backup-cron, keep-7 rotation); restore drill documented in the script
 - ◐ TLS termination (123): Caddy read-only HTTPS facade (deploy/Caddyfile.api)
   installed + validated on contabo-us-1, GET allow-list + CORS for the site's
@@ -162,30 +162,30 @@ token-gated/disabled.
 - ✅ Anchors dial each other (both units carry --peers), so either recycles
   stale transport after churn; DNS-named anchors with IP floor shipped (6ac8aac)
 - ✅ Second bootstrap/DA anchor (119): contabo-us-1 (13.140.32.27) live on a
-  separate continent — regenerated the genesis root independently (fourth
+  separate continent; regenerated the genesis root independently (fourth
   platform), synced the chain over WAN (shaking out the three catch-up bugs
   above), holds lockstep with contabo-eu-1, and a fresh joiner syncs through it
   ALONE (bootstrap SPOF closed). Baked into the shipped bootstrap pair.
 
 ## Process
-- ☐ npm 0.4.0 publish — the founder has no npm account yet; the published 0.3.2
+- ☐ npm 0.4.0 publish: the founder has no npm account yet; the published 0.3.2
   package works against devnet-genesis-2 with the documented
   `SESTRIAN_GENESIS_TAG=devnet-genesis-2` override (joining.md), and a stale
   install fails loudly, never silently. Create the account, `npm publish` from
   npm/, then drop the override from joining.md.
 
 - ✅ CI: warning-clean build + tests + golden parity; image build (124)
-- 🧪 node/net tests: store lock/torn-line, mempool window, API auth (125) —
+- 🧪 node/net tests: store lock/torn-line, mempool window, API auth (125);
   expand alongside integrations
 - 📐 adversarial/chaos suite (126) · cross-machine e2e + soak (128)
-- ✅ Python reference suite pinned + green + BLOCKING in CI (127) — protocol v1;
+- ✅ Python reference suite pinned + green + BLOCKING in CI (127): protocol v1;
   devnet-convergence job on every PR, soak on main + nightly
 - ✅ Threat model (132) · this readiness doc (133)
 
-## Open design question — the growth gate vs specialization (v2, live)
+## Open design question: the growth gate vs specialization (v2, live)
 Growth requires staleness <= 20% (zero-scored deltas are "junk" by design).
 Live observation at max quota: ~half of committed scores are ZERO with a
-systematic shape — the proposer's held-out eval scores its OWN delta positive
+systematic shape: the proposer's held-out eval scores its OWN delta positive
 and the rival's specialized claim zero (a delta training experts the
 evaluator's held-out batch barely routes to shows ~no improvement alone).
 Consequence: the quality gate blocks organic growth exactly when sustained
@@ -195,19 +195,19 @@ CLAIMED pages; score the joint application; or exempt the staleness gate when
 every miner's aggregate across the window scored positive at least once.
 RESOLVED DIAGNOSIS (after claim-aware masks + 4-batch noise reduction shipped
 as proposer policy): with the noise floor lowered, true per-delta improvement
-at the plateau measures ~0-400 u-nats — the zeros are HONEST. Two miners on
+at the plateau measures ~0-400 u-nats; the zeros are honest. Two miners on
 one shared corpus produce near-redundant gradients, so per-delta marginal
 value is genuinely tiny. Recommended for the next protocol rev: gate growth
 on the WINDOW'S cumulative held-out trend ("is the network learning?") rather
 than per-delta zeros; per-delta scores stay for reward weighting. The deep
-fix is data diversity across miners (the corpus economy) — which is also
+fix is data diversity across miners (the corpus economy), which is also
 what makes specialization real. Decide before the next protocol rev; do not
 patch ad hoc.
 
-## Remaining — testnet-phase extensions (need a multi-party network)
+## Remaining testnet-phase extensions (need a multi-party network)
 The single-operator devnet can't validate these; the testnet is their gate.
 - DEEP-REORG LIMIT (found live, quota-fork incident): a node cannot reorg onto
-  a rival fork whose divergence point is below its state prune window — the
+  a rival fork whose divergence point is below its state prune window; the
   fork-point state is gone, so the rival chain can never validate locally.
   Same property as Bitcoin pruned nodes; the resolution is a re-sync from
   genesis (or, later, from a checkpoint). The heal machinery (walk-back,
@@ -218,11 +218,11 @@ The single-operator devnet can't validate these; the testnet is their gate.
   ARCHIVE nodes (--da-retain-blocks 0, the anchors) must retain every body's
   shards forever. A verified state-snapshot join would let the whole network
   prune deep history. Until then: anchors archive, home nodes prune
-  (--da-retain-blocks N deletes shard sets beyond the window — shard growth
+  (--da-retain-blocks N deletes shard sets beyond the window; shard growth
   filled a founder disk within a day of the first live quota rise).
 - gossip topic is `sestrian/v1` for every chain: a node on a DIFFERENT genesis
   (observed live: a devnet-1 straggler still mining the old chain) lands in the
-  same mesh and its Head announcements trigger wasted sync pulls — validation
+  same mesh and its Head announcements trigger wasted sync pulls; validation
   rejects its blocks, so it's noise, not risk. At the next coordinated protocol
   bump, namespace the topic by genesis id (a change today would orphan the
   published v0.4.0 binaries for a cosmetic win).
@@ -230,10 +230,10 @@ The single-operator devnet can't validate these; the testnet is their gate.
   automated slashing (the committed-scores mechanism itself is ✅ live; what
   remains is removing trust in the lone proposer's evaluation)
 - 114 consensus-level cross-inclusion challenge (omission MONITORING is ✅ live)
-- 141 sketch-based usage attribution for the fee data pool (§8) — the pool +
+- 141 sketch-based usage attribution for the fee data pool (§8): the pool +
   pro-rata drain are ✅ live; the sketch commitment/verification pipeline rides
   on the same off-chain-eval infrastructure as the 108 committee
-- large-corpus DA ingestion — staked corpora register hash+stake on-chain and
+- large-corpus DA ingestion: staked corpora register hash+stake on-chain and
   are challengeable ("availability"), but the DA byte-store path (built for
   ~13MB delta bodies; 64MB API cap) cannot ingest multi-GB corpora yet; a
   chunked content-addressed manifest format is needed before third-party data
@@ -244,9 +244,9 @@ The single-operator devnet can't validate these; the testnet is their gate.
 - ✅ 111/112 DA routing DONE at the storage layer: bodies are erasure-coded into
   Merkle-committed shards on write, and replay/sync reconstruct from any K shards
   instead of hard-stopping on a missing body (tested: recover from K, fail below
-  K; devnet converges with live dispersal). The multi-node piece — distributing
-  shards across peers + availability-sampling over gossip — is the testnet extension.
-- 114 Dtx cross-inclusion — inherently a network property (a validator can only
+  K; devnet converges with live dispersal). The multi-node piece, distributing
+  shards across peers + availability-sampling over gossip, is the testnet extension.
+- 114 Dtx cross-inclusion: inherently a network property (a validator can only
   expect a delta it *saw* gossiped); an anti-censorship challenge, not a hard
   rule, so it validates on the testnet
 - ✅ 115 chunked sparse aggregation DONE: Payload::dense_range + chunked_aggregate
@@ -256,7 +256,7 @@ The single-operator devnet can't validate these; the testnet is their gate.
 - ✅ 116 fee-bearing inference DONE on-chain (see above)
 
 ## Phase gates
-- **Phase 1 (small open devnet): ✅ READY** — consensus safety complete (incl.
+- **Phase 1 (small open devnet): ✅ READY**: consensus safety complete (incl.
   non-forgeable work + robust aggregation), runtime hardening complete,
   multi-node DA + stake bonds + inference fees done, ops manifests written, repo
   public, genesis fetchable+verifiable from a peer. Soak (kill/restart) and the

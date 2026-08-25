@@ -1,7 +1,7 @@
 """Async socket gossip over real TCP: coordinator-free consensus (§5).
 
 Loopback (real sockets, one event loop) so the test needs no second machine;
-the same code ran cross-machine (Mac + a second machine) — see docs/distributed-systems.md."""
+the same code ran cross-machine (Mac + a second machine) — see docs/internal/distributed-systems.md."""
 
 from rig.chain import state_root
 from rig.gossip_net import run_cluster

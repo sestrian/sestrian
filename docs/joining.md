@@ -30,8 +30,8 @@ checks your setup can actually earn before leaving you running. Safe to re-run.
 
 ### What you need
 
-- **To mine:** a GPU with PyTorch support (NVIDIA CUDA or Apple silicon MPS) —
-  a laptop GPU is fine — plus Rust and Python 3.11+. The installer offers to
+- **To mine:** a GPU with PyTorch support (NVIDIA CUDA or Apple silicon MPS;
+  a laptop GPU is fine), plus Rust and Python 3.11+. The installer offers to
   install both.
 - **To watch/serve:** nothing beyond `npx sestrian run`.
 
@@ -64,7 +64,7 @@ docker run --rm -it \
   --data-dir /data --genesis-file /genesis/genesis.bin --api-bind 0.0.0.0
 ```
 
-That image watches, syncs and serves. To mine in Docker (Linux + NVIDIA only —
+That image watches, syncs and serves. To mine in Docker (Linux + NVIDIA only;
 on a Mac run `scripts/install.sh --mine` natively for GPU access):
 
 ```bash
@@ -100,7 +100,7 @@ default, and a flag contradicting it is a startup error, not a silent fork.
 | | value |
 |---|---|
 | network | `devnet` |
-| bootstrap peers | `/ip4/169.58.211.248/udp/9800/quic-v1` (EU) · `/ip4/13.140.32.27/udp/9800/quic-v1` (US) — either alone is enough |
+| bootstrap peers | `/ip4/169.58.211.248/udp/9800/quic-v1` (EU) · `/ip4/13.140.32.27/udp/9800/quic-v1` (US); either alone is enough |
 | genesis id (state root) | `91bdcc281c0dbbd7b3bea3d38003e4c61565bcaa5fd8e7bfca296e6a4994ddb1` |
 | model | 107.4M-param growable MoE (~32M active/token), `--model small-moe --seed 20260824` |
 | genesis-ledger contributor | `3432d48fd6878b4f2e7a1e40cc15e112c512fae7` |

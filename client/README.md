@@ -46,5 +46,5 @@ The model architecture (`MODEL_CFG` in `node.py`) must match on both sides —
 they exchange weight vectors. Bump `n_layer` / `n_embd` to train a bigger model
 (bounded by your GPU's memory).
 
-See [`../docs/client-install.md`](../docs/client-install.md) for a clean Linux
+See [`../docs/joining.md`](../docs/joining.md) for a clean
 setup (the first-user target).

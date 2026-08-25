@@ -1,7 +1,7 @@
 """LAN node: coordinator + miners over real TCP produce a correct, replayable chain.
 
 Uses loopback (127.0.0.1) so the test needs no second machine; the same code
-path runs cross-machine (verified by hand against a second machine — see docs/lan.md).
+path runs cross-machine (verified by hand against a second machine — see docs/internal/lan.md).
 """
 
 import socket
