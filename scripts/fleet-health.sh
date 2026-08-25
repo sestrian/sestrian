@@ -68,7 +68,29 @@ for i in "${!heights[@]}"; do
 done
 if [ "$uniq_heads" -eq 1 ]; then ok "all reachable nodes on one head ($max)"
 elif [ "$same_h_diff_head" = "1" ]; then
-    bad "FORK: nodes at the same height disagree on the head (heights $min..$max)"
+    # A TIE is not a FORK. With more than one miner proposing, two blocks at
+    # the same height are normal and fork choice resolves them within a block
+    # or two — flagging every tie would make this check useless exactly when
+    # the network is healthiest. Only a disagreement that SURVIVES a block is
+    # a fork, so confirm before crying wolf.
+    sleep "${TIE_CONFIRM_WAIT:-420}"
+    still=0
+    for i in "${!NODES[@]}"; do
+        for j in "${!NODES[@]}"; do
+            [ "$i" -ge "$j" ] && continue
+            a=$(curl -s -m 10 "${NODES[$i]}/status" 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);print(str(d.get('height'))+':'+(d.get('head') or '')[:12])" 2>/dev/null)
+            b=$(curl -s -m 10 "${NODES[$j]}/status" 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);print(str(d.get('height'))+':'+(d.get('head') or '')[:12])" 2>/dev/null)
+            [ -z "$a" ] || [ -z "$b" ] && continue
+            ha=${a%%:*}; hb=${b%%:*}
+            d=$((ha-hb)); d=${d#-}
+            if [ "$d" -le 2 ] && [ "${a##*:}" != "${b##*:}" ]; then still=1; fi
+        done
+    done
+    if [ "$still" = "1" ]; then
+        bad "FORK: nodes at the same height still disagree after a block (heights $min..$max)"
+    else
+        ok "a head tie resolved within a block — fork choice working"
+    fi
 elif [ "$spread" -gt 2 ]; then
     warn "a node is BEHIND (heights $min..$max) — catching up, not forked"
 else warn "heads differ but heights within $spread — propagation in flight"; fi
