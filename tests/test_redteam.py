@@ -39,3 +39,27 @@ def test_excision_recovers_from_poisoning():
     B = experiment_B_drip(seed=0)
     assert B["excised_backdoor"] < 0.1
     assert B["excised_clean"] > B["poisoned_clean"] - 0.15
+
+
+# --- v3 learning-gate red-team (rig/redteam_gate.py) ---------------------------
+
+from rig.redteam_gate import run_gate_redteam        # noqa: E402
+
+
+def test_v3_gate_holds_on_an_honest_plateau():
+    """A saturated but genuinely-not-learning network (every delta honestly
+    scored zero) must NOT grow: the gate does its job against honest inputs."""
+    r = run_gate_redteam(verbose=False)
+    assert r["honest_growth"] == 0
+
+
+def test_v3_gate_is_not_byzantine_robust_force_growth_is_1_of_n():
+    """The honest finding: a SINGLE Byzantine proposer per window, committing
+    one positive micro-nat on a plateaued network, forces the model to grow —
+    win_score_sum is a window-wide SUM, so one liar flips the gate open. The
+    gate is a proposer-policy heuristic, not a Byzantine-robust control; real
+    robustness gates on the multi-evaluator committee (testnet). If this ever
+    stops holding, the gate was hardened — update the threat model."""
+    r = run_gate_redteam(verbose=False)
+    assert r["attack_growth"] > 0
+    assert r["attack_growth"] > r["honest_growth"]

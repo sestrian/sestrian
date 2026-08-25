@@ -81,6 +81,28 @@ consensus math is pure integer arithmetic (`wrapping_add`, `div_euclid`,
 sorted maps), so two honest nodes reach identical roots regardless of GPU. Pinned
 by 17 golden-vector families, including an overflow case.
 
+## Known weaknesses (red-teamed, honest)
+
+- **The v3 learning gate is NOT Byzantine-robust in the force-growth
+  direction** (`rig/redteam_gate.py`, found 2026-08-25). Growth is gated on
+  `win_score_sum > 0`, a SUM of proposer-committed scores over the whole
+  retarget window, and committed scores are validated only for range, not
+  accuracy (that is the multi-evaluator committee, a testnet item). So a
+  SINGLE Byzantine proposer committing one positive micro-nat, on a
+  genuinely-plateaued network, flips the gate open for the entire window and
+  drives unjustified growth — a 1-of-N griefing / resource-exhaustion vector
+  (the model everyone stores and serves grows on one liar's say-so). It is
+  strictly weaker than pre-v3 per-delta staleness, which bounded a proposer to
+  its own block. Suppression (holding the gate closed on a learning network)
+  is by contrast N-of-N — one honest positive score defeats it. Harm is
+  bounded (1 page per ~5 windows, random-init experts, no theft/safety break)
+  and mitigated by the small monitored devnet; the durable fix is to gate on a
+  quorum of DISTINCT proposers (matching the ≥3-honest robustness the
+  aggregation already assumes) or on the committee itself — a version-scheduled
+  consensus change, not a hotfix. Until then the gate is a proposer-policy
+  heuristic against an honest plateau, not a control against a Byzantine
+  proposer.
+
 ## Residual risk / do-not-do
 
 - Do **not** expose an unauthenticated node's mutating endpoints to the open
