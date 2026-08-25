@@ -2681,6 +2681,98 @@
    ]
   }
  ],
+ "sat64": [
+  {
+   "cases": [
+    {
+     "input": "0",
+     "output": "0"
+    },
+    {
+     "input": "1",
+     "output": "1"
+    },
+    {
+     "input": "-1",
+     "output": "-1"
+    },
+    {
+     "input": "9223372036854775807",
+     "output": "9223372036854775807"
+    },
+    {
+     "input": "-9223372036854775808",
+     "output": "-9223372036854775808"
+    },
+    {
+     "input": "9223372036854775808",
+     "output": "9223372036854775807"
+    },
+    {
+     "input": "-9223372036854775809",
+     "output": "-9223372036854775808"
+    },
+    {
+     "input": "27670116110564327421",
+     "output": "9223372036854775807"
+    },
+    {
+     "input": "-27670116110564327421",
+     "output": "-9223372036854775808"
+    },
+    {
+     "input": "1180591620717411303424",
+     "output": "9223372036854775807"
+    },
+    {
+     "input": "-1180591620717411303424",
+     "output": "-9223372036854775808"
+    }
+   ]
+  }
+ ],
+ "proposer_lookback": [
+  {
+   "lookback": 32,
+   "cases": [
+    {
+     "chain_len": 0,
+     "cycle": 1,
+     "expected_jurors": 0
+    },
+    {
+     "chain_len": 1,
+     "cycle": 1,
+     "expected_jurors": 1
+    },
+    {
+     "chain_len": 5,
+     "cycle": 2,
+     "expected_jurors": 2
+    },
+    {
+     "chain_len": 40,
+     "cycle": 3,
+     "expected_jurors": 3
+    },
+    {
+     "chain_len": 40,
+     "cycle": 40,
+     "expected_jurors": 32
+    },
+    {
+     "chain_len": 100,
+     "cycle": 50,
+     "expected_jurors": 32
+    },
+    {
+     "chain_len": 10,
+     "cycle": 10,
+     "expected_jurors": 10
+    }
+   ]
+  }
+ ],
  "version_schedule": [
   {
    "v3_height": 288,

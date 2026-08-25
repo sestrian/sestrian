@@ -54,7 +54,7 @@ pub fn sketch_root(sketches: &BTreeMap<String, Vec<i32>>) -> String {
 /// Saturate a big-int accumulation into i64 — mirrors rig `_sat64` exactly
 /// (clamped to [i64::MIN, i64::MAX]) so ledger sketch accumulators can never
 /// overflow/diverge between implementations.
-fn sat64(x: i128) -> i64 {
+pub fn sat64(x: i128) -> i64 {
     x.clamp(i64::MIN as i128, i64::MAX as i128) as i64
 }
 

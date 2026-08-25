@@ -659,6 +659,33 @@ def main():
     v["effective_scores"] = [{"txids": eff_ids, "txs": eff_wire,
                               "cases": eff_cases}]
 
+    # --- _sat64: the ledger/sketch accumulator clamp -------------------------
+    # Consensus: sketch accumulators are saturated, not wrapped. If the two
+    # implementations disagreed at the boundary the ledger roots would diverge
+    # only for extreme inputs — the worst kind of fork, rare and unreproducible.
+    from rig.blockchain import _sat64 as _s64
+    I64MAX = (1 << 63) - 1
+    sat_cases = [0, 1, -1, I64MAX, -I64MAX - 1, I64MAX + 1, -I64MAX - 2,
+                 I64MAX * 3, -(I64MAX * 3), 1 << 70, -(1 << 70)]
+    v["sat64"] = [{"cases": [{"input": str(x), "output": str(_s64(x))}
+                             for x in sat_cases]}]
+
+    # --- proposer lookback: the juror window ---------------------------------
+    # The disinterested-juror rule draws voters from the last
+    # PROPOSER_LOOKBACK proposers. Pinning the WINDOW SIZE and its
+    # short-chain/duplicate behaviour keeps the eligible juror set identical
+    # across implementations; a mismatch would resolve a data challenge
+    # differently on different nodes.
+    from rig.token import PROPOSER_LOOKBACK as _PLB
+    v["proposer_lookback"] = [{
+        "lookback": _PLB,
+        # (chain length, distinct proposers cycling) -> expected juror count
+        "cases": [{"chain_len": n, "cycle": c,
+                   "expected_jurors": min(c, min(n, _PLB))}
+                  for n, c in [(0, 1), (1, 1), (5, 2), (40, 3),
+                               (40, 40), (100, 50), (10, 10)]],
+    }]
+
     # --- version schedule: rig == Rust, pinned ------------------------------
     # This family exists because its absence let a one-sided version bump ship:
     # the rig gained a v4 branch, expected_version_at never did, and

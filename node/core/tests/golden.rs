@@ -1110,3 +1110,37 @@ fn effective_scores_matches_reference() {
                    "effective_scores diverges on case {}", case["label"]);
     }
 }
+
+#[test]
+fn sat64_matches_reference() {
+    // Sketch accumulators SATURATE rather than wrap. A boundary disagreement
+    // between rig and node would diverge the ledger only for extreme inputs —
+    // the worst kind of fork: rare, and impossible to reproduce on demand.
+    for case in vectors()["sat64"][0]["cases"].as_array().unwrap() {
+        let x: i128 = case["input"].as_str().unwrap().parse().unwrap();
+        let want: i64 = case["output"].as_str().unwrap().parse().unwrap();
+        let got = sestrian_core::blocktree::sat64(x);
+        assert_eq!(got, want, "sat64 diverges at {x}");
+    }
+}
+
+#[test]
+fn proposer_lookback_matches_reference() {
+    // The disinterested-juror rule draws voters from the last
+    // PROPOSER_LOOKBACK proposers. If the window size differed between
+    // implementations, a data challenge could resolve differently on
+    // different nodes — a consensus split decided by a vote count.
+    let case = &vectors()["proposer_lookback"][0];
+    assert_eq!(sestrian_core::token::PROPOSER_LOOKBACK as u64,
+               case["lookback"].as_u64().unwrap(),
+               "PROPOSER_LOOKBACK differs from the reference");
+    // and the derived juror count for each modelled chain shape
+    let lb = sestrian_core::token::PROPOSER_LOOKBACK;
+    for c in case["cases"].as_array().unwrap() {
+        let n = c["chain_len"].as_u64().unwrap() as usize;
+        let cycle = c["cycle"].as_u64().unwrap() as usize;
+        let want = c["expected_jurors"].as_u64().unwrap() as usize;
+        assert_eq!(cycle.min(n.min(lb)), want,
+                   "juror-set size diverges for chain {n} cycling {cycle}");
+    }
+}
