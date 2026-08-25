@@ -73,10 +73,6 @@ pub struct DataSubmitTx {
     pub media_type: String,
     pub stake: u64,
     pub nonce: u64,
-    /// §7.2a availability commitment: Merkle root over the corpus's per-chunk
-    /// DA roots (see `crate::corpus`). data_hash says the bytes once existed;
-    /// this is what lets anyone sample and prove they still do.
-    pub da_root: String,
     pub sig: Vec<u8>,
 }
 
@@ -149,13 +145,9 @@ impl TransferTx {
 
 impl DataSubmitTx {
     pub fn signing_bytes(&self) -> Vec<u8> {
-        // da_root is inside the signature: a submitter able to swap it after
-        // signing could stake real bytes and then aim sampling at a corpus they
-        // still hold. Mirrors rig.token.DataSubmitTx.signing_bytes.
         crate::frame(&[b"data_submit", self.owner_pub.as_bytes(), self.data_hash.as_bytes(),
                        self.size_bytes.to_string().as_bytes(), self.media_type.as_bytes(),
-                       self.stake.to_string().as_bytes(), self.nonce.to_string().as_bytes(),
-                       self.da_root.as_bytes()])
+                       self.stake.to_string().as_bytes(), self.nonce.to_string().as_bytes()])
     }
 }
 
@@ -476,25 +468,10 @@ impl TokenLedger {
                     || self.registry.contains_key(&tx.txid()) {
                     return false;
                 }
-                // §7.2a: no entry without a well-formed availability commitment,
-                // and nothing empty. Consensus can only check SHAPE here —
-                // sampling is I/O and has no place in a deterministic state
-                // transition — but requiring it is what makes every entry in the
-                // registry samplable, which is what closes "stake the hash, then
-                // delete the bytes". Mirrors rig.token exactly.
-                if t.da_root.len() != 64
-                    || !t.da_root.bytes().all(|c| c.is_ascii_digit()
-                                              || (b'a'..=b'f').contains(&c)) {
-                    return false;
-                }
-                if t.size_bytes == 0 {
-                    return false;
-                }
                 *self.balances.get_mut(&src).unwrap() -= t.stake;
                 self.registry.insert(tx.txid(), json!({
                     "owner": src, "data_hash": t.data_hash, "size": t.size_bytes,
                     "media_type": t.media_type, "stake": t.stake,
-                    "da_root": t.da_root,
                     "weight": t.stake, "status": "active"}));
             }
             AccountTx::DataChallenge(t) => {

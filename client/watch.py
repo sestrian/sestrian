@@ -121,15 +121,11 @@ class WatchNode(GossipNode):
         from rig.token import DataChallengeTx, DataSubmitTx, DataVoteTx
         try:
             if kind == "submit":
-                # da_root absent => "" => the ledger's §7.2a rule rejects it.
-                # Defaulting to anything acceptable would let a pre-§7.2a
-                # submission register with no availability commitment.
                 tx = DataSubmitTx(owner_pub=str(q["owner_pub"]),
                                   data_hash=str(q["data_hash"]),
                                   size_bytes=int(q["size_bytes"]),
                                   media_type=str(q.get("media_type", "text")),
                                   stake=int(q["stake"]), nonce=int(q["nonce"]),
-                                  da_root=str(q.get("da_root", "")),
                                   sig=bytes.fromhex(q["sig"]))
             elif kind == "challenge":
                 tx = DataChallengeTx(challenger_pub=str(q["challenger_pub"]),

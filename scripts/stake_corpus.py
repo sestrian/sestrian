@@ -31,11 +31,6 @@ def main() -> None:
     ap.add_argument("--media", default="text")
     ap.add_argument("--stake-grains", type=int, required=True,
                     help="grains to escrow (1 SESTRIAN = 1e9 grains)")
-    ap.add_argument("--da-root", default=None,
-                    help="§7.2a availability commitment; omit and pass --file "
-                         "to compute it by streaming the corpus")
-    ap.add_argument("--file", default=None,
-                    help="corpus path — streamed to derive hash/size/da_root")
     a = ap.parse_args()
 
     w = json.load(open(Path(a.wallet).expanduser()))
@@ -48,27 +43,13 @@ def main() -> None:
     if bal["grains"] < a.stake_grains:
         sys.exit(f"balance {bal['grains']} < stake {a.stake_grains}")
 
-    da_root = a.da_root
-    if a.file:
-        from rig import corpus                                   # noqa: E402
-        with open(a.file, "rb") as fh:
-            man = corpus.build(fh)
-        if man.data_hash != a.hash or man.size_bytes != a.size:
-            sys.exit(f"--file disagrees with --hash/--size: got "
-                     f"{man.data_hash} / {man.size_bytes}")
-        da_root = man.da_root
-    if not da_root:
-        sys.exit("need --da-root (or --file to compute it): a corpus with no "
-                 "availability commitment cannot be staked")
-
     tx = DataSubmitTx(owner_pub=key.pub, data_hash=a.hash, size_bytes=a.size,
                       media_type=a.media, stake=a.stake_grains,
-                      nonce=bal["nonce"], da_root=da_root).signed(key)
+                      nonce=bal["nonce"]).signed(key)
     assert tx.verify()
     body = {"owner_pub": tx.owner_pub, "data_hash": tx.data_hash,
             "size_bytes": tx.size_bytes, "media_type": tx.media_type,
-            "stake": tx.stake, "nonce": tx.nonce, "da_root": tx.da_root,
-            "sig": tx.sig.hex()}
+            "stake": tx.stake, "nonce": tx.nonce, "sig": tx.sig.hex()}
     req = urllib.request.Request(f"{a.node}/data/submit",
                                  data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})

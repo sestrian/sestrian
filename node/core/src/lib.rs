@@ -14,7 +14,6 @@ use sha2::{Digest, Sha256};
 
 pub mod blocktree;
 pub mod capacity;
-pub mod corpus;
 pub mod da;
 pub mod lottery;
 pub mod merkle;

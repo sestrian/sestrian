@@ -35,18 +35,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "..", "node", "vectors", "golden.json")
 
 
-
-def _da_root(nbytes: int, fill: bytes = b"g") -> str:
-    """§7.2a availability commitment for a synthetic corpus of `nbytes`.
-
-    Built from real bytes through rig.corpus so the vector pins the actual
-    chunk+Merkle construction, not a literal someone could change without
-    noticing the Rust side disagreed."""
-    import io
-    from rig import corpus
-    return corpus.build(io.BytesIO(fill * nbytes)).da_root
-
-
 def main():
     rng = np.random.default_rng(42)
     v = {}
@@ -197,7 +185,7 @@ def main():
     led2.apply_reward(1, [key.pub], key.pub, [])          # fund key via mining
     sub = DataSubmitTx(owner_pub=key.pub, data_hash="aa" * 32, size_bytes=4096,
                        media_type="csv", stake=led2.balance(address(key.pub)) // 2,
-                       nonce=0, da_root=_da_root(4096)).signed(key)
+                       nonce=0).signed(key)
     assert led2.apply_data_tx(sub, 1, set())
     root_after_submit = led2.root()
     led2.apply_reward(2, [k2.pub], k2.pub, [])            # fund k2 (the challenger)
@@ -225,7 +213,6 @@ def main():
         "submit": {"owner_pub": sub.owner_pub, "data_hash": sub.data_hash,
                    "size_bytes": sub.size_bytes, "media_type": sub.media_type,
                    "stake": sub.stake, "nonce": sub.nonce,
-                   "da_root": sub.da_root,
                    "signing_bytes_hex": sub.signing_bytes().hex(),
                    "txid": sub.txid(), "sig_hex": sub.sig.hex()},
         "root_after_submit": root_after_submit,
@@ -425,33 +412,6 @@ def main():
         "reconstruct_from": keep,
         "proof_index": 5,
         "proof": [[side, sib.hex()] for side, sib in pf],
-    }]
-
-    # --- corpus availability (§7.2a): the commitment a staked corpus carries -
-    #     Pins the CHUNKING and the two-level Merkle construction, not just the
-    #     final hex: a Rust port that chunked at a different size, ordered chunk
-    #     roots differently, or hashed the manifest another way would still
-    #     produce a 64-hex string and would silently accept corpora the Python
-    #     reference rejects. Deliberately spans a partial tail chunk.
-    from rig import corpus as _corp
-    import io as _io
-    _corpus_cases = []
-    for _n in [1, _corp.CHUNK_BYTES - 1, _corp.CHUNK_BYTES,
-               _corp.CHUNK_BYTES + 1, _corp.CHUNK_BYTES * 2 + 12345]:
-        _body = (b"sestrian-corpus-vector|" * ((_n // 23) + 1))[:_n]
-        _m = _corp.build(_io.BytesIO(_body))
-        _corpus_cases.append({
-            "size_bytes": _n,
-            "body_sha256": _m.data_hash,
-            "expected_chunks": _corp.chunk_count(_n),
-            "chunk_roots_hex": [r.hex() for r in _m.chunk_roots],
-            "expected_da_root": _m.da_root,
-        })
-    v["corpus_da"] = [{
-        "chunk_bytes": _corp.CHUNK_BYTES,
-        "chunk_k": _corp.CHUNK_K,
-        "chunk_n": _corp.CHUNK_N,
-        "cases": _corpus_cases,
     }]
 
     # --- proposer lottery (v1): verifiable stake-weighted sortition, ENFORCED,
@@ -690,7 +650,6 @@ def main():
             "data_txs": [{"owner_pub": t.owner_pub, "data_hash": t.data_hash,
                           "size_bytes": t.size_bytes, "media_type": t.media_type,
                           "stake": t.stake, "nonce": t.nonce,
-                          "da_root": t.da_root,
                           "sig_hex": t.sig.hex()} for t in blk.data_txs],
         })
         return blk.hash
@@ -705,7 +664,7 @@ def main():
     sub3 = DataSubmitTx(owner_pub=m0.pub, data_hash="bb" * 32, size_bytes=777,
                         media_type="image",
                         stake=tree.ledger[b2].balance(address(m0.pub)) // 3,
-                        nonce=1, da_root=_da_root(777)).signed(m0)
+                        nonce=1).signed(m0)
     add(b2, [m0, m1, m2], m0, data_txs=[sub3])         # heaviest chain + data lane
     # drive full blocks until a growth event ACTIVATES, then one post-growth
     # block that claims (and trains) the new page — the dim-change replay case

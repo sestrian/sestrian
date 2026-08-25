@@ -312,8 +312,7 @@ fn open_challenge() -> (TokenLedger, core::Key, core::Key, Vec<core::Key>, Strin
     led.apply_reward(1, &[owner.pub_hex()], &owner.pub_hex(), &[], &Default::default(), &Default::default());
     let sub = signed(AccountTx::DataSubmit(DataSubmitTx {
         owner_pub: owner.pub_hex(), data_hash: "aa".repeat(32), size_bytes: 8,
-        media_type: "text".into(), stake: 1_000_000, nonce: 0,
-        da_root: "ab".repeat(32), sig: vec![],
+        media_type: "text".into(), stake: 1_000_000, nonce: 0, sig: vec![],
     }), &owner);
     assert!(led.apply_data_tx(&sub, 1, &HashSet::new()));
     let data_id = sub.txid();
@@ -425,16 +424,14 @@ fn rejects_bad_data_lane_txs() {
     // zero-stake submission is rejected
     let zero = signed(AccountTx::DataSubmit(DataSubmitTx {
         owner_pub: owner.pub_hex(), data_hash: "aa".repeat(32), size_bytes: 8,
-        media_type: "text".into(), stake: 0, nonce: 0,
-        da_root: "ab".repeat(32), sig: vec![],
+        media_type: "text".into(), stake: 0, nonce: 0, sig: vec![],
     }), &owner);
     assert!(!led.apply_data_tx(&zero, 1, &HashSet::new()), "zero-stake submit rejected");
 
     // a valid submission, then a duplicate challenge on the same entry
     let sub = signed(AccountTx::DataSubmit(DataSubmitTx {
         owner_pub: owner.pub_hex(), data_hash: "bb".repeat(32), size_bytes: 8,
-        media_type: "text".into(), stake: 1_000_000, nonce: 0,
-        da_root: "ab".repeat(32), sig: vec![],
+        media_type: "text".into(), stake: 1_000_000, nonce: 0, sig: vec![],
     }), &owner);
     assert!(led.apply_data_tx(&sub, 1, &HashSet::new()));
     let data_id = sub.txid();
