@@ -1928,13 +1928,9 @@ impl Node {
         }
         self.retry_pending();
         let learned = self.tree.blocks.len() + self.pending.len() > known_before;
-        // The state machine runs for EVERY batch, current or not. With serve
-        // budgets near the block size, every intermediate batch of a long
-        // catch-up is current=false — skipping them starved the orphan
-        // walkback of exactly the batches carrying the fork evidence, and a
-        // node behind an equal-height fork stalled forever (found live, EU
-        // anchor). Stale responses are already dropped by request-id matching
-        // in the net loop, which is what this early-out originally guarded.
+        if !current {
+            return; // data absorbed; do not touch the catch-up state machine
+        }
         let last_from = Some(from);
         let behind = their_head > self.head_height();
         // "orphaned": some served block's parent is nowhere — not applied,
