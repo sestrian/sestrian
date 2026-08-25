@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sestrian — technical brief</title>
+<title>Sestrian · technical brief</title>
 <meta name="description" content="The Sestrian architecture: what is implemented and tested today, the honest security posture, and what is still unproven.">
 <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="%230e0d0b"/><text x="32" y="46" font-family="Arial,sans-serif" font-weight="900" font-size="40" text-anchor="middle" fill="%23ff4d00">S</text></svg>'>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -114,7 +114,7 @@
       honest security posture, and what is still unproven. Every claim below
       points at running code in the public repository.</p>
     <div class="meta">
-      <span><b>107.4M</b> params (≈32M active/token), live &mdash; and the chain can GROW it</span><span><b>68</b> node tests</span>
+      <span><b>107.4M</b> params (≈32M active/token), live, and the chain can grow it</span><span><b>68</b> node tests</span>
       <span><b>28</b> golden-vector families</span>
       <span>Rust node ≡ <b>Python reference</b>, bit-exact</span>
       <span>verified <b>cross-vendor GPU</b></span>
@@ -129,12 +129,12 @@
       a transaction is a signed gradient update; the block header commits a Merkle
       root over the weights; replaying the chain reconstructs the model bit-for-bit.
       Compute joining the network either <strong>trains</strong> the weights or
-      <strong>serves</strong> them, and inference fees pay both — a network that
+      <strong>serves</strong> them, and inference fees pay both: a network that
       funds its own intelligence.</p>
     <div class="callout"><p class="lab">The unclaimed prize</p>
       <p>No network on earth currently pays <em>training</em> rewards out of
         <em>inference</em> revenue; the field's largest runs a 20–40× emissions
-        subsidy. Reaching that crossover does not require the world's best model —
+        subsidy. Reaching that crossover does not require the world's best model,
         only one whose users pay more than its training costs. That is the entire
         strategic target.</p></div>
   </section>
@@ -142,13 +142,13 @@
   <section>
     <h2>2 · Architecture</h2>
     <p>Five layers, bottom to top. Each is implemented and tested; the rightmost
-      column names the module &mdash; <span class="mono">.py</span> is the Python
+      column names the module: <span class="mono">.py</span> is the Python
       reference (the spec), <span class="mono">.rs</span> the production Rust node,
       pinned to each other by golden vectors.</p>
     <div class="stack">
-      <div class="layer"><span class="n">State</span><span class="d"><b>Weights as chain state.</b> Page-Merkle commitment over a consensus page table; deterministic integer aggregation; replay reconstructs the model bit-for-bit &mdash; including across on-chain GROWTH events, where the chain appends expert pages with deterministically derived weights. <span class="mono">merkle.rs, model_state.rs / chain.py</span></span></div>
-      <div class="layer"><span class="n">Consensus</span><span class="d"><b>VRF proposer sortition + Nakamoto fork choice.</b> Stake-weighted lottery gates every block; deltas carry committed held-out scores, a validated work quota, and a hard SIZE ENVELOPE — consensus never scales the payload (Bitcoin's block-size lesson): capacity pressure makes miners specialize on fewer experts, and sustained pressure grows the model on-chain. A protocol version field makes upgrades a schedule, not a scramble. <span class="mono">blocktree.rs, lottery.rs / blockchain.py</span></span></div>
-      <div class="layer"><span class="n">Randomness</span><span class="d"><b>Live today: VRF attempt-ladder</b> &mdash; seeded by the parent block, deterministic liveness widening, verified in validation. The threshold-BLS beacon (drand-style, DKG-generated) is the designed mainnet upgrade for full unbiasability; it runs in the rig, not yet in the node. <span class="mono">lottery.rs / beacon.py, dkg.py</span></span></div>
+      <div class="layer"><span class="n">State</span><span class="d"><b>Weights as chain state.</b> Page-Merkle commitment over a consensus page table; deterministic integer aggregation; replay reconstructs the model bit-for-bit, including across on-chain growth events, where the chain appends expert pages with deterministically derived weights. <span class="mono">merkle.rs, model_state.rs / chain.py</span></span></div>
+      <div class="layer"><span class="n">Consensus</span><span class="d"><b>VRF proposer sortition + Nakamoto fork choice.</b> Stake-weighted lottery gates every block; deltas carry committed held-out scores, a validated work quota, and a hard size envelope: consensus never scales the payload (Bitcoin's block-size lesson): capacity pressure makes miners specialize on fewer experts, and sustained pressure grows the model on-chain. A protocol version field makes upgrades a schedule, not a scramble. <span class="mono">blocktree.rs, lottery.rs / blockchain.py</span></span></div>
+      <div class="layer"><span class="n">Randomness</span><span class="d"><b>Live today: VRF attempt-ladder</b>: seeded by the parent block, deterministic liveness widening, verified in validation. The threshold-BLS beacon (drand-style, DKG-generated) is the designed mainnet upgrade for full unbiasability; it runs in the rig, not yet in the node. <span class="mono">lottery.rs / beacon.py, dkg.py</span></span></div>
       <div class="layer"><span class="n">Data</span><span class="d"><b>Erasure-coded data availability.</b> Reed-Solomon (any k-of-n reconstruct) + Merkle availability sampling; withheld bodies are unrecoverable and detected. <span class="mono">da.py</span></span></div>
       <div class="layer"><span class="n">Economics</span><span class="d"><b>Difficulty-style write-price homeostat + stake/slash.</b> Holds admission at target, prices out spam, slashes provable faults. <span class="mono">economics.py</span></span></div>
     </div>
@@ -156,7 +156,7 @@
 
   <section>
     <h2>3 · What is implemented</h2>
-    <p>The rig attacks its own claims — the founding discipline is <em>stop citing,
+    <p>The rig attacks its own claims. The founding discipline is <em>stop citing,
       start seeing.</em> Status is what the code demonstrates, not what it aspires to.</p>
     <div class="tbl"><table>
       <thead><tr><th>Capability</th><th>Evidence</th><th>Status</th></tr></thead>
@@ -175,7 +175,7 @@
       </tbody>
     </table></div>
     <div class="stats">
-      <div class="stat"><div class="v">272</div><div class="l">automated tests — 204 reference + 68 node — blocking in CI</div></div>
+      <div class="stat"><div class="v">272</div><div class="l">automated tests (204 reference + 68 node), blocking in CI</div></div>
       <div class="stat"><div class="v">4</div><div class="l">nodes live on two continents, coordinator-free, in lockstep</div></div>
       <div class="stat"><div class="v">O(k)</div><div class="l">per-token serving cost, independent of model size</div></div>
       <div class="stat"><div class="v">100%</div><div class="l">withholding attacks caught by DA sampling</div></div>
@@ -200,32 +200,31 @@
   </section>
 
   <section>
-    <h2>5 · Security posture — stated honestly</h2>
+    <h2>5 · Security posture, stated honestly</h2>
     <p>Three attack surfaces, three locks. The one correction below is the most
       important thing in this document, because it is where our own red-team
       changed our claims.</p>
     <ul>
-      <li><strong>Wrong compute</strong> — a delta earns inclusion only by
+      <li><strong>Wrong compute.</strong> A delta earns inclusion only by
         measurably improving loss on unpredictable held-out shards, under
         commit-reveal scoring; every score is recomputable and challengeable.
         Majority-honest compute secures this. Robust aggregation bounds minority
         influence.</li>
-      <li><strong>Fake serving</strong> — receipts bind outputs to the committed
+      <li><strong>Fake serving.</strong> Receipts bind outputs to the committed
         weights root; a verifier recomputes from only the pages a query used and
         rejects tampering, under-loading, and forged outputs.</li>
-      <li><strong>Poisoned data</strong> — the honest hard problem, below.</li>
+      <li><strong>Poisoned data.</strong> The honest hard problem, below.</li>
     </ul>
     <div class="callout warn"><p class="lab">The correction our red-team forced</p>
       <p>The original intuition was that a 51% honest majority prevents poisoning.
         Our red-team (<code>redteam.py</code>) disproved that: a stealthy backdoor
         keyed to a secret trigger is invisible to blind detection, and a slow-drip
         coalition can implant one from deltas each less conspicuous than honest
-        work — no matter how honest the majority. <strong>What actually defends is
+        work, no matter how honest the majority. <strong>What actually defends is
         staked data-admission (cost to get poison in) and replay-excision (removing
-        a backdoor once discovered — driven to zero effect in the rig).</strong> So
+        a backdoor once discovered, driven to zero effect in the rig).</strong> So
         the claim is corrected from "poisoning is prevented" to "poisoning is made
-        costly and reversible." We found this before it could mislead anyone — which
-        is what a rig is for.</p></div>
+        costly and reversible." We found this before it could mislead anyone.</p></div>
   </section>
 
   <section>
@@ -235,8 +234,7 @@
       28 golden-vector families pin the two to each other, and both are blocking in
       CI alongside a live two-node convergence run and a kill/restart soak. The
       strongest reproducibility claim is the running network itself: five machines
-      — Apple silicon, NVIDIA CUDA, and three bare Linux servers on two continents —
-      independently rebuilt the genesis from its published seed to the identical
+      on two continents independently rebuilt the genesis from its published seed to the identical
       root, and four of them are in block-for-block lockstep right now. Where a
       node runs never changes the state.</p>
   </section>
@@ -244,15 +242,15 @@
   <section>
     <h2>7 · Roadmap &amp; the crossover</h2>
     <ul>
-      <li><strong>Phase 1 — devnet at real scale</strong> (months 0–6): a 7B model
+      <li><strong>Phase 1: devnet at real scale</strong> (months 0–6): a 7B model
         on GPUs across ≥10 independent machines; production networking; real beacon
         + DA in the live loop.</li>
-      <li><strong>Phase 2 — incentivized testnet + a vertical</strong> (months
+      <li><strong>Phase 2: incentivized testnet + a vertical</strong> (months
         4–12): a community with owned data; first external paying inference on the
         attested tier; adversarial hardening at scale.</li>
-      <li><strong>Phase 3 — mainnet &amp; the crossover</strong> (months 10–24):
+      <li><strong>Phase 3: mainnet &amp; the crossover</strong> (months 10–24):
         token genesis under strict fairness; the single public goal is the
-        <em>crossover block</em> — the first block where inference revenue exceeds
+        <em>crossover block</em>: the first block where inference revenue exceeds
         training issuance. No network has reached it.</li>
     </ul>
     <p>The rig has retired the architectural and distributed-systems risks. What
@@ -273,13 +271,13 @@
         <em>committed</em> level: the proposer evaluates each update on a held-out
         batch and commits the scores; validators check structure, bounds and the
         commitment, but do not re-run the model. A lying proposer is bounded by
-        the score cap, its bond and the challenge market — not yet by a
+        the score cap, its bond and the challenge market, not yet by a
         multi-evaluator committee. That committee needs independent operators, so
         it gates on the testnet, not on more code.</li>
       <li><strong>Poisoning.</strong> Robust aggregation trims outliers and holds
         for ≥3 honest miners, and provenance forces every update to name staked,
         challengeable data. Neither claims a determined adversary with many
-        identities is stopped today — that is what enforced scoring plus slashing
+        identities is stopped today; that is what enforced scoring plus slashing
         is for.</li>
       <li><strong>Scale.</strong> The live model is 107.4M parameters (a growable MoE; ≈32M active per token). Convergence
         at billions of parameters, the compute handicap of decentralized training,
@@ -291,10 +289,7 @@
         joining node syncs the full history and a slow uplink can miss the
         inclusion window. Bounded by protocol: the delta envelope caps every
         update at ~8MB regardless of quota, so worst-case network load is
-        ~3Mbit/s forever. Mitigated further — auto-fitted training rounds, DA-sharded
-        genesis, bounded byte-budgeted sync with a catch-up cursor (the first
-        transatlantic join found and fixed three real WAN bugs, all documented in
-        the tracker), visible stale-delta alarms — not solved.</li>
+        ~3Mbit/s forever. Mitigated beyond that, not solved.</li>
     </ul>
   </section>
 </div>

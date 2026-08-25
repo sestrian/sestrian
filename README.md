@@ -7,18 +7,18 @@
 Transactions are the model's own computations. A *backprop* is a signed gradient
 that transitions the state and earns a reward; a *forward-prop* is an inference
 that pays a fee. Replaying the chain from genesis reconstructs the model
-bit-for-bit. The chain does not *record* a model — the chain **is** a model, and
+bit-for-bit. The chain does not *record* a model. The chain **is** a model, and
 it trains itself in public, paying the people who train it.
 
 No company owns the weights. No API key gates them. You download the chain, replay
-it, and you are holding the same model everyone else is — plus the ledger that
+it, and you are holding the same model everyone else is, plus the ledger that
 says who trained it and who paid for it.
 
 ## How it works
 
 - **State = weights.** Genesis is a from-scratch model. Each block commits an
   aggregated gradient delta and a new `state_root`. `weights = genesis + Σ deltas`.
-- **Mining = training.** Miners pull the head weights, train locally (any GPU —
+- **Mining = training.** Miners pull the head weights, train locally (any GPU;
   the network already trains cross-vendor, Apple MPS + NVIDIA CUDA, with no
   coordinator), and submit compressed int-quantized deltas. Included deltas earn
   the block reward.
@@ -29,26 +29,25 @@ says who trained it and who paid for it.
   every block trained on it; bad data can be challenged and slashed.
 - **The token is the model's own money.** Fair launch, every grain minted by
   verifiable work, emissions halving to a hard sunset. It exists to pay trainers
-  and price inference — nothing is pre-mined.
+  and price inference. Nothing is pre-mined.
 
 ## Start in two lines
 
-**See it run, locally, right now** — a real PyTorch model training through a
+**See it run, locally, right now**: a real PyTorch model training through a
 local chain, loss falling live in your browser, chat with the head:
 
 ```bash
 uv run --with torch --with numpy --with pynacl python -m client.watch --demo
 ```
 
-**Join the live network** — build the node, generate the genesis (it's
-deterministic from a published seed, so you reproduce it rather than trust a
-download), then sync:
+**Join the live network**: build the node, reproduce the genesis from its
+published seed, then sync:
 
 ```bash
 cd node && cargo build --release && cd ..
 python -m client.wallet new                      # your identity AND your balance
 
-# reproduce the genesis — must print state_root a5973160…527b (the page-Merkle root)
+# reproduce the genesis; must print state_root 91bdcc28…94ddb1
 uv run --with torch --with numpy --with pynacl \
     python -m client.make_genesis --model small-moe --seed 20260824 --out genesis.bin
 
@@ -69,7 +68,7 @@ chain? `--network local` and supply everything yourself. Your node serves a
 dashboard + API at `http://localhost:8090`.
 
 > **Always run `--check` first.** It verifies the peer is reachable, your genesis
-> matches the network, and — if you're mining — that your GPU and block interval
+> matches the network, and, if you're mining, that your GPU and block interval
 > are compatible. The failure modes here are silent by nature: a trainer slower
 > than the block interval produces deltas that are always too late to include, so
 > it would mine forever and earn nothing.
@@ -77,7 +76,7 @@ dashboard + API at `http://localhost:8090`.
 ## Three ways to participate
 
 Pick one or all three. They share one economic loop: **you earn coins by
-training, and you spend coins to submit data — which then earns you coins back
+training, and you spend coins to submit data, which then earns you coins back
 every time the model trains on it.**
 
 | Role | You do | You earn |
@@ -87,9 +86,8 @@ every time the model trains on it.**
 | **📚 Give data** | stake coins behind a corpus you own | a share of every block reward trained on your data |
 
 Every block reward splits three ways: the **trainers** whose deltas landed, the
-block's **proposer**, and the **data** that trained them. That is why you must
-*stake* to submit data — the stake is your skin in the game against a challenge
-market, and it's paid in coins you got by mining.
+block's **proposer**, and the **data** that trained them. Staking to submit data is your skin in the game
+against a challenge market.
 
 ### Mine (train the model, earn rewards)
 
@@ -107,8 +105,8 @@ stake-weighted VRF sortition, so more stake means more blocks you get to propose
 
 ### Give data (stake to submit, earn the data share)
 
-Training data stays off your machine's business and off the chain — only its
-`sha256`, size, media type, owner, and stake bond go on-chain. Submit from a
+The data itself never goes on-chain: only its `sha256`, size, media type,
+owner, and stake bond do. Submit from a
 funded wallet:
 
 ```bash
@@ -124,7 +122,7 @@ disinterested-juror quorum votes, and a loser is slashed. Watch the registry wit
 > Prefer to push raw bytes through the node instead of just the hash? `POST
 > /upload` takes the file, stakes from the node's own wallet, and stores it in the
 > content-addressed DA layer. It requires `SESTRIAN_API_TOKEN` (Bearer) and a
-> funded node wallet — see [docs/joining.md](docs/joining.md).
+> funded node wallet; see [docs/joining.md](docs/joining.md).
 
 ### Serve the API (answer inference, earn fees)
 
@@ -155,15 +153,15 @@ don't expose them to the open internet unauthenticated. See the
 
 | Path | What it is |
 |---|---|
-| **[WHITEPAPER.md](WHITEPAPER.md)** | the master design document (§1–12) — invariants: bytes-only interface, RoPE positions, from-scratch genesis, fair launch |
-| **[docs/joining.md](docs/joining.md)** | the tester's join guide — the three public things you need and the exact run command |
+| **[WHITEPAPER.md](WHITEPAPER.md)** | the master design document |
+| **[docs/joining.md](docs/joining.md)** | how to join the devnet |
 | **client/** | the Python client: real PyTorch GPT trained *through the chain*, the wallet CLI, the `watch.py` web UI, DiPaCo sharding, content-addressed storage |
-| **rig/** | the reference implementation — consensus, token ledger + data lane, DA, beacon, economics; the SPEC the Rust node must match |
+| **rig/** | the Python reference implementation: the spec the Rust node must match |
 | **node/** | the Rust node: `sestrian-core` (bit-exact consensus, pinned to the reference by golden vectors) + `sestrian-node` (libp2p GossipSub/QUIC networking) |
-| **docs/** | including **[genesis-ceremony.md](docs/genesis-ceremony.md)** — how the real network launches, and **[production-readiness.md](docs/production-readiness.md)** — the go/no-go tracker |
+| **docs/** | guides, plus **[production-readiness.md](docs/production-readiness.md)**, the go/no-go tracker |
 | **deploy/** | the bootstrap seed node (Kubernetes) |
 
-## Status — honest map
+## Status
 
 This is an active Phase-0/1 project, and the README above describes what the
 shipping node actually does. What is *enforced in code today* versus *designed /
@@ -178,12 +176,10 @@ stake-bond admission cost, and fee-bearing inference. Still testnet-phase (they
 need live compute + a running network): delta loss-scoring, cross-inclusion, and
 the threshold-BLS beacon.
 
-The network is **open** — permissionless, like Bitcoin: anyone joins from one
-peer address plus the published genesis id. Launch is deliberately phased —
-a small, monitored, low-value devnet → testnet → open mainnet — because until
-delta scoring is enforced on-chain, the aggregation defense assumes an honest
-majority. Run it with people you can watch and treat early rewards as testnet
-play. Reproduce the guarantees yourself:
+The network is permissionless: anyone joins from one peer address plus the
+published genesis id. Launch is phased (devnet, then testnet, then mainnet),
+and devnet coins are for testing, not trading. Reproduce the guarantees
+yourself:
 
 ```bash
 uv run --with torch --with numpy --with pynacl --with py_ecc --with pytest \
@@ -194,4 +190,4 @@ scripts/devnet.sh 30                    # three nodes gossip, validate, converge
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

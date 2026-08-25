@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sestrian — the network, live</title>
+<title>Sestrian · the network, live</title>
 <meta name="description" content="Live state of the Sestrian devnet: chain height, the model's page table, who is mining it, and the numbers you can check against any node.">
 <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="%230e0d0b"/><text x="32" y="46" font-family="Arial,sans-serif" font-weight="900" font-size="40" text-anchor="middle" fill="%23ff4d00">S</text></svg>'>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -11,7 +11,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&display=swap" rel="stylesheet">
 <style>
   /* Same brand system as the landing page: this is the product showing its
-     working, not a separate document. Committed single (dark) theme — every
+     working, not a separate document. Committed single (dark) theme; every
      colour is painted explicitly so it holds on any host background. */
   :root{
     --black:#0e0d0b; --bone:#ecebe4; --dim:#b4b1a6; --line:#2c2a25;
@@ -29,7 +29,7 @@
   .skip{position:absolute;left:-9999px}
   .skip:focus{left:12px;top:12px;background:var(--signal);color:var(--black);padding:8px 14px;z-index:99}
 
-  /* masthead — mirrors index.html */
+  /* masthead: mirrors index.html */
   header{position:sticky;top:0;z-index:50;background:var(--black);border-bottom:1px solid var(--line)}
   .bar{display:flex;justify-content:space-between;align-items:center;gap:18px;
     padding:18px clamp(20px,4vw,64px);flex-wrap:wrap}
@@ -165,7 +165,7 @@
 
   <section class="blk wrap">
     <h2>The model, page by page</h2>
-    <p class="lede">The chain's state is not a ledger of balances — it is the model itself, split
+    <p class="lede">The chain's state is not a ledger of balances: it is the model itself, split
       into pages. Each square is one page of weights. The network can vote to add more, so this
       grid grows as the model does.</p>
     <div class="pages" id="pagegrid" role="img" aria-label="Model page table" aria-describedby="pagedesc"></div>
@@ -179,8 +179,7 @@
   <section class="blk wrap">
     <h2>Who is training it</h2>
     <p class="lede">Every block is a training step someone paid electricity for. Share is the
-      proportion of blocks each miner has produced — not a promise of future reward, just what
-      has happened so far.</p>
+      proportion of blocks each miner has produced so far.</p>
     <div class="tblwrap">
       <table id="minertable">
         <thead><tr>
@@ -196,8 +195,8 @@
 
   <section class="blk wrap">
     <h2>Don't take our word for it</h2>
-    <p class="lede">Everything above comes from one node. That node has no special authority —
-      run your own and it must land on the identical numbers, or the network rejects it.</p>
+    <p class="lede">Everything above comes from one node. That node has no special authority.
+      Run your own and it must land on the identical numbers, or the network rejects it.</p>
     <p class="verify">genesis id (state root)<br><b>91bdcc281c0dbbd7b3bea3d38003e4c61565bcaa5fd8e7bfca296e6a4994ddb1</b></p>
     <p class="verify" id="src" style="margin-top:18px"></p>
   </section>
@@ -205,8 +204,8 @@
 </main>
 
 <footer><div class="wrap">
-  <p style="margin:0;max-width:70ch">Devnet figures. Treat rewards as testnet play — the chain
-    resets while the protocol is still moving, and it has done so more than once.</p>
+  <p style="margin:0;max-width:70ch">Devnet figures. Devnet coins are for testing, not trading, and the chain still
+    resets while the protocol hardens.</p>
   <div class="flinks">
     <a href="/">Home</a>
     <a href="technical.html">Technical brief</a>
@@ -322,7 +321,7 @@
     if(meta.live){
       dot.classList.remove("cold");
       txt("state", "Live · devnet");
-      // Name the anchor actually serving us, not the preferred one — if we
+      // Name the anchor actually serving us, not the preferred one; if we
       // have failed over, saying otherwise would hide exactly the fact worth
       // knowing.
       $("src").textContent = "Polled from " + (meta.endpoint || "an anchor") +

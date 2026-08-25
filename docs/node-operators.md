@@ -1,8 +1,8 @@
 # Running a Sestrian Node
 
-The production node is Rust (`node/` — `sestrian-node`); training is a
+The production node is Rust (`node/`, `sestrian-node`); training is a
 PyTorch plugin that attaches locally. Consensus and networking never depend on
-Python; training never touches consensus — the two meet only at the compressed,
+Python; training never touches consensus; the two meet only at the compressed,
 signed delta (the consensus boundary, WHITEPAPER §6.3).
 
 ## Build
@@ -13,7 +13,7 @@ cd node && cargo build --release      # single binary: node/target/release/sestr
 
 ## Identity
 
-Your wallet is your miner identity — rewards mint to its address.
+Your wallet is your miner identity; rewards mint to its address.
 
 ```bash
 python -m client.wallet new           # encrypted file + 24-word mnemonic + pal1… address
@@ -39,7 +39,7 @@ Once loaded it persists in the data dir; the flag is only needed on first run.
 ## A full mining node
 
 ```bash
-# terminal 1 — the node (consensus + networking + API):
+# terminal 1: the node (consensus + networking + API):
 sestrian-node \
   --data-dir ~/.sestrian/node \
   --wallet ~/.sestrian/wallet.json \
@@ -49,7 +49,7 @@ sestrian-node \
   --peers /ip4/<seed-ip>/udp/7900/quic-v1 \
   --data-contributor <published-founder-address>
 
-# terminal 2 — the trainer (your GPU; any device torch supports):
+# terminal 2: the trainer (your GPU; any device torch supports):
 python -m client.miner_bridge --node-port 7999 --model small-moe \
     --data <corpus.txt> --inner 300 --batch 32 --device cuda
 ```
@@ -63,7 +63,7 @@ http://localhost:8090` for balances, transfers, and data-lane actions.
 ## An observer / API node
 
 Omit `--produce` (and skip the bridge). The node follows the chain, serves
-sync to peers, and answers the API — this is what powers explorers and wallets.
+sync to peers, and answers the API. This is what powers explorers and wallets.
 
 ## A seed / relay node
 
@@ -83,19 +83,19 @@ port-forward) and be listed in the published bootstrap set.
 The node ships AutoNAT (detects whether you're reachable), DCUtR (QUIC hole
 punching), and relay-client (fallback through seeds). Home-router operators
 need no configuration: dial a seed and the stack negotiates the rest. If you
-*can* forward `--port` (UDP+TCP), do — direct connectivity helps the mesh.
+*can* forward `--port` (UDP+TCP), do; direct connectivity helps the mesh.
 
 ## Persistence & recovery
 
 Everything lives in `--data-dir`: genesis, an append-only block log, the
 compressed delta payloads (the DA bodies), and periodic head-state snapshots.
-On restart the node **replays its chain with full validation** — a corrupt or
+On restart the node **replays its chain with full validation**: a corrupt or
 truncated store degrades safely to the last valid block. Deleting the data dir
 means re-syncing from peers.
 
 ## The devnet (development)
 
-`scripts/devnet.sh [seconds]` — two nodes + two PyTorch trainers on localhost,
+`scripts/devnet.sh [seconds]`: two nodes + two PyTorch trainers on localhost,
 asserts byte-identical convergence at exit. Golden vectors
 (`cd node && cargo test`) pin the consensus math to the Python reference.
 
@@ -113,7 +113,7 @@ Delta bodies are erasure-coded into shards so peers can fetch them; kept
 forever that is LINEAR disk growth. Home/miner nodes should run
 `--da-retain-blocks 1500` (shard sets for deeper blocks are deleted; the node
 still serves catch-up inside the window). Public anchors run the default
-`0` = archive — they keep everything so a fresh joiner can always replay from
+`0` = archive: they keep everything so a fresh joiner can always replay from
 genesis. Do not prune an anchor.
 
 ## Production hardening
