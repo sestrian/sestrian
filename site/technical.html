@@ -149,7 +149,7 @@
       <div class="layer"><span class="n">State</span><span class="d"><b>Weights as chain state.</b> Page-Merkle commitment over a consensus page table; deterministic integer aggregation; replay reconstructs the model bit-for-bit, including across on-chain growth events, where the chain appends expert pages with deterministically derived weights. <span class="mono">merkle.rs, model_state.rs / chain.py</span></span></div>
       <div class="layer"><span class="n">Consensus</span><span class="d"><b>VRF proposer sortition + Nakamoto fork choice.</b> Stake-weighted lottery gates every block; deltas carry committed held-out scores, a validated work quota, and a hard size envelope: consensus never scales the payload (Bitcoin's block-size lesson): capacity pressure makes miners specialize on fewer experts, and sustained pressure grows the model on-chain. A protocol version field makes upgrades a schedule, not a scramble. <span class="mono">blocktree.rs, lottery.rs / blockchain.py</span></span></div>
       <div class="layer"><span class="n">Randomness</span><span class="d"><b>Live today: VRF attempt-ladder</b>: seeded by the parent block, deterministic liveness widening, verified in validation. The threshold-BLS beacon (drand-style, DKG-generated) is the designed mainnet upgrade for full unbiasability; it runs in the rig, not yet in the node. <span class="mono">lottery.rs / beacon.py, dkg.py</span></span></div>
-      <div class="layer"><span class="n">Data</span><span class="d"><b>Erasure-coded data availability.</b> Reed-Solomon (any k-of-n reconstruct) + Merkle availability sampling; withheld bodies are unrecoverable and detected. <span class="mono">da.py</span></span></div>
+      <div class="layer"><span class="n">Data</span><span class="d"><b>Erasure-coded data availability.</b> Reed-Solomon (any k-of-n reconstruct) + Merkle sampling. Live nodes erasure-code bodies and reconstruct from any k shards; validator availability-sampling is testnet-phase. <span class="mono">da.py</span></span></div>
       <div class="layer"><span class="n">Economics</span><span class="d"><b>Difficulty-style write-price homeostat + stake/slash.</b> Holds admission at target, prices out spam, slashes provable faults. <span class="mono">economics.py</span></span></div>
     </div>
   </section>
@@ -168,7 +168,7 @@
         <tr><td>Async miners with real staleness</td><td class="mono">async_node.py</td><td class="ok">converges</td></tr>
         <tr><td>Coordinator-free gossip consensus</td><td class="mono">p2p, gossip_net</td><td class="ok">cross-machine</td></tr>
         <tr><td>Unbiasable beacon (threshold BLS + DKG)</td><td class="mono">beacon, dkg</td><td class="ok">proven</td></tr>
-        <tr><td>Erasure-coded DA + sampling</td><td class="mono">da.py</td><td class="ok">withholding caught 100%</td></tr>
+        <tr><td>Erasure-coded DA + sampling</td><td class="mono">da.py</td><td class="ok">withholding caught 100% (rig)</td></tr>
         <tr><td>Write-price homeostat + stake/slash</td><td class="mono">economics.py</td><td class="ok">holds target</td></tr>
         <tr><td>Everything wired into one live loop</td><td class="mono">integrated.py</td><td class="ok">runs + live viewer</td></tr>
         <tr><td>Revenue loop closing at scale</td><td class="mono">market outcome</td><td class="part">Phase 3 goal</td></tr>
@@ -178,7 +178,7 @@
       <div class="stat"><div class="v">272</div><div class="l">automated tests (204 reference + 68 node), blocking in CI</div></div>
       <div class="stat"><div class="v">4</div><div class="l">nodes live on two continents, coordinator-free, in lockstep</div></div>
       <div class="stat"><div class="v">O(k)</div><div class="l">per-token serving cost, independent of model size</div></div>
-      <div class="stat"><div class="v">100%</div><div class="l">withholding attacks caught by DA sampling</div></div>
+      <div class="stat"><div class="v">100%</div><div class="l">withholding caught by DA sampling in the reference rig</div></div>
     </div>
   </section>
 
@@ -206,8 +206,9 @@
       changed our claims.</p>
     <ul>
       <li><strong>Wrong compute.</strong> A delta earns inclusion only by
-        measurably improving loss on unpredictable held-out shards, under
-        commit-reveal scoring; every score is recomputable and challengeable.
+        measurably improving loss on unpredictable held-out shards. Scores are
+        committed on-chain by the proposer, recomputable and challengeable;
+        the independent scoring committee is testnet-phase (§8).
         Majority-honest compute secures this. Robust aggregation bounds minority
         influence.</li>
       <li><strong>Fake serving.</strong> Receipts bind outputs to the committed
