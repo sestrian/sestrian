@@ -616,6 +616,49 @@ def main():
                          "win_scorers": list(st4.win_scorers),
                          "activations": [[a, l, e, t] for a, l, e, t in facts],
                          "model_root": st4.model_root()})
+    # --- scores_root + effective_scores: consensus, previously UNPINNED ------
+    # Both feed block validation and reward weighting. scores_root is a
+    # canonical-JSON commitment, so any serialization drift between the two
+    # implementations (key order, separators, integer form) forks the chain;
+    # effective_scores carries the all-zero uniform fallback, which decides who
+    # gets paid in an unscored block. Neither had a family — the same blind
+    # spot that let a one-sided version bump ship.
+    from rig.blockchain import effective_scores as _effscores, scores_root as _scroot
+    score_cases = []
+    for label, d in [
+        ("empty", {}),
+        ("single", {"aa" * 32: 7}),
+        ("multi_sorted", {"cc" * 32: 1, "aa" * 32: 2, "bb" * 32: 3}),
+        ("zeros", {"aa" * 32: 0, "bb" * 32: 0}),
+        ("large", {"aa" * 32: 10 ** 9, "bb" * 32: 1}),
+    ]:
+        score_cases.append({"label": label, "scores": d, "root": _scroot(d)})
+    v["scores_root"] = [{"cases": score_cases}]
+
+    eff_txs = txs                      # the three signed txs built above
+    eff_ids = [t.txid() for t in eff_txs]
+    eff_cases = []
+    for label, sc in [
+        ("mixed", {eff_ids[0]: 5, eff_ids[1]: 0, eff_ids[2]: 11}),
+        ("all_zero_uniform_fallback", {i: 0 for i in eff_ids}),
+        ("missing_entries_default_zero", {eff_ids[0]: 4}),
+        ("empty_scores", {}),
+    ]:
+        eff_cases.append({"label": label, "scores": sc,
+                          "effective": _effscores(eff_txs, sc)})
+    # the empty-tx case must NOT trigger the fallback (nothing to pay)
+    eff_cases.append({"label": "no_txs", "scores": {}, "txids": [],
+                      "effective": _effscores([], {})})
+    # emit the wire form so the Rust test can drive the PRODUCTION
+    # tx-typed effective_scores rather than a restatement of the rule
+    eff_wire = [{"miner": t.miner, "base_height": t.base_height,
+                 "delta_hash": t.delta_hash, "da_pointer": t.da_pointer,
+                 "bond": getattr(t, "bond", 0), "pages": list(t.pages),
+                 "data_refs": list(getattr(t, "data_refs", []) or []),
+                 "sig_hex": t.sig.hex()} for t in eff_txs]
+    v["effective_scores"] = [{"txids": eff_ids, "txs": eff_wire,
+                              "cases": eff_cases}]
+
     # --- version schedule: rig == Rust, pinned ------------------------------
     # This family exists because its absence let a one-sided version bump ship:
     # the rig gained a v4 branch, expected_version_at never did, and

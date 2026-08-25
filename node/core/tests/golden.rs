@@ -1064,3 +1064,49 @@ fn version_schedule_matches_reference() {
                    "version schedule diverges from the reference at height {h}");
     }
 }
+
+#[test]
+fn scores_root_matches_reference() {
+    // Canonical-JSON commitment over {txid: score}. Any serialization drift
+    // between rig and node (key order, separators, integer form) changes this
+    // hash and forks the chain. Previously unpinned.
+    use sestrian_core::blocktree::scores_root;
+    use std::collections::BTreeMap;
+    for case in vectors()["scores_root"][0]["cases"].as_array().unwrap() {
+        let mut m: BTreeMap<String, u64> = BTreeMap::new();
+        for (k, val) in case["scores"].as_object().unwrap() {
+            m.insert(k.clone(), val.as_u64().unwrap());
+        }
+        assert_eq!(scores_root(&m), case["root"].as_str().unwrap(),
+                   "scores_root diverges on case {}", case["label"]);
+    }
+}
+
+#[test]
+fn effective_scores_matches_reference() {
+    // Reward weighting, including the all-zero UNIFORM FALLBACK: an unscored
+    // block still splits its reward evenly instead of burning it. A divergence
+    // here pays different miners on different nodes -> ledger_root mismatch.
+    // Drives the PRODUCTION tx-typed function against reconstructed signed
+    // transactions, so a rule change in blocktree.rs cannot slip past.
+    use sestrian_core::blocktree::effective_scores;
+    use std::collections::BTreeMap;
+    let case0 = &vectors()["effective_scores"][0];
+    let txs: Vec<core::BackpropTx> = case0["txs"].as_array().unwrap()
+        .iter().map(tx_from).collect();
+    for case in case0["cases"].as_array().unwrap() {
+        let use_txs: Vec<core::BackpropTx> = match case.get("txids") {
+            Some(v) if v.as_array().unwrap().is_empty() => vec![], // no_txs case
+            _ => txs.clone(),
+        };
+        let mut scores: BTreeMap<String, u64> = BTreeMap::new();
+        for (k, val) in case["scores"].as_object().unwrap() {
+            scores.insert(k.clone(), val.as_u64().unwrap());
+        }
+        let eff = effective_scores(&use_txs, &scores);
+        let want: BTreeMap<String, u64> = case["effective"].as_object().unwrap()
+            .iter().map(|(k, x)| (k.clone(), x.as_u64().unwrap())).collect();
+        assert_eq!(eff, want,
+                   "effective_scores diverges on case {}", case["label"]);
+    }
+}
