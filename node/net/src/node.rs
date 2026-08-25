@@ -2642,15 +2642,24 @@ impl Node {
             }
             FromBridge::Delta { height, loss, pages, payload } => {
                 self.train_inflight = false;
-                if height != self.head_height() {
+                // Judge OUR OWN delta by the same window we grant a peer's.
+                // This used to demand an EXACT head match while gossiped
+                // deltas were admitted up to DELTA_STALE_SLACK blocks back, so
+                // a round that merely straddled a block threw away a delta the
+                // network would happily have included. On a slower GPU that
+                // was nearly every round: the mac miner dropped 13 in a row,
+                // contributed nothing, and — because a node cannot propose
+                // without a delta to include — stopped proposing entirely,
+                // which under the v4 quorum gate also stops model growth.
+                if !delta_in_window(height, self.head_height()) {
                     self.stale_deltas += 1;
                     warn!(trained_at = height, head = self.head_height(),
                           consecutive = self.stale_deltas,
                           "DELTA DROPPED (stale): your training round finished \
-                           after the head moved on, so it cannot be included \
-                           and earns nothing. Your GPU is slower than the \
-                           block interval — lower --inner/--batch on the \
-                           trainer (or raise the node's --interval).");
+                           more than {DELTA_STALE_SLACK} blocks behind the \
+                           head, so it cannot be included and earns nothing. \
+                           Lower --inner/--batch on the trainer (or raise the \
+                           node's --interval).");
                 } else {
                     self.stale_deltas = 0;
                     // hash from the SPARSE form — no dense materialization
