@@ -70,6 +70,14 @@ struct NetworkParams {
     spec: (u64, u64, u64, u64, u64, u64),
     /// Blocks per capacity-retarget window (§9.4a). Consensus.
     retarget_window: u64,
+    /// PROTOCOL v4: activation height of the QUORUM gate, and the number of
+    /// DISTINCT positive-scoring proposers a window then needs before growth
+    /// may be scheduled. Both consensus. The quorum is sized to the network's
+    /// miner count — it must be reachable by honest proposers or growth stops
+    /// entirely (fail-closed, but stagnant), and every additional required
+    /// proposer is another key an attacker must win a block with.
+    v4_height: u64,
+    growth_quorum: usize,
 }
 
 /// The network's GenesisParams — handed to every BlockTree/replay/validation.
@@ -86,6 +94,8 @@ fn genesis_params(net: &NetworkParams) -> core::model_state::GenesisParams {
     };
     let mut gp = core::model_state::GenesisParams::new(spec);
     gp.retarget_window = net.retarget_window;
+    gp.v4_height = net.v4_height;
+    gp.growth_quorum = net.growth_quorum;
     if net.name == "local" {
         let env_u64 = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u64>().ok());
         let env_i64 = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<i64>().ok());
@@ -96,6 +106,10 @@ fn genesis_params(net: &NetworkParams) -> core::model_state::GenesisParams {
         if let Some(v) = env_u64("SESTRIAN_LOCAL_ANNOUNCE_LEAD") { gp.announce_lead = v; }
         if let Some(v) = env_u64("SESTRIAN_LOCAL_DELTA_MAX_NNZ") { gp.delta_max_nnz = v; }
         if let Some(v) = env_u64("SESTRIAN_LOCAL_V3_HEIGHT") { gp.v3_height = v; }
+        if let Some(v) = env_u64("SESTRIAN_LOCAL_V4_HEIGHT") { gp.v4_height = v; }
+        if let Some(v) = env_u64("SESTRIAN_LOCAL_GROWTH_QUORUM") {
+            gp.growth_quorum = v as usize;
+        }
     }
     gp
 }
@@ -126,6 +140,13 @@ const DEVNET: NetworkParams = NetworkParams {
     block_interval: 180.0,
     spec: (6, 512, 2048, 8, 16, 6_628_352),   // == client SMALL_MOE_CFG
     retarget_window: 16,
+    // v4 (the quorum gate) activates at a window boundary, announced well
+    // ahead of the height so every node upgrades first — the same scheduled
+    // path v3 took at 288. Quorum 2 is this fleet's size: it defeats the
+    // single-liar force-growth attack (rig/redteam_gate.py) while staying
+    // reachable by the two honest miners. Raise it as miners join.
+    v4_height: 608,
+    growth_quorum: 2,
 };
 
 /// A private/local chain: nothing is baked, everything is explicit. This is the
@@ -142,6 +163,11 @@ const LOCAL: NetworkParams = NetworkParams {
     block_interval: 10.0,
     spec: (2, 64, 256, 4, 8, 67_712),         // == client TOY_MOE_CFG
     retarget_window: 16,
+    // local chains override both via SESTRIAN_LOCAL_V4_HEIGHT /
+    // SESTRIAN_LOCAL_GROWTH_QUORUM (scripts/growth-proof.sh exercises the
+    // live v4 rule on a 2-node chain).
+    v4_height: 608,
+    growth_quorum: 2,
 };
 
 /// Every way to obtain a network's genesis — printed on every genesis failure

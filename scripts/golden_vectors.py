@@ -589,6 +589,42 @@ def main():
         "final_events": st3.events_total,
     }]
 
+    # --- v4: activation boundary + the QUORUM gate ------------------------
+    # Scripted proposers exercise every rule the Rust mirror must match: the
+    # pre/post-boundary canonical JSON, dedupe, the quorum cap, an anonymous
+    # block that must not count, the window reset, and both gate outcomes.
+    p4 = _GP(spec=spec, retarget_window=4, target_deltas=4,
+             quota_max_4dp=20_000, k_sustain=1, announce_lead=1,
+             v3_height=0, v4_height=3, growth_quorum=2)
+    st4 = _MSt.genesis(spec)
+    v4_seq = [                      # (score_sum, proposer)
+        (5, "aa"), (5, "aa"),       # pre-boundary (v3): no win_scorers key
+        (5, "aa"), (5, "aa"),       # v4 activates at h3; same proposer dedupes
+        (7, "bb"), (0, "cc"),       # h5 second distinct scorer; h6 zero-score
+        (9, ""), (3, "cc"),         # anonymous must not count; h8 = boundary
+        (4, "aa"), (4, "bb"),       # fresh window reaches quorum again
+        (0, "aa"), (6, "dd"),
+    ]
+    v4_steps = []
+    for fh, (ss, pr) in enumerate(v4_seq, start=1):
+        st4, facts = _fold(st4, p4, fh, 6, 5, f"{fh:02x}" * 32,
+                           score_sum=ss, proposer=pr)
+        v4_steps.append({"height": fh, "n_txs": 6, "zero_scored": 5,
+                         "score_sum": ss, "proposer": pr,
+                         "prev_hash": f"{fh:02x}" * 32,
+                         "rev": st4.rev,
+                         "win_scorers": list(st4.win_scorers),
+                         "activations": [[a, l, e, t] for a, l, e, t in facts],
+                         "model_root": st4.model_root()})
+    v["v4_fold"] = [{
+        "v3_height": 0, "v4_height": 3, "growth_quorum": 2,
+        "retarget_window": 4, "target_deltas": 4, "quota_max_4dp": 20_000,
+        "k_sustain": 1, "announce_lead": 1,
+        "steps": v4_steps,
+        "final_pending": st4.pending_growth,
+        "final_events": st4.events_total,
+    }]
+
     v["controller_fold"] = [{
         "spec": {"n_layers": spec.n_layers, "d_model": spec.d_model,
                  "d_ff": spec.d_ff, "n_experts_initial": spec.n_experts_initial,

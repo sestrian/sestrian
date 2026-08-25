@@ -297,6 +297,7 @@ fn validate_inner(
         zero_scored,
         &h.prev_hash,
         score_sum,
+        &h.proposer,
     );
     let w: Option<Vec<i64>> = if let Some(parent_w) = parent_w {
         let bodies: Vec<Vec<i64>> = block

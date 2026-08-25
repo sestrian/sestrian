@@ -107,6 +107,15 @@ each phase.
   in-flight throttle + cursor (it used to fire a duplicate ~50MB transfer on
   every reconnect), and request-response failures / connection closes are now
   logged with their cause instead of being silently swallowed.
+- ✅ PROTOCOL v4 — the QUORUM gate (scheduled, devnet height 608): growth is
+  gated on `growth_quorum` DISTINCT positive-scoring proposers per window
+  instead of v3's window-wide score SUM, which one lying proposer could open
+  (found by our own red team, `rig/redteam_gate.py`, the day after v3 shipped).
+  Second scheduled upgrade via VERSION_SCHEDULE, no re-genesis; win_scorers
+  enters the canonical JSON only at rev 4 so every pre-608 model_root is
+  byte-identical (golden diff purely additive). Golden family `v4_fold` pins
+  Rust to the rig; growth-proof.sh now runs WITH v4 active and still grows.
+  Devnet quorum is 2 (fleet-sized); raise as miners join.
 - ✅ Serve memory bound: at most 2 outstanding big responses per peer
   (decremented on delivery or failure; over the cap a request gets an empty
   response the catch-up loop treats as a no-op). Closes the US-anchor OOM

@@ -83,8 +83,21 @@ by 17 golden-vector families, including an overflow case.
 
 ## Known weaknesses (red-teamed, honest)
 
-- **The v3 learning gate is NOT Byzantine-robust in the force-growth
-  direction** (`rig/redteam_gate.py`, found 2026-08-25). Growth is gated on
+- **The v3 learning gate was NOT Byzantine-robust in the force-growth
+  direction — FIXED by the v4 quorum gate (devnet height 608).** The v4 rule
+  counts DISTINCT positive-scoring proposers in the window and requires
+  `growth_quorum` of them, so forcing growth now costs winning that many
+  blocks with that many keys (priced by stake-weighted sortition) instead of
+  one. Red-teamed both ways in `rig/redteam_gate.py`: 1 and 2 attackers are
+  blocked at quorum 3, a full-quorum coalition still succeeds, and both
+  honest paths (a learning network grows, a plateau does not) are preserved.
+  **Honest limit: v4 raises the price, it does not make the gate trustless.**
+  Committed-score accuracy is still unverified by consensus; only the
+  multi-evaluator committee closes that. The original finding, for the
+  record:
+
+- **[HISTORICAL, pre-height-608] The v3 learning gate is NOT Byzantine-robust
+  in the force-growth direction** (`rig/redteam_gate.py`, found 2026-08-25). Growth is gated on
   `win_score_sum > 0`, a SUM of proposer-committed scores over the whole
   retarget window, and committed scores are validated only for range, not
   accuracy (that is the multi-evaluator committee, a testnet item). So a

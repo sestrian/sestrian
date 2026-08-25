@@ -70,6 +70,20 @@ pub struct GenesisParams {
     /// staleness ceiling (which conflated junk with signal below the eval
     /// noise floor — found live).
     pub v3_height: u64,
+    /// PROTOCOL v4 (the QUORUM gate): activation height for the upgrade that
+    /// makes the learning gate resistant to a lying proposer. v3 gated growth
+    /// on win_score_sum > 0 — a SUM of proposer-COMMITTED scores, whose
+    /// accuracy consensus cannot check — so ONE Byzantine proposer forced
+    /// growth on a plateaued network (proven in rig/redteam_gate.py). From v4
+    /// the gate counts DISTINCT positive-scoring proposers and requires
+    /// `growth_quorum` of them. This prices the attack (win that many blocks
+    /// with that many keys); it does not make the gate trustless — only the
+    /// multi-evaluator committee does.
+    pub v4_height: u64,
+    /// Distinct positive-scoring proposers a window needs before growth may be
+    /// scheduled. 3 matches the >=3-honest-miners regime the trimmed mean
+    /// already assumes; a smaller fleet ships a smaller value and raises it.
+    pub growth_quorum: usize,
 }
 
 impl GenesisParams {
@@ -86,6 +100,8 @@ impl GenesisParams {
             announce_lead: ANNOUNCE_LEAD,
             delta_max_nnz: 1_000_000,
             v3_height: 288,
+            v4_height: 608,
+            growth_quorum: 3,
         }
     }
 }
@@ -124,6 +140,10 @@ pub struct ModelState {
     /// keeping every pre-activation model_root byte-identical.
     pub win_score_sum: u64,
     pub rev: u64,
+    /// v4: DISTINCT proposers that committed a positive score this window,
+    /// capped at growth_quorum entries. Enters the canonical JSON only from
+    /// rev 4, keeping every pre-activation model_root byte-identical.
+    pub win_scorers: Vec<String>,
     pub events_total: u64,
 }
 
@@ -163,6 +183,7 @@ impl ModelState {
             win_zero_scored: 0,
             events_total: 0,
             win_score_sum: 0,
+            win_scorers: Vec::new(),
             rev: 2,
         }
     }
@@ -187,7 +208,25 @@ impl ModelState {
             .iter()
             .map(|(w, l, t)| format!("[{},{},\"{}\"]", w, l, t))
             .collect();
-        if self.rev >= 3 {
+        if self.rev >= 4 {
+            let scorers: Vec<String> =
+                self.win_scorers.iter().map(|x| format!("\"{}\"", x)).collect();
+            format!(
+                "{{\"events_total\":{},\"pages\":[{}],\"pending_growth\":[{}],\"pinned_streak\":{},\"quota_4dp\":{},\"rev\":{},\"slack_streak\":{},\"win_accepted\":{},\"win_score_sum\":{},\"win_scorers\":[{}],\"win_zero_scored\":{},\"window_id\":{}}}",
+                self.events_total,
+                pages.join(","),
+                pending.join(","),
+                self.pinned_streak,
+                self.quota_4dp,
+                self.rev,
+                self.slack_streak,
+                self.win_accepted,
+                self.win_score_sum,
+                scorers.join(","),
+                self.win_zero_scored,
+                self.window_id
+            )
+        } else if self.rev >= 3 {
             format!(
                 "{{\"events_total\":{},\"pages\":[{}],\"pending_growth\":[{}],\"pinned_streak\":{},\"quota_4dp\":{},\"rev\":{},\"slack_streak\":{},\"win_accepted\":{},\"win_score_sum\":{},\"win_zero_scored\":{},\"window_id\":{}}}",
                 self.events_total,
@@ -262,6 +301,10 @@ impl ModelState {
             win_score_sum: v.get("win_score_sum").and_then(|x| x.as_u64())
                 .unwrap_or(0),
             rev: v.get("rev").and_then(|x| x.as_u64()).unwrap_or(2),
+            win_scorers: v.get("win_scorers").and_then(|x| x.as_array())
+                .map(|a| a.iter().filter_map(|e| e.as_str().map(String::from))
+                     .collect())
+                .unwrap_or_default(),
         })
     }
 
@@ -364,16 +407,31 @@ pub fn fold(
     zero_scored: u64,
     prev_hash: &str,
     score_sum: u64,
+    proposer: &str,
 ) -> (ModelState, Vec<Activation>) {
     let mut s = state.clone();
     // v3 activates at its scheduled height (GenesisParams::v3_height)
     if height >= params.v3_height {
         s.rev = 3;
     }
+    if height >= params.v4_height {
+        s.rev = 4;
+    }
     s.win_accepted += n_txs;
     s.win_zero_scored += zero_scored;
     if s.rev >= 3 {
         s.win_score_sum += score_sum;
+    }
+    // v4: record this block's proposer as a DISTINCT positive scorer, capped
+    // at the quorum (past it the answer cannot change). An empty proposer
+    // never counts — the gate must not be openable by an unattributable block.
+    if s.rev >= 4
+        && score_sum > 0
+        && !proposer.is_empty()
+        && !s.win_scorers.iter().any(|x| x == proposer)
+        && s.win_scorers.len() < params.growth_quorum
+    {
+        s.win_scorers.push(proposer.to_string());
     }
     let mut activations: Vec<Activation> = Vec::new();
 
@@ -415,6 +473,14 @@ pub fn fold(
         // conflated junk with signal below the eval noise floor (found live).
         if s.rev >= 3 {
             staleness_4dp = if s.win_score_sum > 0 { 0 } else { 10_000 };
+        }
+        if s.rev >= 4 {
+            // v4 QUORUM gate: distinct proposers, not a forgeable sum.
+            staleness_4dp = if s.win_scorers.len() >= params.growth_quorum {
+                0
+            } else {
+                10_000
+            };
         }
         let d = retarget_decide(
             s.quota_4dp,
@@ -466,6 +532,7 @@ pub fn fold(
         s.win_accepted = 0;
         s.win_zero_scored = 0;
         s.win_score_sum = 0;
+        s.win_scorers.clear();
     }
 
     (s, activations)

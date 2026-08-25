@@ -92,6 +92,24 @@ class GenesisParams:
     # with "signal below the eval noise floor" (found live). Scheduled via the
     # version schedule: a coordinated upgrade, not a re-genesis.
     v3_height: int = 288
+    # PROTOCOL v4 (the QUORUM gate): activation height for the scheduled
+    # upgrade that makes the learning gate resistant to a lying proposer.
+    # v3 gated growth on win_score_sum > 0 — a SUM over the window of
+    # proposer-COMMITTED scores, whose accuracy consensus cannot check. A
+    # single Byzantine proposer committing one positive micro-nat therefore
+    # forced growth on a plateaued network (1-of-N; proven in
+    # rig/redteam_gate.py). From v4 the gate counts DISTINCT proposers who
+    # committed a positive score in the window and requires `growth_quorum`
+    # of them, so forcing growth costs winning that many blocks with that
+    # many keys — priced by stake, like everything else here. Honest limit:
+    # this raises the price, it does not make the gate trustless. Only the
+    # multi-evaluator committee does that.
+    v4_height: int = 608
+    # Distinct positive-scoring proposers a window needs before growth may be
+    # scheduled. 3 matches the >=3-honest-miners regime the trimmed-mean
+    # aggregation already assumes; a network with fewer miners than this sets
+    # it to its fleet size (see NetworkParams) and raises it as miners join.
+    growth_quorum: int = 3
 
 
 ACTIVE, FROZEN = "A", "F"
@@ -105,7 +123,7 @@ class ModelState:
     def __init__(self, pages, quota_4dp=QUOTA_ONE_4DP, pinned_streak=0,
                  slack_streak=0, pending_growth=None, window_id=0,
                  win_accepted=0, win_zero_scored=0, events_total=0,
-                 win_score_sum=0, rev=2):
+                 win_score_sum=0, rev=2, win_scorers=None):
         self.pages = [list(p) for p in pages]
         self.quota_4dp = int(quota_4dp)
         self.pinned_streak = int(pinned_streak)
@@ -119,6 +137,11 @@ class ModelState:
         # so every pre-activation model_root is byte-identical to v2.
         self.win_score_sum = int(win_score_sum)
         self.rev = int(rev)
+        # v4: the DISTINCT proposers that committed a positive score this
+        # window, capped at growth_quorum entries (once the quorum is met no
+        # more are needed, so the state stays tiny). Enters the canonical JSON
+        # only from rev 4, keeping every pre-activation model_root identical.
+        self.win_scorers = [str(x) for x in (win_scorers or [])]
         self.events_total = int(events_total)
 
     # ---- construction ----------------------------------------------------
@@ -136,7 +159,8 @@ class ModelState:
         return ModelState(self.pages, self.quota_4dp, self.pinned_streak,
                           self.slack_streak, self.pending_growth, self.window_id,
                           self.win_accepted, self.win_zero_scored,
-                          self.events_total, self.win_score_sum, self.rev)
+                          self.events_total, self.win_score_sum, self.rev,
+                          self.win_scorers)
 
     # ---- commitments -----------------------------------------------------
     def canonical_json(self) -> str:
@@ -154,6 +178,8 @@ class ModelState:
         if self.rev >= 3:
             d["rev"] = self.rev
             d["win_score_sum"] = self.win_score_sum
+        if self.rev >= 4:
+            d["win_scorers"] = self.win_scorers
         return json.dumps(d, sort_keys=True, separators=(",", ":"))
 
     def model_root(self) -> str:
@@ -220,7 +246,7 @@ def page_init(trigger_hex: str, page_id: int, spec: ModelSpec) -> np.ndarray:
 
 def fold(state: ModelState, params: GenesisParams, height: int, n_txs: int,
          zero_scored: int, prev_hash: str,
-         score_sum: int = 0) -> tuple[ModelState, list]:
+         score_sum: int = 0, proposer: str = "") -> tuple[ModelState, list]:
     """The deterministic per-block ModelState transition. Returns
     (post_state, activations) where activations = [(page_id, layer, expert_idx,
     trigger_hex), ...] for expert pages appended by THIS block — the caller
@@ -236,10 +262,20 @@ def fold(state: ModelState, params: GenesisParams, height: int, n_txs: int,
     # first v3 block's model_root is the coordinated-upgrade boundary).
     if height >= params.v3_height:
         s.rev = 3
+    if height >= params.v4_height:
+        s.rev = 4
     s.win_accepted += n_txs
     s.win_zero_scored += zero_scored
     if s.rev >= 3:
         s.win_score_sum += int(score_sum)
+    # v4: record this block's proposer as a DISTINCT positive scorer. Capped
+    # at the quorum — past it the answer cannot change, so the list never
+    # grows beyond a handful of entries. An empty proposer never counts (the
+    # gate must not be openable by an unattributable block).
+    if s.rev >= 4 and int(score_sum) > 0 and proposer \
+            and proposer not in s.win_scorers \
+            and len(s.win_scorers) < params.growth_quorum:
+        s.win_scorers.append(proposer)
     activations: list = []
 
     W = params.retarget_window
@@ -264,7 +300,11 @@ def fold(state: ModelState, params: GenesisParams, height: int, n_txs: int,
         # (summed committed scores > 0) — per-delta staleness conflated junk
         # with signal-below-noise-floor. Encoded as a staleness override so
         # retarget_decide's surplus math is shared verbatim across revs.
-        if s.rev >= 3:
+        if s.rev >= 4:
+            # v4 QUORUM gate: distinct proposers, not a forgeable sum.
+            staleness_4dp = (0 if len(s.win_scorers) >= params.growth_quorum
+                             else 10_000)
+        elif s.rev >= 3:
             staleness_4dp = 0 if s.win_score_sum > 0 else 10_000
         d = retarget_decide(s.quota_4dp, s.pinned_streak, s.slack_streak,
                             s.win_accepted, staleness_4dp,
@@ -306,5 +346,6 @@ def fold(state: ModelState, params: GenesisParams, height: int, n_txs: int,
         s.win_accepted = 0
         s.win_zero_scored = 0
         s.win_score_sum = 0
+        s.win_scorers = []
 
     return s, activations

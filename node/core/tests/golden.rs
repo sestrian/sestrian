@@ -404,6 +404,8 @@ fn params_from(spec: core::model_state::ModelSpec, p: &Value) -> core::model_sta
         announce_lead: p["announce_lead"].as_u64().unwrap(),
         delta_max_nnz: 1_000_000,
         v3_height: 1_000_000_000,
+        v4_height: 1_000_000_000,
+        growth_quorum: 3,
     }
 }
 
@@ -524,7 +526,8 @@ fn full_chain_replay_matches_reference() {
                                            h["height"].as_u64().unwrap(),
                                            txs.len() as u64, zero_scored,
                                            h["prev_hash"].as_str().unwrap(),
-                                           score_sum);
+                                           score_sum,
+                                           h["proposer"].as_str().unwrap_or(""));
             model = next;
             for (page_id, _l, _e, trigger) in &activations {
                 w.extend(page_init(trigger, *page_id, &params.spec));
@@ -561,6 +564,7 @@ fn page_root_matches_reference() {
             win_zero_scored: 0,
             win_score_sum: 0,
             rev: 2,
+            win_scorers: vec![],
             events_total: 0,
         };
         assert_eq!(page_state_root(&w, &st), case["root"].as_str().unwrap(),
@@ -653,7 +657,7 @@ fn controller_fold_matches_reference() {
                 step["height"].as_u64().unwrap(),
                 step["n_txs"].as_u64().unwrap(),
                 step["zero_scored"].as_u64().unwrap(),
-                step["prev_hash"].as_str().unwrap(), 0);
+                step["prev_hash"].as_str().unwrap(), 0, "");
             st = next;
             let want_acts: Vec<Value> = step["activations"].as_array().unwrap().clone();
             assert_eq!(activations.len(), want_acts.len(),
@@ -897,6 +901,50 @@ fn sketches_match_reference() {
 
 
 #[test]
+fn v4_fold_matches_reference() {
+    // v4: the QUORUM gate. Pins the activation boundary (win_scorers enters
+    // the canonical JSON exactly at v4_height), proposer dedupe, the quorum
+    // cap, the anonymous-proposer rule, the window reset, and both gate
+    // outcomes to the Python reference — the whole rule, byte for byte.
+    use sestrian_core::model_state::{fold, GenesisParams, ModelState};
+    let v = vectors();
+    let case = &v["v4_fold"][0];
+    let spec = spec_from(&v["controller_fold"][0]["spec"]);
+    let mut params = GenesisParams::new(spec);
+    params.retarget_window = case["retarget_window"].as_u64().unwrap();
+    params.target_deltas = case["target_deltas"].as_i64().unwrap();
+    params.quota_max_4dp = case["quota_max_4dp"].as_i64().unwrap();
+    params.k_sustain = case["k_sustain"].as_i64().unwrap();
+    params.announce_lead = case["announce_lead"].as_u64().unwrap();
+    params.v3_height = case["v3_height"].as_u64().unwrap();
+    params.v4_height = case["v4_height"].as_u64().unwrap();
+    params.growth_quorum = case["growth_quorum"].as_u64().unwrap() as usize;
+    let mut st = ModelState::genesis(&params.spec);
+    for step in case["steps"].as_array().unwrap() {
+        let (next, acts) = fold(&st, &params,
+                                step["height"].as_u64().unwrap(),
+                                step["n_txs"].as_u64().unwrap(),
+                                step["zero_scored"].as_u64().unwrap(),
+                                step["prev_hash"].as_str().unwrap(),
+                                step["score_sum"].as_u64().unwrap(),
+                                step["proposer"].as_str().unwrap());
+        st = next;
+        assert_eq!(st.rev, step["rev"].as_u64().unwrap(),
+                   "v4 rev diverged at h{}", step["height"]);
+        let want: Vec<String> = step["win_scorers"].as_array().unwrap().iter()
+            .map(|x| x.as_str().unwrap().to_string()).collect();
+        assert_eq!(st.win_scorers, want,
+                   "v4 scorer set diverged at h{}", step["height"]);
+        assert_eq!(st.model_root(), step["model_root"].as_str().unwrap(),
+                   "v4 fold diverged at h{}", step["height"]);
+        assert_eq!(acts.len(), step["activations"].as_array().unwrap().len());
+    }
+    assert_eq!(st.events_total, case["final_events"].as_u64().unwrap());
+    assert_eq!(st.pending_growth.len(),
+               case["final_pending"].as_array().unwrap().len());
+}
+
+#[test]
 fn v3_fold_matches_reference() {
     // v3: the scheduled-upgrade boundary (rev + win_score_sum enter the
     // canonical JSON exactly at v3_height) and the LEARNING GATE (growth
@@ -920,7 +968,7 @@ fn v3_fold_matches_reference() {
                                 step["n_txs"].as_u64().unwrap(),
                                 step["zero_scored"].as_u64().unwrap(),
                                 step["prev_hash"].as_str().unwrap(),
-                                step["score_sum"].as_u64().unwrap());
+                                step["score_sum"].as_u64().unwrap(), "");
         st = next;
         assert_eq!(st.rev, step["rev"].as_u64().unwrap());
         assert_eq!(st.model_root(), step["model_root"].as_str().unwrap(),

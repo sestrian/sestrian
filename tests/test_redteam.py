@@ -63,3 +63,31 @@ def test_v3_gate_is_not_byzantine_robust_force_growth_is_1_of_n():
     r = run_gate_redteam(verbose=False)
     assert r["attack_growth"] > 0
     assert r["attack_growth"] > r["honest_growth"]
+
+
+def test_v4_quorum_gate_blocks_the_single_byzantine_proposer():
+    """The v4 fix: counting DISTINCT positive-scoring proposers instead of
+    summing forgeable scores defeats the 1-of-N force-growth attack. Two
+    colluding proposers are still short of a quorum of 3."""
+    r = run_gate_redteam(verbose=False)
+    assert r["v4_attack_1"] == 0
+    assert r["v4_attack_2"] == 0
+
+
+def test_v4_quorum_is_a_price_not_a_proof():
+    """Honest limit, stated as a test so it cannot be quietly forgotten: a
+    coalition that actually wins `growth_quorum` blocks with that many keys
+    still forces growth. v4 prices the attack (stake-weighted sortition); it
+    does not make the gate trustless — only the multi-evaluator committee
+    does. If this ever starts passing as 0, the committee landed: update the
+    threat model."""
+    r = run_gate_redteam(verbose=False)
+    assert r["v4_attack_quorum"] > 0
+
+
+def test_v4_does_not_regress_the_honest_paths():
+    """A genuinely-learning network must still grow, and a genuine plateau
+    must still refuse to — the gate's whole purpose, preserved across the fix."""
+    r = run_gate_redteam(verbose=False)
+    assert r["v4_honest_learning"] > 0
+    assert r["v4_honest_plateau"] == 0

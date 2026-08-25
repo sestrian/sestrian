@@ -19,6 +19,11 @@ export SESTRIAN_LOCAL_TARGET_DELTAS=4
 export SESTRIAN_LOCAL_QUOTA_MAX_4DP=20000
 export SESTRIAN_LOCAL_K_SUSTAIN=2
 export SESTRIAN_LOCAL_ANNOUNCE_LEAD=1
+# PROTOCOL v4: prove growth under the SHIPPING rule, not a retired one. The
+# quorum gate is active from block 0 here and needs both miners to commit a
+# positive score in the window — exactly what devnet requires of its two.
+export SESTRIAN_LOCAL_V4_HEIGHT=0
+export SESTRIAN_LOCAL_GROWTH_QUORUM=2
 
 rm -rf /tmp/growth0 /tmp/growth1
 uv run --with torch --with numpy --with pynacl python -m client.make_genesis \

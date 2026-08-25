@@ -246,3 +246,65 @@ def test_v3_fold_prefix_equivalence_across_boundary():
     for h, n, z, sc in seq[3:]:
         b, _ = fold(b, P, h, n, z, f"{h:02x}" * 32, score_sum=sc)
     assert a.model_root() == b.model_root()
+
+
+def test_v4_activation_and_quorum_gate():
+    """The v4 boundary: win_scorers enters the canonical JSON exactly at
+    v4_height (pre-boundary roots byte-identical to v3), and the growth gate
+    switches from the forgeable window SUM to DISTINCT positive scorers."""
+    from rig.model_state import fold, GenesisParams, ModelSpec, ModelState
+    spec = ModelSpec(n_layers=2, d_model=8, d_ff=16, n_experts_initial=2,
+                     e_max=4, backbone_params=100)
+    P = GenesisParams(spec=spec, retarget_window=2, target_deltas=2,
+                      k_sustain=1, announce_lead=1, v3_height=0, v4_height=4,
+                      growth_quorum=2)
+    st = ModelState.genesis(spec)
+    # pre-boundary (v3): the v4 key is absent, roots stay v3-identical
+    for h in (1, 2, 3):
+        st, _ = fold(st, P, h, 6, 5, f"{h:02x}" * 32, score_sum=1,
+                     proposer="A")
+        assert st.rev == 3
+        assert "win_scorers" not in st.canonical_json()
+    # height 4: v4 activates — rev flips, json gains the key
+    st, _ = fold(st, P, 4, 6, 5, "04" * 32, score_sum=1, proposer="A")
+    assert st.rev == 4
+    assert "win_scorers" in st.canonical_json()
+    assert '"rev":4' in st.canonical_json()
+
+    # ONE proposer, however much score it commits, cannot reach a quorum of 2
+    st.quota_4dp = P.quota_max_4dp
+    st.win_scorers, st.win_score_sum, st.win_accepted = [], 0, 0
+    for h in (5, 6):
+        st, _ = fold(st, P, h, 6, 5, f"{h:02x}" * 32, score_sum=10**6,
+                     proposer="A")
+    assert st.pending_growth == []          # the v3 attack, now blocked
+
+    # TWO distinct positive scorers meet it and growth schedules
+    st.quota_4dp = P.quota_max_4dp
+    st.win_scorers, st.win_score_sum, st.win_accepted = [], 0, 0
+    st.pinned_streak = 0
+    st, _ = fold(st, P, 7, 6, 5, "07" * 32, score_sum=1, proposer="A")
+    st, _ = fold(st, P, 8, 6, 5, "08" * 32, score_sum=1, proposer="B")
+    assert st.pending_growth != []
+
+
+def test_v4_scorers_are_deduped_capped_and_reset():
+    """State hygiene: the same proposer counts once, the list never exceeds the
+    quorum (so the committed state stays tiny), an unattributed block never
+    counts, and the window reset clears it."""
+    from rig.model_state import fold, GenesisParams, ModelSpec, ModelState
+    spec = ModelSpec(n_layers=2, d_model=8, d_ff=16, n_experts_initial=2,
+                     e_max=4, backbone_params=100)
+    P = GenesisParams(spec=spec, retarget_window=8, v3_height=0, v4_height=0,
+                      growth_quorum=2)
+    st = ModelState.genesis(spec)
+    for h in (1, 2, 3):                      # same proposer three times
+        st, _ = fold(st, P, h, 1, 0, f"{h:02x}" * 32, score_sum=5, proposer="A")
+    assert st.win_scorers == ["A"]
+    st, _ = fold(st, P, 4, 1, 0, "04" * 32, score_sum=5, proposer="")
+    assert st.win_scorers == ["A"]           # anonymous never counts
+    for pr in ("B", "C"):                    # cap at growth_quorum
+        st, _ = fold(st, P, 5, 1, 0, "05" * 32, score_sum=5, proposer=pr)
+    assert st.win_scorers == ["A", "B"]
+    st, _ = fold(st, P, 8, 1, 0, "08" * 32, score_sum=5, proposer="D")
+    assert st.win_scorers == []              # window boundary resets

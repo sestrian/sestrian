@@ -48,6 +48,10 @@ VERSION_SCHEDULE: tuple = ((0, 2),)   # base protocol at genesis: v2 (envelope)
 def expected_version(height: int, params=None) -> int:
     # v3 (the learning gate) activates at params.v3_height — a coordinated
     # scheduled upgrade, the first use of the version mechanism in anger.
+    # v4 (the quorum gate) is the second scheduled upgrade; check it first so
+    # the newest applicable rule wins.
+    if params is not None and height >= params.v4_height:
+        return 4
     if params is not None and height >= params.v3_height:
         return 3
     v = VERSION_SCHEDULE[0][1]
@@ -407,7 +411,8 @@ def validate_block(block: Block, parent_w_int: np.ndarray, parent_height: int,
         score_sum = sum(int(v) for v in block.scores.values())
         post_model, activations = model_fold(parent_model, params, h.height,
                                              len(block.txs), zero_scored,
-                                             h.prev_hash, score_sum)
+                                             h.prev_hash, score_sum,
+                                             h.proposer)
         for page_id, _layer, _expert, trigger in activations:
             w = np.concatenate([w, page_init(trigger, page_id, params.spec)])
         if page_state_root(w, post_model) != h.state_root:
@@ -579,7 +584,8 @@ class BlockTree:
                               if int(b.scores.get(t.txid(), 0)) == 0)
             model, activations = model_fold(model, self.params, h.height,
                                             len(b.txs), zero_scored, h.prev_hash,
-                                            sum(int(v) for v in b.scores.values()))
+                                            sum(int(v) for v in b.scores.values()),
+                                            h.proposer)
             for page_id, _l, _e, trigger in activations:
                 w = np.concatenate([w, page_init(trigger, page_id,
                                                  self.params.spec)])
@@ -619,7 +625,8 @@ def build_block(tree: BlockTree, parent_hash: str, accepted: list, bodies: dict,
         post_model, activations = model_fold(parent_model, tree.params, height,
                                              len(accepted), zero_scored,
                                              parent_hash,
-                                             sum(blk_scores.values()))
+                                             sum(blk_scores.values()),
+                                             proposer_key.pub)
         for page_id, _l, _e, trigger in activations:
             w = np.concatenate([w, page_init(trigger, page_id,
                                              tree.params.spec)])

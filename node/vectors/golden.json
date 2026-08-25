@@ -2537,6 +2537,195 @@
    "final_events": 1
   }
  ],
+ "v4_fold": [
+  {
+   "v3_height": 0,
+   "v4_height": 3,
+   "growth_quorum": 2,
+   "retarget_window": 4,
+   "target_deltas": 4,
+   "quota_max_4dp": 20000,
+   "k_sustain": 1,
+   "announce_lead": 1,
+   "steps": [
+    {
+     "height": 1,
+     "n_txs": 6,
+     "zero_scored": 5,
+     "score_sum": 5,
+     "proposer": "aa",
+     "prev_hash": "0101010101010101010101010101010101010101010101010101010101010101",
+     "rev": 3,
+     "win_scorers": [],
+     "activations": [],
+     "model_root": "e783eaf70f7fc54af69a49ce2b63770103a621cb20ae140fe8e7b35091faaf01"
+    },
+    {
+     "height": 2,
+     "n_txs": 6,
+     "zero_scored": 5,
+     "score_sum": 5,
+     "proposer": "aa",
+     "prev_hash": "0202020202020202020202020202020202020202020202020202020202020202",
+     "rev": 3,
+     "win_scorers": [],
+     "activations": [],
+     "model_root": "89f2869c0c14bb7a67847e7ae76d6670c474abfd33e8f9170bf16f6c72fb75bb"
+    },
+    {
+     "height": 3,
+     "n_txs": 6,
+     "zero_scored": 5,
+     "score_sum": 5,
+     "proposer": "aa",
+     "prev_hash": "0303030303030303030303030303030303030303030303030303030303030303",
+     "rev": 4,
+     "win_scorers": [
+      "aa"
+     ],
+     "activations": [],
+     "model_root": "9162cd4d03dfb7554dcd1a08cc573c5e6a3a1dbacc3c7d9932a9f15af1bfcbed"
+    },
+    {
+     "height": 4,
+     "n_txs": 6,
+     "zero_scored": 5,
+     "score_sum": 5,
+     "proposer": "aa",
+     "prev_hash": "0404040404040404040404040404040404040404040404040404040404040404",
+     "rev": 4,
+     "win_scorers": [],
+     "activations": [],
+     "model_root": "58118ac7a0f36af9208e5f4288a3e40779525303e7fdec25a6ce437c4a3937fc"
+    },
+    {
+     "height": 5,
+     "n_txs": 6,
+     "zero_scored": 5,
+     "score_sum": 7,
+     "proposer": "bb",
+     "prev_hash": "0505050505050505050505050505050505050505050505050505050505050505",
+     "rev": 4,
+     "win_scorers": [
+      "bb"
+     ],
+     "activations": [],
+     "model_root": "6ac3e33ee1df01865bba89ac5de7e47535d86d06392aa7ce7a030a8236c0f9de"
+    },
+    {
+     "height": 6,
+     "n_txs": 6,
+     "zero_scored": 5,
+     "score_sum": 0,
+     "proposer": "cc",
+     "prev_hash": "0606060606060606060606060606060606060606060606060606060606060606",
+     "rev": 4,
+     "win_scorers": [
+      "bb"
+     ],
+     "activations": [],
+     "model_root": "375d456d4f3f0b40629f6199bf791286bf30ad3cf8dcfe85e6457585a8d90c85"
+    },
+    {
+     "height": 7,
+     "n_txs": 6,
+     "zero_scored": 5,
+     "score_sum": 9,
+     "proposer": "",
+     "prev_hash": "0707070707070707070707070707070707070707070707070707070707070707",
+     "rev": 4,
+     "win_scorers": [
+      "bb"
+     ],
+     "activations": [],
+     "model_root": "a8a1d54bee9a3622b21d2c8f45de652b1daa1c0efef10e3461a5875c5c46509a"
+    },
+    {
+     "height": 8,
+     "n_txs": 6,
+     "zero_scored": 5,
+     "score_sum": 3,
+     "proposer": "cc",
+     "prev_hash": "0808080808080808080808080808080808080808080808080808080808080808",
+     "rev": 4,
+     "win_scorers": [],
+     "activations": [],
+     "model_root": "01f9b4469d848de92a5cac440d54d66d403e1fe860919104381455a78456ace6"
+    },
+    {
+     "height": 9,
+     "n_txs": 6,
+     "zero_scored": 5,
+     "score_sum": 4,
+     "proposer": "aa",
+     "prev_hash": "0909090909090909090909090909090909090909090909090909090909090909",
+     "rev": 4,
+     "win_scorers": [
+      "aa"
+     ],
+     "activations": [],
+     "model_root": "a4c75fad723d19de304bc9900fd6166c596647cf7caff09d8c7920ffd47d8b24"
+    },
+    {
+     "height": 10,
+     "n_txs": 6,
+     "zero_scored": 5,
+     "score_sum": 4,
+     "proposer": "bb",
+     "prev_hash": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+     "rev": 4,
+     "win_scorers": [
+      "aa",
+      "bb"
+     ],
+     "activations": [],
+     "model_root": "2718c81eaa14a2ea3b0d0514103e8252f9c044c20dec32aec8b2154bc8254240"
+    },
+    {
+     "height": 11,
+     "n_txs": 6,
+     "zero_scored": 5,
+     "score_sum": 0,
+     "proposer": "aa",
+     "prev_hash": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+     "rev": 4,
+     "win_scorers": [
+      "aa",
+      "bb"
+     ],
+     "activations": [],
+     "model_root": "a9696a723325f7e853de0ac64381045b4aa6af1d16c7816fd3768ff1ff7311a3"
+    },
+    {
+     "height": 12,
+     "n_txs": 6,
+     "zero_scored": 5,
+     "score_sum": 6,
+     "proposer": "dd",
+     "prev_hash": "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
+     "rev": 4,
+     "win_scorers": [],
+     "activations": [
+      [
+       5,
+       0,
+       2,
+       "0808080808080808080808080808080808080808080808080808080808080808"
+      ]
+     ],
+     "model_root": "c4afd17847feb50eb4be458899f85627234798dda70d01af200afd968d37b041"
+    }
+   ],
+   "final_pending": [
+    [
+     4,
+     1,
+     "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
+    ]
+   ],
+   "final_events": 2
+  }
+ ],
  "controller_fold": [
   {
    "spec": {
