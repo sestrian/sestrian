@@ -121,12 +121,17 @@ class DataSubmitTx:
     media_type: str                # "text" | "csv" | "image" | … (bytes are bytes)
     stake: int                     # grains escrowed behind this submission
     nonce: int
+    da_root: str = ""              # §7.2a availability commitment (rig.corpus)
     sig: bytes = b""
 
     def signing_bytes(self) -> bytes:
+        # da_root is inside the signature: it is the whole point of the entry.
+        # A submitter who could swap it after signing could stake real bytes and
+        # then point availability sampling at a corpus they still hold.
         return frame(b"data_submit", self.owner_pub.encode(), self.data_hash.encode(),
                      str(self.size_bytes).encode(), self.media_type.encode(),
-                     str(self.stake).encode(), str(self.nonce).encode())
+                     str(self.stake).encode(), str(self.nonce).encode(),
+                     self.da_root.encode())
 
     def txid(self) -> str:
         return hashlib.sha256(self.signing_bytes()).hexdigest()
@@ -426,10 +431,23 @@ class TokenLedger:
                 return False
             if tx.txid() in self.registry:
                 return False
+            # §7.2a: no entry without an availability commitment. Consensus can
+            # only check that the commitment is WELL-FORMED — sampling is I/O and
+            # cannot live in a deterministic state transition — but requiring it
+            # here is what makes "staked ⇒ samplable" true for every entry that
+            # ever reaches the registry. Nodes sample before relaying; anyone can
+            # sample later via a challenge. A hash with no da_root, which is what
+            # "stake the hash then delete the bytes" looks like, no longer applies.
+            if len(tx.da_root) != 64 or any(c not in "0123456789abcdef"
+                                            for c in tx.da_root):
+                return False
+            if tx.size_bytes <= 0:
+                return False
             self.balances[src] -= tx.stake                 # escrowed in the entry
             self.registry[tx.txid()] = {
                 "owner": src, "data_hash": tx.data_hash, "size": tx.size_bytes,
                 "media_type": tx.media_type, "stake": tx.stake,
+                "da_root": tx.da_root,
                 "weight": tx.stake, "status": "active"}
         elif isinstance(tx, DataChallengeTx):
             entry = self.registry.get(tx.data_id)

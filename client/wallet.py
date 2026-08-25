@@ -261,30 +261,30 @@ def main():
     elif a.cmd == "submit-data":
         if not a.file or a.stake is None:
             raise SystemExit("submit-data needs --file and --stake")
-        import hashlib
-        import os
+        from rig import corpus
         from rig.token import DataSubmitTx
-        # stream the hash — corpora are routinely multi-GB and must never be
-        # slurped into memory just to be fingerprinted
-        h = hashlib.sha256()
-        size = 0
+        # §7.2a: build the availability commitment while streaming the corpus.
+        # One pass, O(CHUNK_BYTES) memory — corpora are routinely multi-GB and
+        # must never be slurped into memory just to be committed to.
+        print(f"hashing + chunking {a.file} …")
         with open(a.file, "rb") as f:
-            while chunk := f.read(1 << 24):
-                h.update(chunk)
-                size += len(chunk)
+            man = corpus.build(f)
+        print(f"  {man.size_bytes} bytes, {man.chunk_count()} chunks")
+        print(f"  data_hash {man.data_hash}")
+        print(f"  da_root   {man.da_root}")
         def _build(nonce):
-            tx = DataSubmitTx(owner_pub=rec["pub"], data_hash=h.hexdigest(),
-                              size_bytes=size, media_type=a.media_type,
+            tx = DataSubmitTx(owner_pub=rec["pub"], data_hash=man.data_hash,
+                              size_bytes=man.size_bytes, media_type=a.media_type,
                               stake=int(round(a.stake * GRAIN)),
-                              nonce=nonce).signed(key)
+                              nonce=nonce, da_root=man.da_root).signed(key)
             return tx, {"owner_pub": tx.owner_pub, "data_hash": tx.data_hash,
                         "size_bytes": tx.size_bytes, "media_type": tx.media_type,
                         "stake": tx.stake, "nonce": tx.nonce,
-                        "sig": tx.sig.hex()}
+                        "da_root": tx.da_root, "sig": tx.sig.hex()}
         out = _submit(a.node, rec["address"], "/data/submit", _build)
-        print(f"CONFIRMED: data staked ({size} bytes, hash {h.hexdigest()[:16]}…, "
-              f"stake {a.stake}): {out}")
-        print(f"  now mine with:  --data-refs {h.hexdigest()}")
+        print(f"CONFIRMED: data staked ({man.size_bytes} bytes, "
+              f"hash {man.data_hash[:16]}…, stake {a.stake}): {out}")
+        print(f"  now mine with:  --data-refs {man.data_hash}")
     elif a.cmd == "challenge":
         if not a.data_id or a.stake is None:
             raise SystemExit("challenge needs --data-id and --stake")
