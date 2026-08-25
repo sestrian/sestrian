@@ -2342,8 +2342,18 @@ impl Node {
         // v1 PROPOSING: the eligibility ladder widens inside the round; the
         // per-miner phase offset staggers proposals so ties are rare
         if self.cfg.produce && round >= 0 && round != self.last_proposed_round {
+            // Stagger proposals so miners rarely tie — but ROTATE the order
+            // every height. A phase fixed per key made the lowest-hashing
+            // miner propose first in EVERY round, so it won essentially every
+            // block: 19 of 19 on the live devnet. That is merely unfair under
+            // v3, but under the v4 quorum gate it is fatal — growth needs
+            // `growth_quorum` DISTINCT proposers to score in one window, and a
+            // fleet with one perpetual proposer can never reach two. Binding
+            // the offset to (key, height) makes the running order change each
+            // block while staying deterministic and self-assigned.
             let phase = {
-                let h = core::delta_hash(self.key.pub_hex().as_bytes());
+                let h = core::delta_hash(
+                    format!("{}|{}", self.key.pub_hex(), self.head_height() + 1).as_bytes());
                 (u64::from_str_radix(&h[..8], 16).unwrap_or(0) % 1000)
                     as f64 / 1000.0 * (self.cfg.interval / 4.0)
             };
