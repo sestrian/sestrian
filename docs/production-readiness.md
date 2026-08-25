@@ -107,6 +107,19 @@ each phase.
   in-flight throttle + cursor (it used to fire a duplicate ~50MB transfer on
   every reconnect), and request-response failures / connection closes are now
   logged with their cause instead of being silently swallowed.
+- ☐ NO PEER DISCOVERY — bounds how many operators can safely join. The
+  behaviour set is gossipsub + identify + autonat/dcutr/relay + ping: there
+  is no Kademlia, no gossipsub peer exchange, no mDNS. A node therefore knows
+  only the baked-in bootstrap anchors plus whatever `--peers` it was given,
+  so it never learns about any other node. Three consequences: (1) every
+  joiner's traffic routes through the two anchors, which become a bandwidth
+  bottleneck and a gossip SPOF as N grows; (2) miners never link directly —
+  the mac and cuda miners sit on the SAME LAN and still had no direct
+  connection, routing everything through remote anchors; (3) that is what let
+  the two miners fork on 2026-08-25 with nothing to reconcile them once
+  anchor connectivity churned. Interim mitigation applied: explicit `--peers`
+  between the two miners. Real fix before an open invite: peer exchange or a
+  DHT, so the topology is a mesh rather than a star through two hosts.
 - ✅ PROPOSAL FAIRNESS (two interacting bugs; found only because v4 made it
   consensus-relevant). (a) The per-miner phase offset was a fixed function of
   the pubkey, so the lowest-hashing miner proposed first every round; now
