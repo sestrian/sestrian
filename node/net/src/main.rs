@@ -1022,10 +1022,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bridge_synced: false,
         train_inflight: false,
         train_deadline: 0.0,
-        t0: if args.t0 > 0.0 { args.t0 } else {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?.as_secs_f64()
-        },
+        // ROUND EPOCH: global, not per-node. Defaulting this to the node's
+        // own boot time gave every node a private round metronome, so two
+        // miners that started at different moments had permanently offset
+        // 180s boundaries and whichever boundary landed earlier proposed
+        // FIRST IN EVERY ROUND — forever, until someone restarted. On the
+        // live devnet that locked one miner out completely: it last proposed
+        // at height 372 while the other took the next 60+ blocks. Harmless
+        // unfairness under v3; fatal under the v4 quorum gate, which needs
+        // `growth_quorum` DISTINCT proposers per window to allow growth.
+        // Anchoring at the unix epoch makes every node agree on round
+        // boundaries; the per-(key, height) phase offset then spreads
+        // proposals inside the round and rotates who goes first.
+        t0: if args.t0 > 0.0 { args.t0 } else { 0.0 },
         last_proposed_round: -1,
         last_produce_log_round: -1,
         last_trained_round: -1,
