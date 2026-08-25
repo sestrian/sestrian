@@ -477,6 +477,25 @@ fn full_chain_replay_matches_reference() {
         }
         assert_eq!(tree.head, case["expected_head"].as_str().unwrap(),
                    "fork choice disagrees with reference");
+        // THE RESTART-WEDGE INVARIANT, checked on a real forked chain.
+        // Fast-boot cannot adopt a rival of its own snapshot block: connecting
+        // that rival needs the PARENT state, which lies below the checkpoint.
+        // So a snapshot taken AT the head puts the state floor exactly where a
+        // live proposal tie can exist, and a node restarted onto the losing
+        // side of one can never rejoin — how the EU anchor (tie at 252) and
+        // then the US anchor (tie at 276) each wedged for hours. Checkpointing
+        // the head's PARENT keeps every head tie above the floor.
+        let head_h = tree.blocks[&tree.head].height;
+        if head_h >= 2 {
+            let (basis, basis_state) = tree.snapshot_basis();
+            assert_ne!(basis, tree.head,
+                       "snapshot must NOT checkpoint the head — that is the \
+                        restart-wedge that stranded two anchors");
+            assert_eq!(basis, tree.blocks[&tree.head].prev_hash,
+                       "snapshot must checkpoint the head's parent");
+            assert_eq!(basis_state.len(), tree.head_state().len(),
+                       "checkpoint state must be a usable full weight vector");
+        }
         assert_eq!(page_state_root(tree.head_state(), tree.head_model()),
                    case["expected_state_root"].as_str().unwrap());
         assert_eq!(tree.head_model().model_root(),

@@ -107,6 +107,20 @@ each phase.
   in-flight throttle + cursor (it used to fire a duplicate ~50MB transfer on
   every reconnect), and request-response failures / connection closes are now
   logged with their cause instead of being silently swallowed.
+- ✅ REGRESSION COVER for the recovery paths (added after four live
+  catch-up/restart failures in one day, every one of which passed the whole
+  suite on the way to production). The gap was structural: devnet and soak
+  only ever exercised nodes that AGREE, so the decision logic a node uses
+  when it is behind or forked was untested. Now: `catchup_decision` is a
+  pure, total function with unit tests AND a convergence simulation (a
+  lagging node must reach the head in bounded rounds and never re-request a
+  window — the livelock showed up as non-convergence, not a wrong value);
+  the restart-wedge invariant (snapshot must checkpoint the head's PARENT)
+  is asserted against the real forked chain the golden replay builds; and
+  `scripts/fork-catchup-proof.sh` (isolate → fork → reconnect → restart →
+  converge) gates every PR. Each test was validated by REINTRODUCING its bug
+  and confirming it fails: cursor reset-on-learn, compounding walkback, and
+  snapshot-at-head all caught.
 - ✅ PROTOCOL v4 — the QUORUM gate (scheduled, devnet height 416): growth is
   gated on `growth_quorum` DISTINCT positive-scoring proposers per window
   instead of v3's window-wide score SUM, which one lying proposer could open

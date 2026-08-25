@@ -227,6 +227,32 @@ jobs:
           path: /tmp/devnet*.log
           if-no-files-found: ignore
 
+  # Fork recovery: a node mines its OWN branch in isolation, then reconnects and
+  # RESTARTS and must abandon it for the fleet's chain. Every catch-up and
+  # restart bug that reached production got there because the suite only ever
+  # tested nodes that agreed — this is the scenario that actually broke.
+  fork-catchup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: node
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: a forked node reconnects, restarts, and converges
+        run: bash scripts/fork-catchup-proof.sh 5 120
+      - name: upload fork-catchup logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fork-catchup-logs
+          path: /tmp/fcp_*.log
+          if-no-files-found: ignore
+
   # Chaos soak: same two-node devnet but one node is SIGKILLed mid-run and must
   # fast-boot, catch up, and still converge. Too slow to gate every PR — runs
   # on pushes to main and on the nightly schedule.

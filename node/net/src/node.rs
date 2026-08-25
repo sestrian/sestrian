@@ -105,6 +105,211 @@ pub fn delta_in_window(base_height: u64, head_height: u64) -> bool {
         && base_height <= head_height + DELTA_FUTURE_WINDOW
 }
 
+/// What a lagging node should do after absorbing one sync batch.
+///
+/// Pure + total so the catch-up state machine can be unit-tested and, more
+/// importantly, SIMULATED to convergence — three separate live failures in one
+/// night (cursor reset-on-learn, walkback anchored at the request height and
+/// pinned at 0, state cleared mid-catch-up) were all decision bugs in this
+/// logic that every end-to-end test passed straight through, because loopback
+/// chains are short enough that a broken cursor still stumbles home.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CatchUp {
+    /// Caught up: drop per-peer catch-up state (restores the reorg margin).
+    Done,
+    /// Nothing actionable in this batch; keep whatever state we had.
+    Idle,
+    /// Ask this peer from `from` next. `walkback_step` is the step to store
+    /// (only meaningful while walking back); `reset_walkback` clears it.
+    Request { from: u64, walkback_step: u64, reset_walkback: bool },
+}
+
+/// Walking back doubles the step to find a fork point, but never past this —
+/// divergence deeper than any state window needs a resync, not more probing.
+pub const WALKBACK_MAX: u64 = 64;
+pub const WALKBACK_START: u64 = 4;
+
+pub fn catchup_decision(
+    head_height: u64,
+    their_head: u64,
+    served: u64,
+    learned: bool,
+    orphaned: bool,
+    batch_top: u64,
+    walkback_step: u64,
+) -> CatchUp {
+    if their_head <= head_height {
+        return CatchUp::Done;
+    }
+    if served == 0 {
+        return CatchUp::Idle;
+    }
+    if orphaned && !learned {
+        // Anchor the probe at OUR head, not at the request that failed:
+        // anchoring at the request height walks back compoundingly and pins
+        // at 0 after a few rounds, which is how an anchor sat wedged for
+        // hours re-requesting the genesis window.
+        let step = if walkback_step == 0 { WALKBACK_START } else { walkback_step };
+        return CatchUp::Request {
+            from: head_height.saturating_sub(step),
+            walkback_step: (step * 2).min(WALKBACK_MAX),
+            reset_walkback: false,
+        };
+    }
+    // Useful batch or pure overlap: both mean this window is done — march.
+    // Clearing the cursor on a USEFUL batch (the original bug) re-anchors the
+    // next request at head-2 and re-downloads the same overlap forever.
+    CatchUp::Request {
+        from: (batch_top + 1).min(their_head),
+        walkback_step: WALKBACK_START,
+        reset_walkback: learned,
+    }
+}
+
+#[cfg(test)]
+mod catchup_tests {
+    use super::*;
+
+    /// Model a peer that serves `batch` blocks starting at the requested
+    /// height, and drive the real decision function to convergence. This is
+    /// the test that the three live catch-up failures would each have failed:
+    /// every one of them showed up as "does not converge", not as a wrong
+    /// value in a single step.
+    fn converges(head: u64, their_head: u64, batch: u64, max_rounds: u32)
+        -> Result<u32, String>
+    {
+        let (mut head, mut step, mut rounds) = (head, 0u64, 0u32);
+        let mut from = head.saturating_sub(2);
+        let mut last_from = u64::MAX;
+        loop {
+            if head >= their_head {
+                return Ok(rounds);
+            }
+            rounds += 1;
+            if rounds > max_rounds {
+                return Err(format!(
+                    "no convergence in {max_rounds} rounds (head {head}/{their_head})"));
+            }
+            // the peer serves [from, from+batch) of ITS chain; anything at or
+            // below our head teaches nothing, anything above extends us.
+            let top = (from + batch - 1).min(their_head);
+            let learned = top > head;
+            if learned {
+                head = top;
+            }
+            let d = catchup_decision(head, their_head, batch, learned, false,
+                                     top, step);
+            match d {
+                CatchUp::Done => return Ok(rounds),
+                CatchUp::Idle => return Err("went idle while behind".into()),
+                CatchUp::Request { from: f, walkback_step, reset_walkback } => {
+                    // THE LIVELOCK GUARD: a peer that keeps serving must never
+                    // be asked the same window twice in a row.
+                    if f == last_from {
+                        return Err(format!(
+                            "cursor stalled at {f} (head {head}/{their_head})"));
+                    }
+                    last_from = f;
+                    from = f;
+                    step = if reset_walkback { 0 } else { walkback_step };
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lagging_node_converges_and_does_not_livelock() {
+        // 200 blocks behind, 2 per batch: ~100 rounds of real progress. The
+        // shipped-then-reverted logic cleared the cursor on every useful batch
+        // and re-anchored at head-2, re-downloading the same overlap forever —
+        // exactly the EU anchor pinned 7 blocks behind for an hour.
+        assert_eq!(converges(200, 400, 2, 400).unwrap() <= 210, true);
+        // and the general property across shapes
+        for (head, their, batch) in
+            [(0u64, 50u64, 2u64), (100, 400, 2), (390, 400, 8), (0, 1000, 4)]
+        {
+            converges(head, their, batch, 4000)
+                .unwrap_or_else(|e| panic!("head {head}->{their} batch {batch}: {e}"));
+        }
+    }
+
+    #[test]
+    fn a_useful_batch_marches_past_it_never_resets() {
+        // The precise regression: learned == true while still behind must
+        // advance BEYOND the batch, not clear the cursor back to head-2.
+        let d = catchup_decision(300, 400, 2, true, false, 300, 0);
+        assert_eq!(d, CatchUp::Request { from: 301, walkback_step: WALKBACK_START,
+                                         reset_walkback: true });
+    }
+
+    #[test]
+    fn pure_overlap_also_marches() {
+        // A batch that taught nothing still means "this window is done".
+        let d = catchup_decision(300, 400, 2, false, false, 299, 0);
+        assert_eq!(d, CatchUp::Request { from: 300, walkback_step: WALKBACK_START,
+                                         reset_walkback: false });
+    }
+
+    #[test]
+    fn walkback_anchors_at_our_head_and_is_bounded() {
+        // Orphan evidence: probe below OUR head, doubling but capped, and
+        // never compounding down to 0 (the US-anchor wedge: `from=0` forever).
+        let mut step = 0u64;
+        let mut seen = vec![];
+        for _ in 0..12 {
+            match catchup_decision(400, 500, 2, false, true, 402, step) {
+                CatchUp::Request { from, walkback_step, .. } => {
+                    seen.push(from);
+                    step = walkback_step;
+                }
+                other => panic!("expected a walkback request, got {other:?}"),
+            }
+        }
+        assert!(step <= WALKBACK_MAX, "step must stay bounded, got {step}");
+        // every probe stays anchored under our own head — never collapses to 0
+        assert!(seen.iter().all(|f| *f >= 400 - WALKBACK_MAX),
+                "walkback ran away below the cap: {seen:?}");
+    }
+
+    #[test]
+    fn progress_resets_the_walkback_step() {
+        // After a useful batch the probe must start over at the small step,
+        // or a transient orphan permanently coarsens this peer's search.
+        let d = catchup_decision(300, 400, 2, true, false, 300, WALKBACK_MAX);
+        match d {
+            CatchUp::Request { reset_walkback, .. } => assert!(reset_walkback),
+            other => panic!("expected a request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn caught_up_clears_state_restoring_the_reorg_margin() {
+        assert_eq!(catchup_decision(400, 400, 2, false, false, 400, 8),
+                   CatchUp::Done);
+        assert_eq!(catchup_decision(401, 400, 0, false, false, 0, 8),
+                   CatchUp::Done);
+    }
+
+    #[test]
+    fn empty_serve_is_idle_not_a_cursor_move() {
+        assert_eq!(catchup_decision(300, 400, 0, false, false, 0, 0),
+                   CatchUp::Idle);
+    }
+
+    #[test]
+    fn decision_is_total_at_the_edges() {
+        // genesis, equal heights, and a batch top above their head must not
+        // panic or produce a request beyond the peer's chain
+        for (h, th, top) in [(0u64, 1u64, 0u64), (0, 0, 0), (5, 6, 99)] {
+            if let CatchUp::Request { from, .. } =
+                catchup_decision(h, th, 2, true, false, top, 0)
+            {
+                assert!(from <= th, "asked beyond their head: {from} > {th}");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod mempool_bounds_tests {
     use super::*;
@@ -1963,9 +2168,6 @@ impl Node {
             self.sync_walkback.remove(&peer);
             return;
         }
-        if served == 0 {
-            return;
-        }
         // "orphaned": some served block's parent is nowhere — not applied,
         // not pending, not in this batch. Its ancestors are missing, so the
         // fork point is below the request window.
@@ -1979,22 +2181,29 @@ impl Node {
         });
         let top = batch_blocks.iter().map(|sb| sb.header.height)
             .max().unwrap_or(from);
-        let next = if orphaned && !learned {
-            // Walk back from OUR head, capped: divergence deeper than the
-            // cap is beyond any state window and needs a resync anyway.
-            let hh = self.head_height();
-            let step = self.sync_walkback.entry(peer).or_insert(4);
-            let cur = hh.saturating_sub(*step);
-            *step = (*step * 2).min(64);
-            warn!(peer = %peer, from = cur,
-                  "sync batch unconnectable — walking back to find the fork point");
-            cur
-        } else {
-            // Useful or pure-overlap window: march past it.
-            if learned {
+        let decided = catchup_decision(
+            self.head_height(), their_head, served, learned, orphaned, top,
+            self.sync_walkback.get(&peer).copied().unwrap_or(0));
+        let next = match decided {
+            CatchUp::Done => {
+                self.sync_cursor.remove(&peer);
                 self.sync_walkback.remove(&peer);
+                return;
             }
-            (top + 1).min(their_head)
+            CatchUp::Idle => return,
+            CatchUp::Request { from: f, walkback_step, reset_walkback } => {
+                if reset_walkback {
+                    self.sync_walkback.remove(&peer);
+                } else {
+                    self.sync_walkback.insert(peer, walkback_step);
+                }
+                if orphaned && !learned {
+                    warn!(peer = %peer, from = f,
+                          "sync batch unconnectable — walking back to find \
+                           the fork point");
+                }
+                f
+            }
         };
         self.sync_cursor.insert(peer, next);
         // keep pulling while behind (the per-peer inflight gate throttles)

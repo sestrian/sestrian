@@ -511,3 +511,4 @@ fn frame_resists_delimiter_injection() {
     // identical inputs still frame identically (determinism)
     assert_eq!(core::frame(&[b"x", b"yz"]), core::frame(&[b"x", b"yz"]));
 }
+
