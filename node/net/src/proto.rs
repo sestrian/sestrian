@@ -226,6 +226,7 @@ pub fn account_tx_to_json(t: &AccountTx) -> Value {
         AccountTx::DataSubmit(x) => json!({"kind": "data_submit", "owner_pub": x.owner_pub,
             "data_hash": x.data_hash, "size_bytes": x.size_bytes,
             "media_type": x.media_type, "stake": x.stake, "nonce": x.nonce,
+            "da_root": x.da_root,
             "sig": hex::encode(&x.sig)}),
         AccountTx::DataChallenge(x) => json!({"kind": "data_challenge",
             "challenger_pub": x.challenger_pub, "data_id": x.data_id,
@@ -257,7 +258,13 @@ pub fn account_tx_from_json(v: &Value) -> Option<AccountTx> {
             size_bytes: v["size_bytes"].as_u64()?,
             media_type: v["media_type"].as_str()?.into(),
             stake: v["stake"].as_u64()?,
-            nonce: v["nonce"].as_u64()?, sig,
+            nonce: v["nonce"].as_u64()?,
+            // Missing on a pre-§7.2a peer: decode to "" and let the ledger's
+            // well-formedness rule reject it. Defaulting to anything acceptable
+            // here would let an old-format submission become a registry entry
+            // with no availability commitment — the exact hole this closes.
+            da_root: v["da_root"].as_str().unwrap_or("").into(),
+            sig,
         }),
         "data_challenge" => AccountTx::DataChallenge(DataChallengeTx {
             challenger_pub: v["challenger_pub"].as_str()?.into(),

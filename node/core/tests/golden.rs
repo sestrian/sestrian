@@ -318,7 +318,9 @@ fn data_tx_from(kind: &str, t: &Value) -> sestrian_core::token::AccountTx {
             size_bytes: t["size_bytes"].as_u64().unwrap(),
             media_type: t["media_type"].as_str().unwrap().into(),
             stake: t["stake"].as_u64().unwrap(),
-            nonce: t["nonce"].as_u64().unwrap(), sig,
+            nonce: t["nonce"].as_u64().unwrap(),
+            da_root: t["da_root"].as_str().unwrap_or("").into(),
+            sig,
         }),
         "challenge" => AccountTx::DataChallenge(DataChallengeTx {
             challenger_pub: t["challenger_pub"].as_str().unwrap().into(),
@@ -929,4 +931,46 @@ fn v3_fold_matches_reference() {
     assert_eq!(st.events_total, case["final_events"].as_u64().unwrap());
     assert_eq!(st.pending_growth.len(),
                case["final_pending"].as_array().unwrap().len());
+}
+
+/// §7.2a corpus availability: the chunking and the two-level Merkle
+/// construction, pinned to the Python reference. A port that chunked at a
+/// different size, ordered chunk roots differently, or hashed the manifest
+/// another way would still emit a 64-hex string — and would silently accept
+/// corpora the reference rejects, which is the failure this vector exists to
+/// catch. Spans a partial tail chunk in both directions.
+#[test]
+fn corpus_da_matches_reference() {
+    use core::corpus;
+    let v = vectors();
+    let f = &v["corpus_da"][0];
+
+    assert_eq!(f["chunk_bytes"].as_u64().unwrap(), corpus::CHUNK_BYTES as u64,
+               "CHUNK_BYTES is consensus-critical: it determines every da_root");
+    assert_eq!(f["chunk_k"].as_u64().unwrap(), corpus::CHUNK_K as u64);
+    assert_eq!(f["chunk_n"].as_u64().unwrap(), corpus::CHUNK_N as u64);
+
+    for case in f["cases"].as_array().unwrap() {
+        let n = case["size_bytes"].as_u64().unwrap() as usize;
+        // rebuild the exact body the generator used
+        let pattern = b"sestrian-corpus-vector|";
+        let mut body = Vec::with_capacity(n);
+        while body.len() < n {
+            body.extend_from_slice(pattern);
+        }
+        body.truncate(n);
+
+        let m = corpus::build(&body[..]).unwrap();
+        assert_eq!(m.data_hash, case["body_sha256"].as_str().unwrap(),
+                   "corpus sha256 diverged at size {n}");
+        assert_eq!(corpus::chunk_count(n as u64),
+                   case["expected_chunks"].as_u64().unwrap(),
+                   "chunk count diverged at size {n}");
+        let want_roots: Vec<String> = case["chunk_roots_hex"].as_array().unwrap()
+            .iter().map(|r| r.as_str().unwrap().to_string()).collect();
+        let got_roots: Vec<String> = m.chunk_roots.iter().map(hex::encode).collect();
+        assert_eq!(got_roots, want_roots, "chunk roots diverged at size {n}");
+        assert_eq!(m.da_root, case["expected_da_root"].as_str().unwrap(),
+                   "da_root diverged at size {n}");
+    }
 }

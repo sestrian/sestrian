@@ -1420,6 +1420,14 @@ impl Node {
         if let Err(e) = self.store.save_upload(&hash, &bytes) {
             return (json!({"ok": false, "error": format!("store: {e}")}), None);
         }
+        // §7.2a: this path CUSTODIES the bytes, so it can compute a real
+        // availability commitment rather than a placeholder — the node itself is
+        // the first holder that can answer a sample.
+        let manifest = match core::corpus::build(&bytes[..]) {
+            Ok(m) => m,
+            Err(e) => return (json!({"ok": false,
+                "error": format!("cannot commit corpus: {e}")}), None),
+        };
         let mut tx = DataSubmitTx {
             owner_pub: self.key.pub_hex(),
             data_hash: hash.clone(),
@@ -1427,6 +1435,7 @@ impl Node {
             media_type: media,
             stake,
             nonce: *led.nonces.get(&my_addr).unwrap_or(&0),
+            da_root: manifest.da_root.clone(),
             sig: vec![],
         };
         tx.sig = self.key.sign(&AccountTx::DataSubmit(tx.clone()).signing_bytes());
