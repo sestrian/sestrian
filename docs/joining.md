@@ -103,7 +103,7 @@ default, and a flag contradicting it is a startup error, not a silent fork.
 | network | `devnet` |
 | bootstrap peers | `/ip4/169.58.211.248/udp/9800/quic-v1` (EU) · `/ip4/13.140.32.27/udp/9800/quic-v1` (US); either alone is enough |
 | genesis id (state root) | `91bdcc281c0dbbd7b3bea3d38003e4c61565bcaa5fd8e7bfca296e6a4994ddb1` |
-| model | 107.4M-param growable MoE (~32M active/token), `--model small-moe --seed 20260824` |
+| model | 107.4M-param growable MoE (~32M active/token), defined by the genesis |
 | genesis-ledger contributor | `3432d48fd6878b4f2e7a1e40cc15e112c512fae7` |
 | block interval | 180s |
 | protocol version | 2 (training updates capped at ~8MB each) |
