@@ -612,6 +612,8 @@ pub struct Node {
     pub train_deadline: f64,
     pub t0: f64,
     pub last_proposed_round: i64,
+    /// once-per-round throttle for the proposal-eligibility log
+    pub last_produce_log_round: i64,
     /// once-per-round training dispatch (production is a separate, per-tick
     /// eligibility ladder — see the run loop)
     pub last_trained_round: i64,
@@ -2361,7 +2363,18 @@ impl Node {
                 let max_allowed =
                     (elapsed_in_round / (self.cfg.interval / 8.0)).floor()
                         .max(0.0) as u64;
-                if let Some(attempt) = self.eligible_attempt(max_allowed) {
+                // Proposal-fairness visibility. A miner that never wins looks
+                // identical to a miner that never tries; this separates them,
+                // and the v4 quorum makes proposer DIVERSITY consensus-relevant
+                // (growth needs `growth_quorum` distinct proposers per window).
+                let elig = self.eligible_attempt(max_allowed);
+                if round != self.last_produce_log_round {
+                    self.last_produce_log_round = round;
+                    info!(round, max_allowed, phase = format!("{phase:.1}"),
+                          eligible = ?elig, pool = self.delta_pool.len(),
+                          "proposal round: eligibility checked");
+                }
+                if let Some(attempt) = elig {
                     self.last_proposed_round = round;
                     if let Some((stored, block)) = self.build_candidate(attempt) {
                         let bh = stored.hash();

@@ -1027,6 +1027,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .duration_since(std::time::UNIX_EPOCH)?.as_secs_f64()
         },
         last_proposed_round: -1,
+        last_produce_log_round: -1,
         last_trained_round: -1,
         sync_cursor: Default::default(),
         net: tokio::sync::mpsc::unbounded_channel().0, // replaced inside run()
