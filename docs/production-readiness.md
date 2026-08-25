@@ -107,7 +107,7 @@ each phase.
   in-flight throttle + cursor (it used to fire a duplicate ~50MB transfer on
   every reconnect), and request-response failures / connection closes are now
   logged with their cause instead of being silently swallowed.
-- ✅ PROTOCOL v4 — the QUORUM gate (scheduled, devnet height 608): growth is
+- ✅ PROTOCOL v4 — the QUORUM gate (scheduled, devnet height 416): growth is
   gated on `growth_quorum` DISTINCT positive-scoring proposers per window
   instead of v3's window-wide score SUM, which one lying proposer could open
   (found by our own red team, `rig/redteam_gate.py`, the day after v3 shipped).

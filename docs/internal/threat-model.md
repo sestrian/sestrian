@@ -84,7 +84,7 @@ by 17 golden-vector families, including an overflow case.
 ## Known weaknesses (red-teamed, honest)
 
 - **The v3 learning gate was NOT Byzantine-robust in the force-growth
-  direction — FIXED by the v4 quorum gate (devnet height 608).** The v4 rule
+  direction — FIXED by the v4 quorum gate (devnet height 416).** The v4 rule
   counts DISTINCT positive-scoring proposers in the window and requires
   `growth_quorum` of them, so forcing growth now costs winning that many
   blocks with that many keys (priced by stake-weighted sortition) instead of

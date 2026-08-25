@@ -145,7 +145,7 @@ const DEVNET: NetworkParams = NetworkParams {
     // path v3 took at 288. Quorum 2 is this fleet's size: it defeats the
     // single-liar force-growth attack (rig/redteam_gate.py) while staying
     // reachable by the two honest miners. Raise it as miners join.
-    v4_height: 608,
+    v4_height: 416,
     growth_quorum: 2,
 };
 
