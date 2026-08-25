@@ -37,13 +37,19 @@ both hashes; nothing unverified is ever executed.
 Installing lazily rather than in a `postinstall` hook keeps `npm install` offline-
 and CI-safe, and means `npx sestrian --help` doesn't pay for a download.
 
-The genesis is verified twice over. The 181MB archive is checked against the
-manifest, and the decompressed weights are hashed again — and *that* hash is
-the chain's genesis id, so passing it means you hold the same chain as everyone
-else, not merely an intact file. Either mismatch deletes the download and
-refuses. It is streamed and decompressed on the fly (652MB never sits in
-memory), and written through a `.part` file so an interrupted download can
-never be mistaken for a complete one.
+The genesis is checked at two layers, and it is worth being exact about which
+one proves what. The CLI hashes the archive and then the decompressed weights
+against the manifest — that proves the **download is intact**, and nothing more.
+Under protocol v2 the chain's genesis id is a page-merkle root over the model's
+page table, not a flat hash of the file, so a matching file hash does not by
+itself mean you hold the right chain. **The node establishes identity**: at
+startup it recomputes the state root and refuses to run unless it matches the id
+compiled into the binary. A tampered manifest gets you a file that dies there.
+
+Either hash mismatch deletes the download and refuses. It is streamed and
+decompressed on the fly, so the weights never sit in memory whole, and written
+through a `.part` file — an interrupted download can never be mistaken for a
+complete one.
 
 Your **wallet** is created by the node on first run if you do not have one, in
 the same format the Python client reads. Set `SESTRIAN_WALLET_PASSPHRASE` to

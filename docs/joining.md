@@ -5,8 +5,9 @@ npx sestrian run
 ```
 
 That is the whole thing. It downloads a prebuilt node for your platform, creates
-your wallet, fetches the genesis weights and joins the network. Everything it
-downloads is verified against the chain's genesis id before it runs. Then:
+your wallet, fetches the genesis weights and joins the network. Every download is hash-checked before it runs, and the node
+re-derives the chain's genesis id from the weights at startup and refuses to
+start on a mismatch. Then:
 
 ```bash
 npx sestrian status     # height, peers, whether you are earning
