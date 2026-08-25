@@ -79,13 +79,14 @@ def _sparse_dense_local(payload: dict) -> np.ndarray:
 
 
 def run(a):
-    cfg = MODEL_PRESETS[a.model]
-    is_moe = isinstance(cfg, MoEGPTConfig)
-    model, device = build_preset(a.model, device=a.device)
-    # PROTOCOL v1: the chain state is in CHAIN order (backbone page, then
-    # expert pages); ChainLayout is the torch<->chain permutation. Dense
-    # presets have no layout (torch order == wire order, legacy nets only).
-    layout = ChainLayout(model) if is_moe else None
+    # The architecture comes from the CHAIN: the node names its model preset
+    # in the first state message, and the trainer builds from that. --model
+    # is an override for local/custom networks; a bare `miner_bridge` against
+    # any network just works. Construction is deferred until that message.
+    cfg = model = layout = miner = data = None
+    device = a.device
+    is_moe = False
+    comp = Compressor(keep_frac=KEEP_FRAC)
 
     def to_torch(chain_vec):
         return layout.torch_of(chain_vec) if layout is not None else chain_vec
@@ -93,12 +94,19 @@ def run(a):
     def to_chain(torch_vec):
         return layout.chain_of(torch_vec) if layout is not None else torch_vec
 
-    data = ByteData(path=a.data, block_size=cfg.block_size, device=device) \
-        if a.data else ByteData(block_size=cfg.block_size, device=device)
-    miner = DiLoCoMiner(model, data, device)
-    comp = Compressor(keep_frac=KEEP_FRAC)
-    print(f"miner bridge: {model.num_params()/1e6:.1f}M params on {device}"
-          + (f", {layout.n_pages()} pages" if layout else ""), flush=True)
+    def build_from(name, epl=None):
+        nonlocal cfg, model, layout, miner, data, device, is_moe
+        cfg = MODEL_PRESETS[name]
+        is_moe = isinstance(cfg, MoEGPTConfig)
+        model, device = build_preset(name, device=a.device,
+                                     experts_per_layer=epl)
+        layout = ChainLayout(model) if is_moe else None
+        data = ByteData(path=a.data, block_size=cfg.block_size, device=device) \
+            if a.data else ByteData(block_size=cfg.block_size, device=device)
+        miner = DiLoCoMiner(model, data, device)
+        print(f"miner bridge: {name}, {model.num_params()/1e6:.1f}M params on "
+              f"{device}" + (f", {layout.n_pages()} pages" if layout else ""),
+              flush=True)
 
     while True:                                     # reconnect loop
         try:
@@ -115,17 +123,32 @@ def run(a):
             while True:
                 msg = json.loads(_recv(sock))
                 t = msg.get("t")
+                if model is None and t != "state":
+                    continue        # nothing exists until the first state
                 if t == "state":
                     raw = _recv(sock)               # the raw i64 frame (CHAIN order)
                     state = np.frombuffer(raw, dtype="<i8").copy()
                     height = int(msg["height"])
+                    epl = msg.get("experts_per_layer")
+                    if model is None:
+                        # first contact: the node names the network's model
+                        name = a.model or msg.get("model")
+                        if not name:
+                            raise SystemExit(
+                                "node did not name its model (old node?) — "
+                                "pass --model explicitly")
+                        if a.model and msg.get("model") \
+                                and a.model != msg.get("model"):
+                            print(f"WARNING: --model {a.model} overrides the "
+                                  f"node's {msg.get('model')}", flush=True)
+                        build_from(name, epl=list(epl) if epl else None)
                     # v1: the node tells us the model shape; rebuild if the
                     # chain grew while we were away (ragged expert counts)
-                    epl = msg.get("experts_per_layer")
                     rebuild = (layout is not None and epl is not None
                                and list(epl) != model.experts_per_layer)
                     if rebuild:
-                        model, _ = build_preset(a.model, device=device,
+                        model, _ = build_preset(a.model or msg.get("model"),
+                                                device=device,
                                                 experts_per_layer=list(epl))
                         miner.model = model
                         layout = ChainLayout(model)
@@ -436,7 +459,8 @@ def run(a):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--node-port", type=int, default=7999)
-    ap.add_argument("--model", default="toy", choices=list(MODEL_PRESETS))
+    ap.add_argument("--model", default=None, choices=list(MODEL_PRESETS),
+                help="override the model the node names (local nets)")
     ap.add_argument("--data", default=None)
     ap.add_argument("--inner", type=int, default=10)
     ap.add_argument("--batch", type=int, default=16)

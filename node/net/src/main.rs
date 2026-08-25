@@ -983,6 +983,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         seen_order: Default::default(),
         cfg: node::NodeConfig {
             produce: args.produce,
+            model_name: net.genesis_model.to_string(),
             interval: args.interval,
             seconds: args.seconds,
             peers: args.peers.clone(),

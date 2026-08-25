@@ -23,7 +23,7 @@ use tracing::{info, warn};
 pub enum ToBridge {
     /// v1: `experts_per_layer` lets the trainer build the exact (possibly
     /// grown, ragged) architecture before loading the chain-order state.
-    State { height: u64, state: Vec<i64>, experts_per_layer: Vec<u64> },
+    State { height: u64, state: Vec<i64>, experts_per_layer: Vec<u64>, model: String },
     /// `budget_s`: how long the trainer may spend before its delta goes stale
     /// (derived from the node's block interval) — the trainer auto-fits its
     /// inner steps to it, so a slow GPU still lands includable deltas.
@@ -158,10 +158,11 @@ async fn serve_one(
             cmd = cmds.recv() => {
                 let Some(cmd) = cmd else { break Ok(()) };
                 let r = match cmd {
-                    ToBridge::State { height, state, experts_per_layer } => {
+                    ToBridge::State { height, state, experts_per_layer, model } => {
                         let head = json!({"t": "state", "height": height,
                                           "n": state.len(),
                                           "experts_per_layer": experts_per_layer,
+                                          "model": model,
                                           "bin_next": true});
                         match write_frame(&mut wr, head.to_string().as_bytes()).await {
                             Ok(()) => write_frame(&mut wr,

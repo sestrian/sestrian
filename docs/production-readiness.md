@@ -107,6 +107,14 @@ each phase.
   in-flight throttle + cursor (it used to fire a duplicate ~50MB transfer on
   every reconnect), and request-response failures / connection closes are now
   logged with their cause instead of being silently swallowed.
+- ✅ Serve memory bound: at most 2 outstanding big responses per peer
+  (decremented on delivery or failure; over the cap a request gets an empty
+  response the catch-up loop treats as a no-op). Closes the US-anchor OOM
+  (~250 stalled ~31MB responses pinned while solo-serving a join).
+- ✅ Trainer architecture from the chain: the node names its model preset in
+  the bridge state message; miner_bridge builds from it and --model becomes
+  a local-net override (the old default silently built the wrong toy model
+  against devnet).
 - ✅ SNAPSHOT LAG (the durable close-out of the restart-wedge): checkpoints
   are now written at the head's PARENT, so a live proposal tie at the head
   can never sit on fast-boot's state floor. Second live occurrence (US
