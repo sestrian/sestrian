@@ -92,7 +92,31 @@ elif [ "$same_h_diff_head" = "1" ]; then
         ok "a head tie resolved within a block — fork choice working"
     fi
 elif [ "$spread" -gt 2 ]; then
-    warn "a node is BEHIND (heights $min..$max) — catching up, not forked"
+    # BEHIND-AND-CATCHING-UP is fine; BEHIND-AND-NOT-MOVING is a stuck node,
+    # and only the second needs a human. Distinguishing them needs memory, so
+    # compare against the previous run: the EU anchor sat 58 blocks behind for
+    # HOURS overnight and every check politely called it "catching up".
+    STATE=${FLEET_STATE:-$HOME/.sestrian/health/last-heights}
+    mkdir -p "$(dirname "$STATE")"
+    prev=$(cat "$STATE" 2>/dev/null)
+    cur=$(printf '%s ' "${heights[@]}")
+    echo "$cur" > "$STATE"
+    stuck=""
+    i=0
+    for h in "${heights[@]}"; do
+        p_h=$(echo "$prev" | awk -v n=$((i+1)) '{print $n}')
+        # behind the leader by a lot AND unchanged since the previous sample
+        if [ "$h" -ge 0 ] 2>/dev/null && [ -n "$p_h" ] \
+           && [ "$h" = "$p_h" ] && [ $((max - h)) -gt 5 ]; then
+            stuck="$stuck ${NODES[$i]}@$h"
+        fi
+        i=$((i+1))
+    done
+    if [ -n "$stuck" ]; then
+        bad "STUCK NODE(S):$stuck — behind by >5 and unchanged since the last check"
+    else
+        warn "a node is BEHIND (heights $min..$max) — catching up, not forked"
+    fi
 else warn "heads differ but heights within $spread — propagation in flight"; fi
 
 # ---- 2. liveness ----------------------------------------------------------
