@@ -74,7 +74,17 @@ fn dtx_inline_max() -> usize {
 const SHARD_SERVE_BUDGET: usize = 12 * 1024 * 1024;
 /// How long an announced-but-unfetched delta stays wanted before giving up.
 const WANT_DELTA_TTL: f64 = 600.0;
-const SYNC_INFLIGHT_TIMEOUT: f64 = 30.0;
+// Must EXCEED the time a sync response actually takes on the wire, or the node
+// out-races its own request: at 30s against ~31MB batches over WAN, every
+// request timed out, a fresh one went out, and the original response then
+// arrived with a stale id (current=false) — which makes handle_sync_batch
+// return before touching the catch-up state machine, so the cursor never
+// advances and the node re-requests the SAME window forever. That stranded the
+// EU anchor 57 blocks behind overnight while it held 3 healthy peers. The
+// request_response layer already times out at 300s and reports OutboundFailure,
+// which clears the gate, so a genuinely dead peer is still noticed promptly;
+// this only has to be long enough that a SLOW peer is not mistaken for one.
+const SYNC_INFLIGHT_TIMEOUT: f64 = 180.0;
 
 /// Coordinates per aggregation chunk — the memory/latency knob (K deltas ×
 /// this many i64 at once, ~8MB for the default, vs K × the whole 86M state).
