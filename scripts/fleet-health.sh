@@ -27,10 +27,19 @@ warn() { note "WARN" "$1"; }
 echo "== fleet health =="
 
 # ---- 1. reachability + lockstep -------------------------------------------
+# A node serving a resync is SLOW, not DOWN. One timed-out request used to be
+# reported as an outage — twice today, while every node was in fact healthy and
+# merely busy feeding a resyncing peer. Try twice, patiently, before condemning.
+ask() {
+    local out
+    out=$(curl -s -m 25 "$1/status" 2>/dev/null)
+    [ -z "$out" ] && sleep 3 && out=$(curl -s -m 25 "$1/status" 2>/dev/null)
+    printf '%s' "$out"
+}
 heights=(); heads=(); reach=0
 for n in "${NODES[@]}"; do
-    s=$(curl -s -m 10 "$n/status" 2>/dev/null)
-    if [ -z "$s" ]; then bad "$n unreachable"; heights+=(-1); heads+=("?"); continue; fi
+    s=$(ask "$n")
+    if [ -z "$s" ]; then bad "$n unreachable (two attempts, 25s each)"; heights+=(-1); heads+=("?"); continue; fi
     reach=$((reach+1))
     h=$(echo "$s" | python3 -c "import json,sys;print(json.load(sys.stdin).get('height',-1))" 2>/dev/null)
     hd=$(echo "$s" | python3 -c "import json,sys;print((json.load(sys.stdin).get('head') or '')[:12])" 2>/dev/null)
