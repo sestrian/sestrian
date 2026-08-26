@@ -155,6 +155,10 @@ def run(a):
             step_secs = 0.0                         # measured per-inner-step cost
             # Sampling RNG for chat, isolated from the global stream so serving
             # a request mid-round cannot perturb a training round's batches.
+            # torch is imported lazily throughout this module (it is a heavy
+            # optional dependency), and a later `import torch` inside run()
+            # makes the name function-local — so bind it here before use.
+            import torch
             chat_gen = torch.Generator()
             chat_gen.manual_seed(_secrets.randbits(63))
             deferred = deque()                      # messages read mid-round
