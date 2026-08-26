@@ -107,7 +107,7 @@ default, and a flag contradicting it is a startup error, not a silent fork.
 | genesis-ledger contributor | `3432d48fd6878b4f2e7a1e40cc15e112c512fae7` |
 | block interval | 180s |
 | protocol version | 2 (training updates capped at ~8MB each) |
-| public API | http://169.58.211.248:8080/status |
+| public API | http://169.58.211.248:8080/status (EU) · http://13.140.32.27:8080/status (US) — compare both; an anchor that is resyncing answers correctly but reports a lower height |
 
 Running your own chain instead: `--network local`, and supply everything yourself.
 
@@ -119,7 +119,7 @@ curl -s localhost:8090/status
 
 | field | what you want |
 |---|---|
-| `height` | climbing, and matching the [public API](http://169.58.211.248:8080/status) |
+| `height` | climbing, and matching the [public API](http://169.58.211.248:8080/status) or [the US anchor](http://13.140.32.27:8080/status) — whichever is HIGHER is the chain |
 | `peers` | at least 1 |
 | `model_attached` | `true` if you're mining |
 | **`stale_deltas`** | **0** |
