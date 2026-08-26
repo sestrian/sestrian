@@ -184,12 +184,24 @@ class MoEGPT(nn.Module):
         return logits, loss
 
     @torch.no_grad()
-    def generate(self, idx, n_new, temperature=1.0):
+    def generate(self, idx, n_new, temperature=1.0, generator=None):
+        """Sample `n_new` bytes. `generator` isolates sampling from the global
+        RNG.
+
+        That isolation is consensus-relevant, not cosmetic. A miner's delta must
+        be reproducible: a validator re-runs the same seeded training step and
+        compares. inner_train already draws its batches from its own Generator,
+        so training is safe today — but the moment generation interleaves with
+        training (serving chat between inner steps), sampling from the global
+        stream would couple the two, and a delta that no validator can reproduce
+        is a slashable one. Pass a generator whenever both run in one process.
+        """
         for _ in range(n_new):
             idx_c = idx[:, -self.cfg.block_size:]
             logits, _ = self(idx_c)
             probs = F.softmax(logits[:, -1, :] / temperature, dim=-1)
-            idx = torch.cat([idx, torch.multinomial(probs, 1)], dim=1)
+            nxt = torch.multinomial(probs, 1, generator=generator)
+            idx = torch.cat([idx, nxt], dim=1)
         return idx
 
     def add_expert(self, layer: int, page_f64: np.ndarray | None = None) -> int:

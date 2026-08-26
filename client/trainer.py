@@ -51,9 +51,20 @@ class DiLoCoMiner:
         """Adopt the chain's current weights (int64) into the local model."""
         set_flat_params(self.model, dequantize(base_int))
 
-    def inner_train(self, steps: int, batch_size: int = 32, seed: int = 0, shard=None):
+    def inner_train(self, steps: int, batch_size: int = 32, seed: int = 0, shard=None,
+                    between_steps=None):
         """Run H local steps on the (beacon-)assigned data shard; return the
-        quantised pseudo-gradient delta (int64)."""
+        quantised pseudo-gradient delta (int64).
+
+        `between_steps`, if given, is called after each optimizer step. It exists
+        so a bridge can answer a chat request without waiting out a whole round:
+        a round is ~24 steps of ~2s, so the worst-case wait drops from the full
+        round to a single step. It is called at the ONE point where the model is
+        in a clean state — gradients applied, nothing half-written — which is
+        why this is a callback rather than a thread. Concurrency here would read
+        torn weights and flip the module out of train mode mid-round, and a
+        delta computed that way is one no validator can reproduce.
+        """
         base = flat_params(self.model)
         opt = torch.optim.AdamW(self.model.parameters(), lr=self.inner_lr)
         gen = torch.Generator().manual_seed(seed)
@@ -63,6 +74,8 @@ class DiLoCoMiner:
             _, loss = self.model(x, y)
             opt.zero_grad(); loss.backward(); opt.step()
             last = loss.item()
+            if between_steps is not None:
+                between_steps()
         delta = flat_params(self.model) - base
         return quantize(delta), last
 

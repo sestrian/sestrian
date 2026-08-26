@@ -17,7 +17,10 @@ import argparse
 import base64
 import json
 import socket
+import secrets as _secrets
+import select
 import struct
+from collections import deque
 import time
 
 import numpy as np
@@ -78,6 +81,36 @@ def _sparse_dense_local(payload: dict) -> np.ndarray:
     return decompress(payload)
 
 
+
+def _serve_generate(sock, msg, model, device, height, state, gen):
+    """Answer one chat request. Shared by the main loop and the mid-round poll
+    so both paths cannot drift apart.
+
+    `gen` is a dedicated torch.Generator: sampling must never draw from the
+    global RNG, because this can now run BETWEEN training steps and a training
+    round has to stay reproducible for a validator.
+    """
+    import torch
+    if state is None:
+        _send(sock, {"t": "generated", "height": -1,
+                     "text": "(model not yet synced)"})
+        return
+    raw = str(msg.get("prompt", " ")).encode("utf-8")
+    raw = raw[-(model.cfg.block_size - 1):] or b" "
+    n_new = min(int(msg.get("n", 120)), 240)
+    idx = torch.tensor([list(raw)], dtype=torch.long, device=device)
+    was_training = model.training
+    model.eval()
+    with torch.no_grad():
+        out = model.generate(idx, n_new, temperature=0.85, generator=gen)
+    # Restore whatever mode we interrupted. Hard-coding train() here would be a
+    # bug on a --serve-only bridge, which is never in train mode.
+    model.train(was_training)
+    text = bytes(out[0].tolist()[len(raw):]).decode("utf-8", errors="replace")
+    _send(sock, {"t": "generated", "height": height, "text": text})
+    print(f"h{height}: generated {n_new} bytes", flush=True)
+
+
 def run(a):
     # The architecture comes from the CHAIN: the node names its model preset
     # in the first state message, and the trainer builds from that. --model
@@ -120,8 +153,13 @@ def run(a):
             state = None                            # int64 chain state (our copy)
             height = -1
             step_secs = 0.0                         # measured per-inner-step cost
+            # Sampling RNG for chat, isolated from the global stream so serving
+            # a request mid-round cannot perturb a training round's batches.
+            chat_gen = torch.Generator()
+            chat_gen.manual_seed(_secrets.randbits(63))
+            deferred = deque()                      # messages read mid-round
             while True:
-                msg = json.loads(_recv(sock))
+                msg = json.loads(_recv(sock)) if not deferred else deferred.popleft()
                 t = msg.get("t")
                 if model is None and t != "state":
                     continue        # nothing exists until the first state
@@ -214,8 +252,37 @@ def run(a):
                                   f"fit {budget:.0f}s budget "
                                   f"({step_secs*1000:.0f}ms/step)", flush=True)
                     t_start = time.time()
+
+                    # Answer chat BETWEEN inner steps instead of after the whole
+                    # round. A round is ~24 steps of ~2s, so a request that
+                    # arrives mid-round waited up to ~45s; now it waits one step.
+                    #
+                    # Reading the socket here is only safe for `generate`, which
+                    # is a single self-contained frame. Anything else — `state`
+                    # in particular — is followed by a second binary frame, so
+                    # consuming it here would leave that payload in the stream
+                    # and the next JSON read would land on raw bytes. So: defer
+                    # the message untouched and STOP polling for the rest of the
+                    # round, letting the main loop take it in order.
+                    poll = {"on": True}
+
+                    def _between():
+                        if not poll["on"]:
+                            return
+                        r, _, _ = select.select([sock], [], [], 0)
+                        if not r:
+                            return
+                        m = json.loads(_recv(sock))
+                        if m.get("t") == "generate":
+                            _serve_generate(sock, m, model, device, height,
+                                            state, chat_gen)
+                        else:
+                            deferred.append(m)
+                            poll["on"] = False
+
                     delta_int, loss = miner.inner_train(
-                        steps, a.batch, seed=int(msg.get("seed", 0)))
+                        steps, a.batch, seed=int(msg.get("seed", 0)),
+                        between_steps=_between)
                     elapsed = time.time() - t_start
                     # EMA of per-step cost (first measurement seeds it outright)
                     obs = elapsed / max(1, steps)
@@ -430,25 +497,7 @@ def run(a):
                 elif t == "generate":
                     # serve chat from the chain-synced model (works on any
                     # bridge; a --produce-less node makes this a pure server)
-                    import torch
-                    if state is None:
-                        _send(sock, {"t": "generated", "height": -1,
-                                     "text": "(model not yet synced)"})
-                        continue
-                    raw = str(msg.get("prompt", " ")).encode("utf-8")
-                    raw = raw[-(model.cfg.block_size - 1):] or b" "
-                    n_new = min(int(msg.get("n", 120)), 240)
-                    idx = torch.tensor([list(raw)], dtype=torch.long,
-                                       device=device)
-                    model.eval()
-                    with torch.no_grad():
-                        out = model.generate(idx, n_new, temperature=0.85)
-                    model.train()
-                    text = bytes(out[0].tolist()[len(raw):]).decode(
-                        "utf-8", errors="replace")
-                    _send(sock, {"t": "generated", "height": height,
-                                 "text": text})
-                    print(f"h{height}: generated {n_new} bytes", flush=True)
+                    _serve_generate(sock, msg, model, device, height, state, chat_gen)
         except (ConnectionError, OSError) as e:
             print(f"bridge disconnected ({e}); retrying…", flush=True)
             time.sleep(2)
