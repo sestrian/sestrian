@@ -82,13 +82,18 @@ def _sparse_dense_local(payload: dict) -> np.ndarray:
 
 
 
-def _serve_generate(sock, msg, model, device, height, state, gen):
+def _serve_generate(sock, msg, model, device, height, state):
     """Answer one chat request. Shared by the main loop and the mid-round poll
     so both paths cannot drift apart.
 
-    `gen` is a dedicated torch.Generator: sampling must never draw from the
-    global RNG, because this can now run BETWEEN training steps and a training
-    round has to stay reproducible for a validator.
+    Sampling draws from a dedicated Generator, never the global RNG, because
+    this can run BETWEEN training steps and a training round has to stay
+    reproducible for a validator.
+
+    The generator is built here, on the tensors' own device. torch.multinomial
+    rejects a CPU generator against CUDA tensors outright, and `device` is not
+    even known until the first state arrives — so deriving it from the input is
+    both correct and the only thing that works on a GPU miner.
     """
     import torch
     if state is None:
@@ -99,6 +104,8 @@ def _serve_generate(sock, msg, model, device, height, state, gen):
     raw = raw[-(model.cfg.block_size - 1):] or b" "
     n_new = min(int(msg.get("n", 120)), 240)
     idx = torch.tensor([list(raw)], dtype=torch.long, device=device)
+    gen = torch.Generator(device=idx.device)
+    gen.manual_seed(_secrets.randbits(63))
     was_training = model.training
     model.eval()
     with torch.no_grad():
@@ -153,14 +160,6 @@ def run(a):
             state = None                            # int64 chain state (our copy)
             height = -1
             step_secs = 0.0                         # measured per-inner-step cost
-            # Sampling RNG for chat, isolated from the global stream so serving
-            # a request mid-round cannot perturb a training round's batches.
-            # torch is imported lazily throughout this module (it is a heavy
-            # optional dependency), and a later `import torch` inside run()
-            # makes the name function-local — so bind it here before use.
-            import torch
-            chat_gen = torch.Generator()
-            chat_gen.manual_seed(_secrets.randbits(63))
             deferred = deque()                      # messages read mid-round
             while True:
                 msg = json.loads(_recv(sock)) if not deferred else deferred.popleft()
@@ -278,8 +277,7 @@ def run(a):
                             return
                         m = json.loads(_recv(sock))
                         if m.get("t") == "generate":
-                            _serve_generate(sock, m, model, device, height,
-                                            state, chat_gen)
+                            _serve_generate(sock, m, model, device, height, state)
                         else:
                             deferred.append(m)
                             poll["on"] = False
@@ -501,7 +499,7 @@ def run(a):
                 elif t == "generate":
                     # serve chat from the chain-synced model (works on any
                     # bridge; a --produce-less node makes this a pure server)
-                    _serve_generate(sock, msg, model, device, height, state, chat_gen)
+                    _serve_generate(sock, msg, model, device, height, state)
         except (ConnectionError, OSError) as e:
             print(f"bridge disconnected ({e}); retrying…", flush=True)
             time.sleep(2)
