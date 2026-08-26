@@ -126,6 +126,25 @@ each phase.
   impossible. Over-cap requests now get an explicit `busy: true` reply instead
   of an empty body list: BUSY is not ABSENT, and conflating them is exactly
   what stopped delta bodies flowing and left a routine head tie unhealable.
+- ✅ SYNC IN-FLIGHT TIMEOUT must outlast a real transfer (found overnight, EU
+  anchor). It was 30s while sync responses carry ~31MB — longer than 30s over
+  WAN — so a node out-raced its own request: the gate expired, a new request
+  went out, and the original response arrived with a stale id. handle_sync_batch
+  returns on `!current` BEFORE the catch-up state machine, so the cursor never
+  advanced and the node re-requested the same window indefinitely. Raised to
+  180s; request_response still times out at 300s and reports OutboundFailure,
+  which clears the gate, so a dead peer is noticed promptly. Verified: responses
+  went from current=false to current=true after deploy. NOTE the `!current`
+  early-return remains a latent fragility (a stale response still wastes a
+  round) — deliberately left alone while responses are current, rather than
+  changed on speculation for the second time.
+- ☐ ANCHOR `--prune-depth 2` IS A RESILIENCE FLOOR, not just a memory knob. Two
+  blocks of state means an anchor that ever falls behind on a different branch
+  can NEVER self-heal — every such event becomes an operator resync (three
+  times on 2026-08-25/26). The heal machinery handles forks WITHIN the window;
+  beyond it the fork-point state is gone. Raising prune_depth on the always-on
+  anchors would buy real resilience for memory; the number is an operator
+  decision, not a consensus one.
 - ✅ ISOLATION GATE + additive `--peers`. `--peers` used to REPLACE the baked-in
   bootstrap (the adjacent comment claimed otherwise), so giving the mac miner a
   single LAN peer silently dropped both anchors; that address turned out to be
