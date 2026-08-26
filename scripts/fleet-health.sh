@@ -49,84 +49,41 @@ for n in "${NODES[@]}"; do
 done
 [ "$reach" -lt 2 ] && bad "fewer than 2 nodes reachable — cannot judge consensus"
 
-# heads agree, or heights close enough to be mid-propagation
-uniq_heads=$(printf '%s\n' "${heads[@]}" | grep -v '^?$' | sort -u | wc -l | tr -d ' ')
-max=-1; min=999999999
-for h in "${heights[@]}"; do
-    [ "$h" -lt 0 ] 2>/dev/null && continue
-    [ "$h" -gt "$max" ] && max=$h
-    [ "$h" -lt "$min" ] && min=$h
-done
-spread=$((max-min))
-# A FORK and a LAG look alike if you only compare heads. They are different
-# conditions with different responses: a fork needs operator action, a node
-# catching up needs patience. Distinguish them by height — nodes at (nearly)
-# the same height with different heads are forked; a node far behind is simply
-# behind. Getting this wrong makes the check cry wolf during every resync,
-# which is how a health check stops being read.
-same_h_diff_head=0
-for i in "${!heights[@]}"; do
-    for j in "${!heights[@]}"; do
-        [ "$i" -ge "$j" ] && continue
-        hi=${heights[$i]}; hj=${heights[$j]}
-        [ "$hi" -lt 0 ] 2>/dev/null && continue
-        [ "$hj" -lt 0 ] 2>/dev/null && continue
-        d=$((hi-hj)); d=${d#-}
-        if [ "$d" -le 2 ] && [ "${heads[$i]}" != "${heads[$j]}" ]; then same_h_diff_head=1; fi
-    done
-done
-if [ "$uniq_heads" -eq 1 ]; then ok "all reachable nodes on one head ($max)"
-elif [ "$same_h_diff_head" = "1" ]; then
-    # A TIE is not a FORK. With more than one miner proposing, two blocks at
-    # the same height are normal and fork choice resolves them within a block
-    # or two — flagging every tie would make this check useless exactly when
-    # the network is healthiest. Only a disagreement that SURVIVES a block is
-    # a fork, so confirm before crying wolf.
-    sleep "${TIE_CONFIRM_WAIT:-420}"
-    still=0
-    for i in "${!NODES[@]}"; do
-        for j in "${!NODES[@]}"; do
-            [ "$i" -ge "$j" ] && continue
-            a=$(curl -s -m 10 "${NODES[$i]}/status" 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);print(str(d.get('height'))+':'+(d.get('head') or '')[:12])" 2>/dev/null)
-            b=$(curl -s -m 10 "${NODES[$j]}/status" 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);print(str(d.get('height'))+':'+(d.get('head') or '')[:12])" 2>/dev/null)
-            [ -z "$a" ] || [ -z "$b" ] && continue
-            ha=${a%%:*}; hb=${b%%:*}
-            d=$((ha-hb)); d=${d#-}
-            if [ "$d" -le 2 ] && [ "${a##*:}" != "${b##*:}" ]; then still=1; fi
-        done
-    done
-    if [ "$still" = "1" ]; then
-        bad "FORK: nodes at the same height still disagree after a block (heights $min..$max)"
-    else
-        ok "a head tie resolved within a block — fork choice working"
-    fi
-elif [ "$spread" -gt 2 ]; then
-    # BEHIND-AND-CATCHING-UP is fine; BEHIND-AND-NOT-MOVING is a stuck node,
-    # and only the second needs a human. Distinguishing them needs memory, so
-    # compare against the previous run: the EU anchor sat 58 blocks behind for
-    # HOURS overnight and every check politely called it "catching up".
-    STATE=${FLEET_STATE:-$HOME/.sestrian/health/last-heights}
-    mkdir -p "$(dirname "$STATE")"
-    prev=$(cat "$STATE" 2>/dev/null)
-    cur=$(printf '%s ' "${heights[@]}")
-    echo "$cur" > "$STATE"
-    stuck=""
-    i=0
-    for h in "${heights[@]}"; do
-        p_h=$(echo "$prev" | awk -v n=$((i+1)) '{print $n}')
-        # behind the leader by a lot AND unchanged since the previous sample
-        if [ "$h" -ge 0 ] 2>/dev/null && [ -n "$p_h" ] \
-           && [ "$h" = "$p_h" ] && [ $((max - h)) -gt 5 ]; then
-            stuck="$stuck ${NODES[$i]}@$h"
-        fi
-        i=$((i+1))
-    done
-    if [ -n "$stuck" ]; then
-        bad "STUCK NODE(S):$stuck — behind by >5 and unchanged since the last check"
-    else
-        warn "a node is BEHIND (heights $min..$max) — catching up, not forked"
-    fi
-else warn "heads differ but heights within $spread — propagation in flight"; fi
+# CONSENSUS is judged on SETTLED HISTORY at a COMMON height, never on tips.
+# Tips legitimately differ every block when more than one miner proposes, so
+# tip comparison reported a fork on a healthy fleet repeatedly — including a
+# "still disagree after a block" confirmation that was simply observing a NEW
+# tie. Comparing one agreed height is the same discipline devnet.sh uses.
+verdict=$(python3 - "${NODES[@]}" <<'PY' 2>/dev/null
+import json, sys, urllib.request
+maps, tips = {}, {}
+for u in sys.argv[1:]:
+    try:
+        d = json.load(urllib.request.urlopen(u + "/chain", timeout=25))
+        rows = d if isinstance(d, list) else d.get("blocks", [])
+        m = {b["height"]: (b.get("hash") or "")[:12] for b in rows}
+        if m:
+            maps[u], tips[u] = m, max(m)
+    except Exception:
+        pass
+if len(maps) < 2:
+    print(f"UNKNOWN only {len(maps)} node(s) served a chain")
+else:
+    h = min(tips.values()) - 3
+    at = {u: maps[u].get(h) for u in maps}
+    if any(v is None for v in at.values()):
+        print(f"UNKNOWN height {h} outside some node's served window (tips {list(tips.values())})")
+    elif len({v for v in at.values()}) == 1:
+        print(f"AGREE at h{h} across {len(at)} nodes (tips {list(tips.values())})")
+    else:
+        print(f"DISAGREE at h{h}: {at}")
+PY
+)
+case "$verdict" in
+    AGREE*)    ok "$verdict" ;;
+    DISAGREE*) bad "FORK — $verdict" ;;
+    *)         warn "${verdict:-could not compare chains}" ;;
+esac
 
 # ---- 2. liveness ----------------------------------------------------------
 # Reference node = the reachable node at the GREATEST height. Taking the first
