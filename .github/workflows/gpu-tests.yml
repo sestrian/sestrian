@@ -66,9 +66,16 @@ jobs:
       # "1 skipped" is exactly the false green this job exists to prevent.
       - name: assert the CUDA test executed, not skipped
         run: |
-          out=$(/home/ghrunner/ci-venv/bin/python -m pytest tests/test_miner_bridge_loop.py -k cuda -q 2>&1)
+          # -v, not -q: this pytest prints no summary line under -q at all, so
+          # grepping for "1 passed" there matched nothing and failed a green run.
+          out=$(/home/ghrunner/ci-venv/bin/python -m pytest \
+                  tests/test_miner_bridge_loop.py -k cuda -v 2>&1)
           echo "$out"
+          echo "$out" | grep -qi "skipped" && {
+            echo "::error::the CUDA test SKIPPED — no GPU was visible, and a skipped test proves nothing"
+            exit 1
+          }
           echo "$out" | grep -q "1 passed" || {
-            echo "::error::the CUDA test did not run — it skipped, and a skipped test proves nothing"
+            echo "::error::the CUDA test did not report a pass"
             exit 1
           }
