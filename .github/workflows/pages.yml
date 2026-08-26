@@ -54,6 +54,19 @@ jobs:
       - name: snapshot the chain for the live panel
         run: python3 scripts/chain_snapshot.py site/chain.json
 
+      # CACHE BUST. chain.js is served with max-age=600, so a fix to the live
+      # panel could sit invisible in browsers for ten minutes after deploy —
+      # which is exactly how a corrected panel still showed a stale height and
+      # looked broken. Rewrite every reference to chain.js with a hash of its
+      # CONTENT, so a changed file is a new URL and an unchanged file keeps its
+      # cache. Done at deploy time; nothing to remember on the next edit.
+      - name: cache-bust chain.js by content hash
+        run: |
+          H=$(md5sum site/chain.js | cut -c1-10)
+          sed -i "s|src=\"chain\.js\(?v=[0-9a-f]*\)\?\"|src=\"chain.js?v=$H\"|g" site/*.html
+          echo "chain.js -> ?v=$H"
+          grep -ho 'chain\.js?v=[0-9a-f]*' site/*.html | sort -u
+
       # Built here, not committed: a hand-maintained sitemap rots, its dates
       # drift from the content, and crawlers learn to distrust lastmod. Derived
       # from the last commit that actually touched each page, and discovered
