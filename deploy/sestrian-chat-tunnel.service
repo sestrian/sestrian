@@ -1,0 +1,41 @@
+# Reverse tunnel exposing a GPU miner's chat API to a public anchor.
+#
+# Chat needs a node with the model attached. The anchors are CPU-only (~18s for
+# 120 tokens) and were running the inference bridge at 79% memory on a box whose
+# real job is being a bootstrap peer. A GPU miner already holds the model — its
+# training bridge answers generate requests with no extra memory — but it sits
+# behind NAT, so it cannot be dialled from outside.
+#
+# So the GPU box dials OUT and offers its API back. Installed on the GPU miner:
+#   /etc/systemd/system/sestrian-chat-tunnel.service
+#
+# Not a Cloudflare tunnel on purpose. Caddy on the anchor already terminates TLS
+# and injects the operator token; routing through Cloudflare would add two WAN
+# hops and a third party to the slowest request we serve, and a tunnel cannot
+# attach the token, which is the thing keeping it out of the browser.
+[Unit]
+Description=Reverse tunnel exposing this GPU node's chat API to the anchor
+After=network-online.target sestrian-node.service
+Wants=network-online.target
+
+[Service]
+User=chris
+# Reverse forward only: anchor:127.0.0.1:8091 -> this box:8090. Bound to the
+# anchor's LOOPBACK, so the GPU node is never exposed to the internet — only
+# Caddy on that box can dial it, and Caddy is what holds the operator token.
+#
+# ExitOnForwardFailure matters: without it a failed forward leaves an SSH
+# session that looks healthy while carrying no traffic, and systemd would never
+# restart it.
+ExecStart=/usr/bin/ssh -NT \
+    -o ExitOnForwardFailure=yes \
+    -o ServerAliveInterval=20 -o ServerAliveCountMax=3 \
+    -o StrictHostKeyChecking=accept-new \
+    -o IdentitiesOnly=yes -i /home/chris/.ssh/sestrian_tunnel \
+    -R 127.0.0.1:8091:127.0.0.1:8090 \
+    sestunnel@169.58.211.248
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

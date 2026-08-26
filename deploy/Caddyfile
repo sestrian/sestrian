@@ -65,7 +65,23 @@
 		}
 
 		header Access-Control-Allow-Origin "*"
-		reverse_proxy localhost:8080 {
+
+		# Upstreams in preference order, from /etc/caddy/anchor.env:
+		#   anchor1: "127.0.0.1:8091 127.0.0.1:8080"
+		#            8091 is a reverse tunnel to a GPU miner (~1.5s / 120 tokens);
+		#            8080 is this box's own CPU bridge (~18s) as the fallback.
+		#   anchor2: "127.0.0.1:8080"
+		#
+		# `first` means the GPU answers whenever it is up, and chat degrades to
+		# slow-but-working when the home box is not — rather than going dark.
+		reverse_proxy {$SESTRIAN_CHAT_UPSTREAMS} {
+			lb_policy first
+			# Passive only. An active probe against a generation endpoint would
+			# either cost a real generation or need a route that lies about
+			# health; a failed dial is the honest signal here.
+			fail_duration 30s
+			max_fails 2
+			lb_try_duration 10s
 			header_up Authorization "Bearer {$SESTRIAN_API_TOKEN}"
 			# A CPU generation is ~18s for 120 tokens on this box, and the node
 			# serialises them. Give it room rather than cutting off an answer the
