@@ -111,7 +111,6 @@
 
     function goLive() {
       var misses = 0;      // consecutive failures, counted across all anchors
-      var idx = 0;         // which anchor to try next
       (function poll() {
         var failed = false;
         // Ask EVERY anchor and show the one at the GREATEST height. Rotating
