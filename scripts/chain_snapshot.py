@@ -72,15 +72,30 @@ def main():
     out = sys.argv[1] if len(sys.argv) > 1 else "site/chain.json"
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    # Ask EVERY seed and publish the one at the GREATEST height, rather than
+    # the first that answers. An anchor that is resyncing or lagging answers
+    # perfectly well — it is simply behind — so first-reachable published a
+    # node replaying history at h236 while the chain was at h610, and the
+    # public site showed the world a network that looked stalled. The site
+    # must never be a window onto the slowest node.
     global SEED
     raw = None
-    for SEED in SEEDS:
+    best_h = -1
+    for cand in SEEDS:
+        SEED = cand
         try:
-            raw = get("/status")
-            break
+            r = get("/status")
         except (urllib.error.URLError, OSError, ValueError,
                 json.JSONDecodeError) as e:
-            print(f"{SEED} unreachable ({e}) — trying next", file=sys.stderr)
+            print(f"{cand} unreachable ({e}) — trying next", file=sys.stderr)
+            continue
+        h = int(r.get("height", -1) or -1)
+        print(f"{cand} at height {h}", file=sys.stderr)
+        if h > best_h:
+            best_h, raw, best_seed = h, r, cand
+    if raw is not None:
+        SEED = best_seed
+        print(f"publishing {SEED} (height {best_h})", file=sys.stderr)
     if raw is None:
         print("no anchor reachable — writing ok:false", file=sys.stderr)
         payload = {"ok": False, "captured_at": now, "seed": SEEDS[-1]}
