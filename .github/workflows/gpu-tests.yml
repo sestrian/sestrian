@@ -1,0 +1,74 @@
+name: gpu-tests
+
+# The CUDA-guarded tests, on hardware that actually has a card.
+#
+# Two outages reached production through this gap: `torch` used before its
+# function-local import, and a chat generator built on the wrong device. Both
+# took mining down on the GPU miner, and neither was reachable by CI, which runs
+# on GitHub hosts with no GPU — the CUDA test simply skipped, and a skipped test
+# protects nothing.
+#
+# SECURITY, and the reason for the trigger list below. This repo is PUBLIC and
+# this job runs on a self-hosted runner in a private home network. `pull_request`
+# is deliberately ABSENT: a fork PR must never execute on that machine. Only a
+# push to main — which requires write access — and a manual dispatch can reach
+# it. The runner also runs as a dedicated `ghrunner` account with no sudo, so a
+# job cannot read the miner's wallet or its API token, or restart the trainer.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'client/**'
+      - 'rig/**'
+      - 'tests/**'
+      - '.github/workflows/gpu-tests.yml'
+  workflow_dispatch:
+
+# One at a time: the runner shares a GPU with a miner that is producing blocks.
+concurrency:
+  group: gpu-tests
+  cancel-in-progress: false
+
+jobs:
+  cuda:
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: environment
+        run: |
+          /home/ghrunner/ci-venv/bin/python - <<'PY'
+          import torch
+          print(f"torch {torch.__version__}  cuda={torch.cuda.is_available()}")
+          if torch.cuda.is_available():
+              print(f"device: {torch.cuda.get_device_name(0)}")
+          PY
+
+      # The whole point of this job. If CUDA is missing the tests would SKIP and
+      # the job would pass green while proving nothing, so fail loudly instead.
+      - name: refuse to pass without a GPU
+        run: |
+          /home/ghrunner/ci-venv/bin/python -c "
+          import sys, torch
+          if not torch.cuda.is_available():
+              sys.exit('no CUDA on the gpu runner — this job must not pass by skipping')
+          "
+
+      - name: bridge + CUDA tests
+        run: /home/ghrunner/ci-venv/bin/python -m pytest tests/test_miner_bridge_loop.py -v
+
+      - name: training reproducibility with chat interleaved
+        run: /home/ghrunner/ci-venv/bin/python -m pytest tests/test_chat_does_not_perturb_training.py -v
+
+      # Confirm the CUDA-only test actually RAN. `pytest -k cuda` reporting
+      # "1 skipped" is exactly the false green this job exists to prevent.
+      - name: assert the CUDA test executed, not skipped
+        run: |
+          out=$(/home/ghrunner/ci-venv/bin/python -m pytest tests/test_miner_bridge_loop.py -k cuda -q 2>&1)
+          echo "$out"
+          echo "$out" | grep -q "1 passed" || {
+            echo "::error::the CUDA test did not run — it skipped, and a skipped test proves nothing"
+            exit 1
+          }
