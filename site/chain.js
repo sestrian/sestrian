@@ -113,11 +113,28 @@
       var misses = 0;      // consecutive failures, counted across all anchors
       var idx = 0;         // which anchor to try next
       (function poll() {
-        var base = LIVE[idx];
         var failed = false;
-        fetchJSON(base + "/status", 6000)
-          .then(function (d) {
+        // Ask EVERY anchor and show the one at the GREATEST height. Rotating
+        // only on FAILURE meant a lagging anchor — which answers perfectly
+        // well, it is merely behind — got rendered indefinitely: a resyncing
+        // node once had the site reporting a third of the real chain height.
+        // The page must show the chain, not the slowest window onto it.
+        Promise.all(LIVE.map(function (b) {
+          return fetchJSON(b + "/status", 6000)
+            .then(function (d) { return { base: b, d: d }; },
+                  function () { return null; });
+        }))
+          .then(function (results) {
+            var best = null;
+            results.forEach(function (r) {
+              if (!r || !r.d) return;
+              var h = Number(r.d.height);
+              if (!isFinite(h)) return;
+              if (!best || h > Number(best.d.height)) best = r;
+            });
+            if (!best) throw new Error("no anchor answered");
             misses = 0;
+            var base = best.base, d = best.d;
             // Miners is a nice-to-have: a failure there must not cost us the
             // chain numbers, and must not push us off a working anchor.
             return fetchJSON(base + "/miners", 6000)
@@ -130,7 +147,6 @@
           .catch(function () {
             failed = true;
             misses++;
-            idx = (idx + 1) % LIVE.length;   // next tick asks the other anchor
           })
           .finally(function () {
             // Give up only once every anchor has failed GIVE_UP_AFTER times in
