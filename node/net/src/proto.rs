@@ -391,14 +391,6 @@ pub struct SyncRequest {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct SyncResponse {
     pub blocks: Vec<StoredBlock>,
-    /// BUSY is not "nothing to send". A sync response carries ~31MB, and a
-    /// peer stuck in a retry loop asked every ~15s: serving it unbounded grew
-    /// a HEALTHY node's RSS by 2.4GB in 15 minutes (measured), which is how a
-    /// single broken peer walks its neighbours into the OOM killer. Over the
-    /// cap we answer BUSY so the client retries rather than concluding the
-    /// window is empty and marching its cursor past blocks it still needs.
-    #[serde(default)]
-    pub busy: bool,
     pub payloads: HashMap<String, Payload>, // txid -> payload for those blocks
     pub head_height: u64,
     /// the genesis weight vector, included when the requester set want_genesis

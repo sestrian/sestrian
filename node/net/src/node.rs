@@ -84,16 +84,7 @@ const WANT_DELTA_TTL: f64 = 600.0;
 // request_response layer already times out at 300s and reports OutboundFailure,
 // which clears the gate, so a genuinely dead peer is still noticed promptly;
 // this only has to be long enough that a SLOW peer is not mistaken for one.
-/// Derived per network, not a constant: it must outlast a real transfer on THIS
-/// chain but never outlast the chain itself. A fixed 180s fixed the devnet
-/// (~31MB responses over WAN, where 30s made a node out-race its own request)
-/// and simultaneously broke local test chains, whose whole run is shorter than
-/// the timeout — one missed response there stalls catch-up for the entire test.
-/// Scale with the block interval, which is what actually tracks payload size
-/// and link expectations across our configs, and clamp to a sane band.
-fn sync_inflight_timeout(interval: f64) -> f64 {
-    (interval * 2.0).clamp(20.0, 300.0)
-}
+const SYNC_INFLIGHT_TIMEOUT: f64 = 180.0;
 
 /// Coordinates per aggregation chunk — the memory/latency knob (K deltas ×
 /// this many i64 at once, ~8MB for the default, vs K × the whole 86M state).
@@ -645,9 +636,6 @@ pub struct Node {
     pub last_proposed_round: i64,
     /// once-per-round throttle for the proposal-eligibility log
     pub last_produce_log_round: i64,
-    /// blocks rejected because our fork point predates our state window;
-    /// non-zero means this node needs an operator re-sync
-    pub diverged_unrecoverably: u64,
     /// once-per-round training dispatch (production is a separate, per-tick
     /// eligibility ladder — see the run loop)
     pub last_trained_round: i64,
@@ -1237,7 +1225,7 @@ impl Node {
             }
             if let Some(peer) = from {
                 let fh = sb.header.height.saturating_sub(1);
-                self.request_sync(peer, fh);
+                let _ = self.net.send(ToNet::SendSync(peer, fh));
                 self.queue_pending(bh, sb, peer);
             }
             return false;
@@ -1301,31 +1289,10 @@ impl Node {
                 true
             }
             Err(e) => {
-                if e.0.contains("beyond the undo window") {
-                    // UNRECOVERABLE DIVERGENCE. We are on a branch whose fork
-                    // point is older than our state window, so validating the
-                    // rival chain needs state we already pruned — no amount of
-                    // retrying can fix it. Retrying anyway is actively harmful:
-                    // a wedged node re-requested 17k times in 100s in the
-                    // fork-catchup harness, and on the live devnet that storm
-                    // grew a HEALTHY peer's RSS by 2.4GB in 15 minutes. Say so
-                    // once, unmistakably, and stop asking.
-                    self.diverged_unrecoverably += 1;
-                    if self.diverged_unrecoverably == 1
-                        || self.diverged_unrecoverably % 200 == 0 {
-                        error!(height = sb.header.height,
-                               head = self.head_height(),
-                               rejections = self.diverged_unrecoverably,
-                               "DIVERGED BEYOND RECOVERY: this node forked below \
-                                its state window and cannot rejoin by syncing. \
-                                It will stop requesting to avoid hammering \
-                                peers. OPERATOR ACTION: re-sync this node (stop \
-                                it, move its data dir aside, restart) or raise \
-                                --prune-depth so shallow forks can heal.");
-                    }
-                } else if e.0.contains("orphan") {
+                if e.0.contains("orphan") {
                     if let Some(peer) = from {
-                        self.request_sync(peer, self.head_height().saturating_sub(8));
+                        let _ = self.net.send(ToNet::SendSync(
+                            peer, self.head_height().saturating_sub(8)));
                         self.queue_pending(bh, sb, peer);
                     }
                 } else {
@@ -1334,23 +1301,6 @@ impl Node {
                 false
             }
         }
-    }
-
-    /// True once we have proven we cannot rejoin by syncing: our fork point is
-    /// older than our state window. Asking again cannot help and measurably
-    /// harms peers, so every request path checks this.
-    fn sync_is_futile(&self) -> bool {
-        self.diverged_unrecoverably >= 5
-    }
-
-    /// The ONE way this node asks a peer for blocks. Centralised so the
-    /// futility guard cannot be forgotten at a call site — it was, at five of
-    /// seven, and the retry storm continued unabated.
-    fn request_sync(&self, peer: PeerId, from: u64) {
-        if self.sync_is_futile() {
-            return;
-        }
-        self.request_sync(peer, from);
     }
 
     fn retry_pending(&mut self) {
@@ -1616,9 +1566,6 @@ impl Node {
             g("orphan blocks awaiting parents/payloads", "pending_blocks",
               self.pending.len() as u64),
             g("dedup set size", "seen", self.seen.len() as u64),
-            g("blocks rejected because our fork point predates our state window \
-               (non-zero: this node needs an operator re-sync)",
-              "diverged_unrecoverably", self.diverged_unrecoverably),
             // RETAINED MEMORY. Node RSS grew ~75MB per block processed while
             // the committed state stayed under 1GB, so every map the node
             // holds forever is exposed rather than guessed at.
@@ -1875,8 +1822,7 @@ pub async fn run(
         HashMap::new();
 
     enum Reply {
-        Sync(request_response::ResponseChannel<SyncResponse>, Option<SyncResponse>,
-             Option<request_response::InboundRequestId>),
+        Sync(request_response::ResponseChannel<SyncResponse>, Option<SyncResponse>),
         Shards(request_response::ResponseChannel<ShardResponse>, Option<ShardResponse>,
                Option<request_response::InboundRequestId>),
     }
@@ -1898,7 +1844,7 @@ pub async fn run(
                      sync_req_id: &mut HashMap<PeerId, request_response::OutboundRequestId>,
                      peer: PeerId, from: u64| {
         let inflight = last_sync_req.get(&peer)
-            .map(|(t, _)| now() - t < sync_inflight_timeout(interval))
+            .map(|(t, _)| now() - t < SYNC_INFLIGHT_TIMEOUT)
             .unwrap_or(false);
         if !inflight {
             last_sync_req.insert(peer, (now(), from));
@@ -1923,12 +1869,8 @@ pub async fn run(
                 break;
             }
             Some(reply) = replies.next() => match reply {
-                Reply::Sync(ch, resp, rid) => {
-                    // release on the ONE path every sync reply takes
-                    if let Some(id) = rid { serving.remove(&id); }
-                    if let Some(r) = resp {
-                        let _ = swarm.behaviour_mut().sync.send_response(ch, r);
-                    }
+                Reply::Sync(ch, Some(resp)) => {
+                    let _ = swarm.behaviour_mut().sync.send_response(ch, resp);
                 }
                 Reply::Shards(ch, resp, rid) => {
                     // Release the slot here, on the ONE path every shard reply
@@ -2084,26 +2026,12 @@ pub async fn run(
                 SwarmEvent::Behaviour(BehaviourEvent::Sync(
                         request_response::Event::Message { peer, message, .. })) => {
                     match message {
-                        request_response::Message::Request { request, channel, request_id, .. } => {
-                            // Sync responses are the BIG ones (~31MB). This is
-                            // the path that let a stuck peer inflate a healthy
-                            // node by 2.4GB in 15 minutes; shards were capped
-                            // earlier but sync never was.
-                            if serving.len() >= MAX_INFLIGHT_SERVES {
-                                let _ = swarm.behaviour_mut().sync.send_response(
-                                    channel,
-                                    SyncResponse { blocks: Vec::new(),
-                                                   payloads: HashMap::new(),
-                                                   head_height: cached_head.1,
-                                                   genesis: None, busy: true });
-                            } else {
-                                serving.insert(request_id);
-                                let (otx, orx) = tokio::sync::oneshot::channel();
-                                let _ = chain_tx.send(ToChain::SyncServe(request, otx));
-                                replies.push(Box::pin(async move {
-                                    Reply::Sync(channel, orx.await.ok(), Some(request_id))
-                                }));
-                            }
+                        request_response::Message::Request { request, channel, .. } => {
+                            let (otx, orx) = tokio::sync::oneshot::channel();
+                            let _ = chain_tx.send(ToChain::SyncServe(request, otx));
+                            replies.push(Box::pin(async move {
+                                Reply::Sync(channel, orx.await.ok())
+                            }));
                         }
                         request_response::Message::Response {
                                 response, request_id, .. } => {
@@ -2114,20 +2042,12 @@ pub async fn run(
                                 last_sync_req.remove(&peer).map(|(_, f)| f)
                                     .unwrap_or(0)
                             } else { 0 };
-                            if response.busy {
-                                // The peer HAS these blocks but is at its serve
-                                // cap. Marching the cursor here would skip
-                                // blocks we still need; the in-flight gate is
-                                // already cleared, so simply retry next round.
-                                debug!(%peer, "sync peer is BUSY — will retry");
-                            } else {
-                                let _ = chain_tx.send(ToChain::SyncBatch {
-                                    peer, current, from,
-                                    blocks: response.blocks,
-                                    payloads: response.payloads,
-                                    their_head: response.head_height,
-                                });
-                            }
+                            let _ = chain_tx.send(ToChain::SyncBatch {
+                                peer, current, from,
+                                blocks: response.blocks,
+                                payloads: response.payloads,
+                                their_head: response.head_height,
+                            });
                         }
                     }
                 }
@@ -2382,17 +2302,14 @@ impl Node {
                 self.retry_pending();
             }
             ToChain::Head { peer, hash, height } => {
-                if !self.tree.blocks.contains_key(&hash) && !self.sync_is_futile() {
+                if !self.tree.blocks.contains_key(&hash) {
                     let from = self.sync_cursor.get(&peer).copied()
                         .unwrap_or_else(|| self.head_height()
                             .min(height).saturating_sub(2));
                     info!(peer = %peer, their_h = height, from,
                           "unknown head — requesting sync");
-                    self.request_sync(peer, from);
+                    let _ = self.net.send(ToNet::SendSync(peer, from));
                 }
-            }
-            ToChain::PeerConnected(peer) if self.sync_is_futile() => {
-                let _ = peer;   // diverged beyond recovery: do not pull
             }
             ToChain::PeerConnected(peer) => {
                 // opportunistic catch-up from every new peer — anchor BELOW
@@ -2400,7 +2317,7 @@ impl Node {
                 // heights we already have, not just above them
                 let from = self.sync_cursor.get(&peer).copied()
                     .unwrap_or_else(|| self.head_height().saturating_sub(8));
-                self.request_sync(peer, from);
+                let _ = self.net.send(ToNet::SendSync(peer, from));
             }
             ToChain::SyncServe(request, reply) => {
                 let _ = reply.send(self.serve_sync(&request));
@@ -2499,7 +2416,7 @@ impl Node {
         };
         self.sync_cursor.insert(peer, next);
         // keep pulling while behind (the per-peer inflight gate throttles)
-        self.request_sync(peer, next);
+        let _ = self.net.send(ToNet::SendSync(peer, next));
     }
 
     fn handle_shard_batch(&mut self, peer: PeerId, current: bool,
@@ -2628,7 +2545,7 @@ impl Node {
                 let from = self.sync_cursor.get(p).copied()
                     .unwrap_or_else(|| self.head_height().saturating_sub(8));
                 info!(peer = %p, from, "no foreign heads heard — direct sync pull");
-                self.request_sync(*p, from);
+                let _ = self.net.send(ToNet::SendSync(*p, from));
             }
         }
         // v1 PROPOSING: the eligibility ladder widens inside the round; the
@@ -2936,7 +2853,6 @@ impl Node {
             None
         };
         SyncResponse {
-            busy: false,
             blocks: chain, payloads,
             head_height: self.head_height(),
             genesis,

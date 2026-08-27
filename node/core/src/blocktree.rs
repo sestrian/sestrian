@@ -1001,27 +1001,6 @@ impl BlockTree {
             self.undo.remove(&h);
             self.redo.remove(&h);
         }
-        // Ledgers and model states were retained FOREVER, one pair per block,
-        // on the grounds that fork choice needs them. It only needs them for
-        // blocks it could still reorg TO — which is exactly the state window
-        // undo/redo already bound. Keeping them below the floor is dead weight
-        // that grows without limit: a live anchor climbed to 7.7GB and was
-        // OOM-killed, having accumulated one pair per block since boot. Prune
-        // them on the SAME predicate, never touching the head's own entries.
-        let head = self.head.clone();
-        let below_floor = |blocks: &HashMap<String, Header>, h: &String| {
-            *h != head && blocks.get(h).map(|hdr| hdr.height < floor).unwrap_or(true)
-        };
-        let dead: Vec<String> = self.ledger.keys()
-            .filter(|h| below_floor(&self.blocks, h)).cloned().collect();
-        for h in dead {
-            self.ledger.remove(&h);
-        }
-        let dead: Vec<String> = self.model.keys()
-            .filter(|h| below_floor(&self.blocks, h)).cloned().collect();
-        for h in dead {
-            self.model.remove(&h);
-        }
         if floor > 0 {
             if let Some(g) = &self.genesis_pin {
                 if g.len() * 8 > GENESIS_PIN_MAX_BYTES {
