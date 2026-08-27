@@ -1049,6 +1049,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         t0: if args.t0 > 0.0 { args.t0 } else { 0.0 },
         last_proposed_round: -1,
         last_produce_log_round: -1,
+        diverged_unrecoverably: 0,
         last_trained_round: -1,
         sync_cursor: Default::default(),
         net: tokio::sync::mpsc::unbounded_channel().0, // replaced inside run()
