@@ -695,6 +695,36 @@ impl BlockTree {
         Ok((body.len(), coords))
     }
 
+    /// The `state_root` that CANON + a sparse aggregate + growth pages commits,
+    /// plus the page leaves it implies. Every page the block does not touch keeps
+    /// its cached leaf hash; a touched page is re-hashed by streaming
+    /// `canon[i] + agg[i]`, which is byte-identical to hashing the materialized
+    /// post-state page (`leaf_with_subs` and `merkle::leaf_hash` share the 0x00
+    /// leaf domain separator and the same LE encoding).
+    ///
+    /// This is the ONLY implementation of that construction: `connect_extend`
+    /// validates a block with it and the producer builds one with it, so the two
+    /// CANNOT drift. Producer/validator asymmetry here is the self-rejecting-
+    /// blocks bug class, and materializing the post-state just to hash it costs a
+    /// second full copy of the model (~915MB at devnet scale) to express a change
+    /// touching well under 1% of coordinates.
+    pub fn state_root_with(&self, spans: &[(u64, u64)], agg: &BTreeMap<u32, i64>,
+                           init_pages: &[Vec<i64>]) -> (String, Vec<[u8; 32]>) {
+        let mut new_leaves = self.page_leaves.clone();
+        for (page_id, &(start, end)) in spans.iter().enumerate() {
+            let (s, e) = (start as usize, end as usize);
+            let touches = agg.range(start as u32..end as u32).next().is_some();
+            if touches {
+                new_leaves[page_id] = leaf_with_subs(&self.canon, s, e, agg);
+            }
+        }
+        for ip in init_pages {
+            new_leaves.push(crate::merkle::leaf_hash(&int64_bytes(ip)));
+        }
+        let root = hex::encode(crate::merkle::root_from_hashes(new_leaves.clone()));
+        (root, new_leaves)
+    }
+
     /// FAST PATH: validate + connect a block that extends the current head,
     /// touching only the coordinates and pages the block actually changes.
     /// The committed state_root check at the end makes this path exactly as
@@ -797,19 +827,9 @@ impl BlockTree {
         let init_pages: Vec<Vec<i64>> = activations.iter()
             .map(|(page_id, _, _, trigger)| page_init(trigger, *page_id, &self.params.spec))
             .collect();
-        // new leaves: only touched pages rehash; growth pages append
-        let mut new_leaves = self.page_leaves.clone();
-        for (page_id, &(start, end)) in spans.iter().enumerate() {
-            let (s, e) = (start as usize, end as usize);
-            let touches = agg.range(start as u32..end as u32).next().is_some();
-            if touches {
-                new_leaves[page_id] = leaf_with_subs(&self.canon, s, e, &agg);
-            }
-        }
-        for ip in &init_pages {
-            new_leaves.push(crate::merkle::leaf_hash(&int64_bytes(ip)));
-        }
-        let root = hex::encode(crate::merkle::root_from_hashes(new_leaves.clone()));
+        // new leaves: only touched pages rehash; growth pages append. Shared with
+        // the producer (`state_root_with`) so builder and validator cannot drift.
+        let (root, new_leaves) = self.state_root_with(&spans, &agg, &init_pages);
         if root != h.state_root {
             return Err(err("state_root does not reproduce from txs"));
         }

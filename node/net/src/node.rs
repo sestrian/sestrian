@@ -997,8 +997,16 @@ impl Node {
         // actual claimants, chunked within pages for bounded memory — bit-
         // identical to core::paged_transition over the full dense bodies, so
         // the committed state_root reproduces on any validator.
-        let parent_w = self.tree.head_state();
-        let mut mean = vec![0i64; parent_w.len()];
+        // SPARSE aggregate — only coordinates a claimant actually moved. The dense
+        // form (a full-length `mean` PLUS a full-length post-state) cost two
+        // ~915MB copies of the model to express a delta capped at delta_max_nnz
+        // coordinates, and that peak, not any leak, is what the OOM killer was
+        // reaping on a 7GB anchor. Per-page buffers stay page-sized (the backbone,
+        // the largest, is ~53MB) and are freed as we go.
+        let spans: Vec<(u64, u64)> = parent_model.pages.iter()
+            .map(|p| (p.start, p.end)).collect();
+        let mut agg: std::collections::BTreeMap<u32, i64> =
+            std::collections::BTreeMap::new();
         for (pid, page) in parent_model.pages.iter().enumerate() {
             let claimants: Vec<&Payload> = chosen.iter()
                 .filter(|t| t.canonical_pages().contains(&(pid as u32)))
@@ -1008,12 +1016,15 @@ impl Node {
                 continue;
             }
             let (s, e) = (page.start as usize, page.end as usize);
-            mean[s..e].copy_from_slice(
-                &chunked_aggregate_range(&claimants, s, e, AGG_CHUNK));
+            let m = chunked_aggregate_range(&claimants, s, e, AGG_CHUNK);
+            // a zero mean leaves the coordinate unchanged, exactly as the dense
+            // `wrapping_add(0)` did — so only non-zero entries enter the map.
+            for (off, &v) in m.iter().enumerate() {
+                if v != 0 {
+                    agg.insert((s + off) as u32, v);
+                }
+            }
         }
-        // wrapping_add mirrors numpy int64 (matches validate_block exactly)
-        let mut w: Vec<i64> = parent_w.iter().zip(&mean)
-            .map(|(a, b)| a.wrapping_add(*b)).collect();
         // account lanes: dry-run in the validator's exact order (blocktree::apply)
         let mut scratch = self.tree.ledger[&head].clone();
         scratch.resolve_expired_challenges(hh + 1);
@@ -1139,19 +1150,24 @@ impl Node {
             parent_model, &self.tree.params, hh + 1,
             chosen.len() as u64, zero_scored, &head, score_sum,
             &self.key.pub_hex());
-        for (page_id, layer, _expert, trigger) in &activations {
-            info!(height = hh + 1, page_id, layer,
-                  "GROWTH EVENT activates in our candidate block");
-            w.extend(core::model_state::page_init(
-                trigger, *page_id, &self.tree.params.spec));
-        }
+        let init_pages: Vec<Vec<i64>> = activations.iter()
+            .map(|(page_id, layer, _expert, trigger)| {
+                info!(height = hh + 1, page_id, layer,
+                      "GROWTH EVENT activates in our candidate block");
+                core::model_state::page_init(trigger, *page_id, &self.tree.params.spec)
+            })
+            .collect();
+        // Aggregate first, THEN append the growth pages, THEN root — the exact
+        // validate_block order, now enforced by calling the validator's own
+        // construction rather than a second implementation of it.
+        let (cand_state_root, _) = self.tree.state_root_with(&spans, &agg, &init_pages);
         // proposer lottery (v1): the proof binds to (height, ATTEMPT); work is
         // the attempt-discounted non-forgeable weight derived from it.
         let vrf_proof = core::lottery::vrf_prove(&self.key, &head, hh + 1, attempt);
         let header = core::Header {
             height: hh + 1,
             prev_hash: head.clone(),
-            state_root: core::model_state::page_state_root(&w, &post_model),
+            state_root: cand_state_root,
             txset_root: core::txset_root(
                 &chosen.iter().map(|t| t.txid()).collect::<Vec<_>>()),
             n_txs: chosen.len() as u64,
