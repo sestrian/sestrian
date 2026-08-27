@@ -1553,6 +1553,7 @@ impl Node {
     /// Prometheus text-format snapshot of node health for scraping/alerting.
     fn api_metrics(&self) -> String {
         let led = self.tree.head_ledger();
+        let rc = self.tree.retained_counts();
         let g = |help: &str, name: &str, v: u64| {
             format!("# HELP sestrian_{name} {help}\n# TYPE sestrian_{name} gauge\n\
                      sestrian_{name} {v}\n")
@@ -1565,6 +1566,24 @@ impl Node {
             g("orphan blocks awaiting parents/payloads", "pending_blocks",
               self.pending.len() as u64),
             g("dedup set size", "seen", self.seen.len() as u64),
+            // RETAINED MEMORY. Node RSS grew ~75MB per block processed while
+            // the committed state stayed under 1GB, so every map the node
+            // holds forever is exposed rather than guessed at.
+            g("full blocks retained in RAM for serving", "retained_blocks_full",
+              self.blocks_full.len() as u64),
+            g("delta payloads held in RAM", "retained_payloads",
+              self.payloads.len() as u64),
+            g("block headers in the tree", "retained_headers", rc.headers as u64),
+            g("per-block ledgers retained (never pruned)", "retained_ledgers",
+              rc.ledgers as u64),
+            g("per-block model states retained (never pruned)", "retained_models",
+              rc.models as u64),
+            g("blocks with undo data inside the prune window", "retained_undo_blocks",
+              rc.undo_blocks as u64),
+            g("bytes of undo history", "retained_undo_bytes", rc.undo_bytes as u64),
+            g("bytes of redo history", "retained_redo_bytes", rc.redo_bytes as u64),
+            g("bytes of the one resident weight vector", "canon_bytes",
+              rc.canon_bytes as u64),
             g("total token supply (grains)", "supply_grains", led.supply()),
             g("1 if this node produces blocks", "producer", self.cfg.produce as u64),
             g("1 if a training bridge is attached", "model_attached",

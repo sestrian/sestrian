@@ -90,6 +90,19 @@ impl Block {
 #[derive(Debug)]
 pub struct ValidationError(pub String);
 
+/// What a BlockTree is holding on to — see `retained_counts`.
+#[derive(Debug, Clone, Copy)]
+pub struct RetainedCounts {
+    pub headers: usize,
+    pub ledgers: usize,
+    pub models: usize,
+    pub undo_blocks: usize,
+    pub redo_blocks: usize,
+    pub undo_bytes: usize,
+    pub redo_bytes: usize,
+    pub canon_bytes: usize,
+}
+
 fn err(msg: &str) -> ValidationError {
     ValidationError(msg.to_string())
 }
@@ -618,6 +631,28 @@ impl BlockTree {
     }
 
     /// The sparse delta block `hash` applied — the trainer-bridge diff.
+    /// Sizes of everything the tree RETAINS, for leak hunting. Node memory
+    /// grew ~75MB per block processed while the committed state is under 1GB,
+    /// so the question "which map is growing" has to be answerable from
+    /// /metrics rather than by guesswork.
+    pub fn retained_counts(&self) -> RetainedCounts {
+        let undo_coords: usize = self.undo.values()
+            .map(|(u, tail)| u.len() + tail.len()).sum();
+        let redo_coords: usize = self.redo.values().map(|r| r.len()).sum();
+        RetainedCounts {
+            headers: self.blocks.len(),
+            ledgers: self.ledger.len(),
+            models: self.model.len(),
+            undo_blocks: self.undo.len(),
+            redo_blocks: self.redo.len(),
+            // (u32,i64) pairs and i64 tails — 12 and 8 bytes respectively; the
+            // dominant term if a prune window is wider than it looks.
+            undo_bytes: undo_coords * 12,
+            redo_bytes: redo_coords * 12,
+            canon_bytes: self.canon.len() * 8,
+        }
+    }
+
     pub fn applied_delta(&self, hash: &str) -> Option<&Vec<(u32, i64)>> {
         self.redo.get(hash)
     }
