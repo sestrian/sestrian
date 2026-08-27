@@ -112,6 +112,26 @@ pub fn chunked_aggregate_range(payloads: &[&Payload], lo: usize, hi: usize,
     out
 }
 
+/// Hand freed memory back to the OS.
+///
+/// Serving is bursty and allocation-heavy: each sync response clones ~16MB of
+/// payloads and the JSON codec base64-encodes them, so a single serve churns
+/// tens of megabytes. glibc keeps those arenas on its free lists rather than
+/// returning them, so RSS RATCHETS with serving volume and never falls — an
+/// anchor measured +40-90MB per serve, reaching 7.7GB and the OOM killer while
+/// every structure it deliberately retained stayed flat at ~1GB.
+///
+/// `malloc_trim` walks the free lists and releases what it can. Called once per
+/// round (not per serve) so the cost is irrelevant, and it is purely an
+/// allocator hint: no data is touched and nothing observable changes.
+/// glibc-only; everywhere else this is a no-op.
+fn release_free_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 /// A delta is worth holding only if its base_height sits in the includable
 /// window around the current head. Pure + total so it can be unit-tested.
 pub fn delta_in_window(base_height: u64, head_height: u64) -> bool {
@@ -2493,6 +2513,7 @@ impl Node {
                   connected: Vec<PeerId>, mesh_blind: bool) {
         if round >= 0 && round != self.last_trained_round {
             self.last_trained_round = round;
+            release_free_memory();
             // BODY REFETCH: once per round, ask connected peers for the shards
             // of bodies pending blocks are stuck on + announced deltas wanted
             let want = self.missing_bodies(32);
@@ -2817,6 +2838,14 @@ impl Node {
                 break;
             }
             let Some(sb) = self.blocks_full.get(&h).cloned() else { continue };
+            // Cost this block BEFORE committing to it. The budget used to be
+            // checked only after a block's payloads were already added, so a
+            // response overshot by a whole block: a 16MB budget produced 31MB
+            // responses, and every one of those is cloned, JSON+base64 encoded,
+            // and (measured) ratchets the server's RSS by 40-90MB. Always serve
+            // at least one block, or a lagging peer can never make progress.
+            let mut this_block: Vec<(String, Payload)> = Vec::new();
+            let mut this_bytes = 0usize;
             for t in &sb.txs {
                 if let Some(tc) = t.to_core() {
                     let txid = tc.txid();
@@ -2826,11 +2855,16 @@ impl Node {
                         if p.wire_bytes() > dtx_inline_max() {
                             continue;
                         }
-                        bytes += p.wire_bytes();
-                        payloads.insert(txid, p);
+                        this_bytes += p.wire_bytes();
+                        this_block.push((txid, p));
                     }
                 }
             }
+            if !chain.is_empty() && bytes + this_bytes > SYNC_BYTE_BUDGET {
+                break;                      // would overshoot — stop cleanly
+            }
+            bytes += this_bytes;
+            payloads.extend(this_block);
             chain.push(sb);
             if bytes >= SYNC_BYTE_BUDGET {
                 break;
