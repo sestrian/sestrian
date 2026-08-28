@@ -216,6 +216,10 @@ def main():
     ap.add_argument("--to", default=None)
     ap.add_argument("--amount", type=float, default=None)   # whole tokens
     ap.add_argument("--file", default=None)                 # submit-data: corpus file
+    # submit-data from a PRECOMPUTED manifest — for corpora that live on the
+    # miner box while the wallet stays put. Produce it there with:
+    #   python -c "from rig import corpus,json ..."  (see docs/joining.md)
+    ap.add_argument("--manifest", default=None)             # JSON: data_hash, da_root, size_bytes
     ap.add_argument("--media-type", default="text")
     ap.add_argument("--stake", type=float, default=None)    # whole tokens
     ap.add_argument("--data-id", default=None)              # challenge target
@@ -259,17 +263,30 @@ def main():
         out = _submit(a.node, rec["address"], "/transfer", _build)
         print(f"CONFIRMED: sent {a.amount} to {a.to}: {out}")
     elif a.cmd == "submit-data":
-        if not a.file or a.stake is None:
-            raise SystemExit("submit-data needs --file and --stake")
-        from rig import corpus
+        if (not a.file and not a.manifest) or a.stake is None:
+            raise SystemExit("submit-data needs --stake and --file or --manifest")
         from rig.token import DataSubmitTx
-        # §7.2a: build the availability commitment while streaming the corpus.
-        # One pass, O(CHUNK_BYTES) memory — corpora are routinely multi-GB and
-        # must never be slurped into memory just to be committed to.
-        print(f"hashing + chunking {a.file} …")
-        with open(a.file, "rb") as f:
-            man = corpus.build(f)
-        print(f"  {man.size_bytes} bytes, {man.chunk_count()} chunks")
+        if a.manifest:
+            # the commitment was computed where the corpus lives; the wallet
+            # only signs it. Never move a wallet to the data — or the data to
+            # the wallet — just to stake.
+            mj = json.loads(open(a.manifest).read()
+                            if os.path.exists(a.manifest) else a.manifest)
+            class _M:
+                data_hash = mj["data_hash"]
+                da_root = mj["da_root"]
+                size_bytes = int(mj["size_bytes"])
+            man = _M()
+            print(f"  manifest: {man.size_bytes} bytes")
+        else:
+            from rig import corpus
+            # §7.2a: build the availability commitment while streaming the
+            # corpus. One pass, O(CHUNK_BYTES) memory — corpora are routinely
+            # multi-GB and must never be slurped into memory to be committed.
+            print(f"hashing + chunking {a.file} …")
+            with open(a.file, "rb") as f:
+                man = corpus.build(f)
+            print(f"  {man.size_bytes} bytes, {man.chunk_count()} chunks")
         print(f"  data_hash {man.data_hash}")
         print(f"  da_root   {man.da_root}")
         def _build(nonce):
