@@ -72,6 +72,24 @@ fn dtx_inline_max() -> usize {
     *V.get_or_init(|| std::env::var("SESTRIAN_DTX_INLINE_MAX").ok()
         .and_then(|s| s.parse().ok()).unwrap_or(DTX_INLINE_MAX))
 }
+/// GOSSIP inlining is a separate, much smaller cap than sync-serve inlining.
+/// gossipsub in libp2p 0.55 queues outbound RPCs per peer WITHOUT a byte
+/// bound, and one peer with a stalled gossip substream (present but never
+/// draining — seen live after a reseed) accumulates every forwarded ~8MB
+/// delta indefinitely: jemalloc live-profiling attributed ~880MB/hour of
+/// REFERENCED growth to exactly this (protobuf write_message + queue Vec
+/// reserve). Above this cap a delta gossips as an ANNOUNCEMENT (empty
+/// payload) and peers pull the body over request-response, which has flow
+/// control and our BUSY backpressure. Gossip frames stay KB-scale, so a
+/// stalled peer can cost at most KBs per message. Tests forcing
+/// SESTRIAN_DTX_INLINE_MAX=0 exercise the same announce path.
+const DTX_GOSSIP_INLINE_MAX: usize = 256 * 1024;
+fn dtx_gossip_inline_max() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("SESTRIAN_DTX_GOSSIP_INLINE_MAX").ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| dtx_inline_max().min(DTX_GOSSIP_INLINE_MAX)))
+}
 /// b64 bytes of shards per ShardResponse (one oversized shard may exceed it —
 /// at least one shard is always served so reconstruction can progress).
 /// 32MB serves ~3 full bodies per response (a body's shard set is ~10MB
@@ -2609,7 +2627,7 @@ impl Node {
                     .map(|p| (WireDeltaTx::from_core(t), p.clone())))
                 .collect();
             for (tx, payload) in resend {
-                let payload = if payload.wire_bytes() > dtx_inline_max() {
+                let payload = if payload.wire_bytes() > dtx_gossip_inline_max() {
                     Payload { n: payload.n, idx: String::new(), val: String::new() }
                 } else { payload };
                 self.publish(&Gossip::Dtx { tx, payload });
@@ -2820,7 +2838,7 @@ impl Node {
                           "trained delta");
                     let wire = WireDeltaTx::from_core(&tx);
                     if self.accept_delta(tx, payload.clone()) {
-                        let payload = if payload.wire_bytes() > dtx_inline_max() {
+                        let payload = if payload.wire_bytes() > dtx_gossip_inline_max() {
                             Payload { n: payload.n,
                                       idx: String::new(), val: String::new() }
                         } else { payload };
