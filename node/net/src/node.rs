@@ -1481,7 +1481,20 @@ impl Node {
                 .map(|t| now() - t > 1800.0).unwrap_or(true))
             .cloned().collect();
         for k in drop_pending {
-            self.pending.remove(&k);
+            if let Some((sb, _)) = self.pending.remove(&k) {
+                // an evicted pending block's preloaded bodies leave RAM with it
+                // (the disk copy, if any, stays); the mempool's own payloads
+                // are still owned by the pool and stay resident.
+                for t in &sb.txs {
+                    if let Some(tc) = t.to_core() {
+                        let id = tc.txid();
+                        if !self.delta_pool.contains_key(&id)
+                            && self.store.has_payload(&id) {
+                            self.payloads.remove(&id);
+                        }
+                    }
+                }
+            }
             self.pending_at.remove(&k);
         }
         self.prune_old_bodies(h);
@@ -2443,10 +2456,16 @@ impl Node {
                          payloads: HashMap<String, Payload>, their_head: u64) {
         info!(blocks = blocks.len(), their_head, current,
               "sync response received");
+        // Bodies land on DISK, not in the RAM map. Keeping them resident here
+        // re-imported ~7.8MB per historical body on every periodic pull —
+        // bodies of blocks applied long ago, which the apply-time eviction had
+        // already processed and never revisits — and the map grew by exactly
+        // 2 payloads per block (measured live: retained_payloads 24 -> 182 in
+        // nine hours, ~1.4GB). install() preloads from the store on demand for
+        // any block that actually needs a body in RAM.
         for (txid, p) in payloads {
-            if !self.payloads.contains_key(&txid) {
+            if !self.payloads.contains_key(&txid) && !self.store.has_payload(&txid) {
                 self.store.put_payload(&txid, &p);
-                self.payloads.insert(txid, p);
             }
         }
         let served = blocks.len() as u64;
