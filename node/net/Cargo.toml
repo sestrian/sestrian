@@ -10,6 +10,13 @@ path = "src/main.rs"
 
 [dependencies]
 sestrian-core = { path = "../core" }
+# Global allocator: glibc malloc traps freed serve-path transients (~20MB
+# JSON+base64 encodes) under long-lived per-block undo/redo allocations, so a
+# serving anchor's heap grew monotonically toward OOM — malloc_trim and
+# MALLOC_ARENA_MAX both measurably failed to stop it. mimalloc returns freed
+# pages to the OS aggressively and does not have the interleaved-lifetime
+# trap; this is the standard fix for long-running Rust servers.
+mimalloc = { version = "0.1", default-features = false }
 libp2p = { version = "0.55", features = [
     "tokio", "gossipsub", "noise", "yamux", "tcp", "quic", "identify",
     "macros", "ed25519", "request-response", "json", "autonat", "dcutr",

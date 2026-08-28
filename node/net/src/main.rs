@@ -22,6 +22,9 @@ mod node;
 mod proto;
 mod store;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use clap::Parser;
 use libp2p::{Multiaddr, SwarmBuilder};
 use sestrian_core as core;
