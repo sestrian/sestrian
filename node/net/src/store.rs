@@ -432,7 +432,20 @@ impl Store {
                           ledger: &TokenLedger,
                           model: &sestrian_core::model_state::ModelState) {
         let bin_tmp = self.dir.join("snapshot.bin.tmp");
-        if fs::write(&bin_tmp, sestrian_core::int64_bytes(state)).is_err() {
+        // STREAM the state in bounded chunks — int64_bytes(state) materialized
+        // a second ~930MB buffer next to the ~915MB state clone every 25
+        // blocks, and that 1.85GB transient is what set the node's heap
+        // high-water (glibc keeps the peak). 8MB chunks cap the extra at noise.
+        let write_chunked = || -> std::io::Result<()> {
+            use std::io::Write;
+            let f = fs::File::create(&bin_tmp)?;
+            let mut w = std::io::BufWriter::with_capacity(1 << 20, f);
+            for chunk in state.chunks(1 << 20) {
+                w.write_all(&sestrian_core::int64_bytes(chunk))?;
+            }
+            w.flush()
+        };
+        if write_chunked().is_err() {
             return;
         }
         let _ = fs::rename(&bin_tmp, self.dir.join("snapshot.bin"));

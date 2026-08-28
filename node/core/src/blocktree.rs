@@ -1200,6 +1200,34 @@ impl BlockTree {
     /// block of lag puts any head tie above the floor; divergence deeper
     /// than the prune window remains a resync, as documented. Falls back to
     /// the head itself when the parent is unavailable (genesis, pruned).
+    /// Run `f` against the state at `target` WITHOUT materializing a copy:
+    /// canon is rewound in place, `f` reads it, canon is rolled forward. The
+    /// snapshot writer streams straight from the rewound canon — the old path
+    /// cloned the full state (~915MB at devnet scale) every 25 blocks.
+    pub fn with_state_at<R>(&mut self, target: &str,
+                            f: impl FnOnce(&[i64]) -> R)
+        -> Result<R, ValidationError>
+    {
+        let plan = self.rewind_to(target)?;
+        let r = f(&self.canon);
+        self.roll_forward(plan);
+        Ok(r)
+    }
+
+    /// The block to CHECKPOINT (hash only): the head's PARENT, not the head —
+    /// a snapshot taken AT the head puts the state floor exactly where a live
+    /// proposal tie can exist (the restart-wedge that stranded two anchors).
+    /// Falls back to the head when the parent is unavailable.
+    pub fn snapshot_basis_hash(&self) -> String {
+        if let Some(hdr) = self.blocks.get(&self.head) {
+            if hdr.height >= 1 && hdr.prev_hash != self.genesis_hash
+                && self.undo.contains_key(&self.head) {
+                return hdr.prev_hash.clone();
+            }
+        }
+        self.head.clone()
+    }
+
     pub fn snapshot_basis(&self) -> (String, Vec<i64>) {
         if let Some(hdr) = self.blocks.get(&self.head) {
             if hdr.height >= 1 && hdr.prev_hash != self.genesis_hash {

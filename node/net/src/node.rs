@@ -1428,12 +1428,22 @@ impl Node {
             }
         }
         if h % SNAPSHOT_EVERY == 0 {
-            // checkpoint the head's PARENT — see BlockTree::snapshot_basis
-            let (sh, sstate) = self.tree.snapshot_basis();
+            // checkpoint the head's PARENT (see snapshot_basis_hash), streaming
+            // from the in-place rewound canon — no ~915MB state clone.
+            let sh = self.tree.snapshot_basis_hash();
             let sheight = self.tree.blocks.get(&sh).map(|b| b.height).unwrap_or(h);
-            self.store.write_snapshot(&sh, sheight, &sstate,
-                                      &self.tree.ledger[&sh],
-                                      &self.tree.model[&sh]);
+            let (store, ledger, model) =
+                (&self.store, &self.tree.ledger[&sh], &self.tree.model[&sh]);
+            let (st, led, mo) = (store, ledger.clone(), model.clone());
+            if self.tree.with_state_at(&sh, |state| {
+                st.write_snapshot(&sh, sheight, state, &led, &mo);
+            }).is_err() {
+                // parent unreachable (pruned) — fall back to the head itself
+                let head = self.tree.head.clone();
+                self.store.write_snapshot(&head, h, self.tree.head_state(),
+                                          self.tree.head_ledger(),
+                                          self.tree.head_model());
+            }
         }
         // the head moved: prune mempools + pending against it
         self.evict_delta_pool();
@@ -2300,12 +2310,19 @@ async fn run_chain(
         }
     }
     // final report + snapshot (moved here from the old single loop)
-    let (sh, sstate) = node.tree.snapshot_basis();
+    let sh = node.tree.snapshot_basis_hash();
     let sheight = node.tree.blocks.get(&sh).map(|b| b.height)
         .unwrap_or_else(|| node.head_height());
-    node.store.write_snapshot(&sh, sheight, &sstate,
-                              &node.tree.ledger[&sh],
-                              &node.tree.model[&sh]);
+    let (led, mo) = (node.tree.ledger[&sh].clone(), node.tree.model[&sh].clone());
+    let store = &node.store;
+    if node.tree.with_state_at(&sh, |state| {
+        store.write_snapshot(&sh, sheight, state, &led, &mo);
+    }).is_err() {
+        let head = node.tree.head.clone();
+        let hh = node.head_height();
+        node.store.write_snapshot(&head, hh, node.tree.head_state(),
+                                  node.tree.head_ledger(), node.tree.head_model());
+    }
     let mut lineage = Vec::new();
     let mut cur = node.tree.head.clone();
     while cur != node.tree.genesis_hash {
