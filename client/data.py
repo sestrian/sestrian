@@ -30,15 +30,19 @@ class ByteData:
                  device: str = "cpu", val_frac: float = 0.1):
         if path == DEFAULT_CORPUS:
             _ensure_corpus(path)
-        with open(path, "rb") as f:
-            raw = f.read()
-        # keep the corpus as BYTES in memory (uint8) — an 18GB corpus as int64
-        # would be 144GB of RAM; batches are widened to long per sample below
-        data = np.frombuffer(raw, dtype=np.uint8)
+        # MEMORY-MAP the corpus — never load it. The old path was
+        # f.read() + torch.from_numpy(...copy()): TWO full copies in RAM, so an
+        # 18GB corpus cost ~36GB resident per miner (measured 31GB on the CUDA
+        # trainer) and set a ~2x-corpus RAM floor on anyone joining. A memmap
+        # costs address space only; the OS pages in the handful of 128-byte
+        # windows a batch touches and evicts them under pressure. get_batch
+        # copies each sampled window into the batch tensor, so nothing torch
+        # trains on aliases the mapping.
+        data = np.memmap(path, dtype=np.uint8, mode="c")  # copy-on-write: torch-safe, still lazily paged
         n = len(data)
         cut = int(n * (1 - val_frac))
-        self.train = torch.from_numpy(data[:cut].copy())
-        self.val = torch.from_numpy(data[cut:].copy())
+        self.train = torch.from_numpy(data[:cut])
+        self.val = torch.from_numpy(data[cut:])
         self.block_size = block_size
         self.device = device
         self.n_bytes = n
