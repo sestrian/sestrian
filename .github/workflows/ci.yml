@@ -253,6 +253,32 @@ jobs:
           path: /tmp/fcp_*.log
           if-no-files-found: ignore
 
+  # THE WEDGE: a node killed while its peer mines past the body-retention
+  # window must recover across a shard-only gap. Reproduces how the EU anchor
+  # wedged twice on 2026-08-27/28 (headers-first sync + the shard pump are
+  # what it exercises); found live, pinned here.
+  lag-catchup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: node
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: a node recovers across a beyond-body-window gap
+        run: bash scripts/lag-catchup-proof.sh 60
+      - name: upload lag-catchup logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lag-catchup-logs
+          path: /tmp/lag*.log
+          if-no-files-found: ignore
+
   # Chaos soak: same two-node devnet but one node is SIGKILLed mid-run and must
   # fast-boot, catch up, and still converge. Too slow to gate every PR — runs
   # on pushes to main and on the nightly schedule.
