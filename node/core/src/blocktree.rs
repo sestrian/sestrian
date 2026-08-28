@@ -484,9 +484,6 @@ pub struct BlockTree {
     /// per connected block: the aggregated sparse delta it applied — exactly
     /// the diff the trainer bridge needs on head advance.
     redo: HashMap<String, Vec<(u32, i64)>>,
-    /// most recent slow-path (side branch) state — lets a multi-block rival
-    /// chain validate sequentially without retaining a vector per block.
-    side_state: Option<(String, Vec<i64>)>,
     /// a small genesis stays resident so joiners can fetch it over sync;
     /// a production-size one is re-derivable from genesis.bin (see net).
     genesis_pin: Option<Vec<i64>>,
@@ -496,6 +493,25 @@ pub struct BlockTree {
 }
 
 const GENESIS_PIN_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// Everything a validated-but-uncommitted block would change — the output of
+/// `validate_at_base`, consumed by `commit_staged` (head adoption) or recorded
+/// as a side block. Sparse throughout: nothing here scales with the model.
+struct Staged {
+    agg: BTreeMap<u32, i64>,
+    init_pages: Vec<Vec<i64>>,
+    new_leaves: Vec<[u8; 32]>,
+    led: TokenLedger,
+    post_model: ModelState,
+}
+
+/// How to put canon back where `rewind_to` found it: undo the `down` blocks in
+/// reverse, re-apply the `up` blocks in reverse, restore the saved leaf cache.
+struct RewindPlan {
+    up: Vec<String>,   // head-first walk up to the common ancestor
+    down: Vec<String>, // target-first walk down the side branch
+    saved_leaves: Vec<[u8; 32]>,
+}
 
 /// The genesis header for an initial weight vector — the network's shared trust
 /// anchor. Its block_hash is the genesis id; a joining node fetches the genesis
@@ -596,7 +612,6 @@ impl BlockTree {
             page_leaves,
             undo: HashMap::new(),
             redo: HashMap::new(),
-            side_state: None,
             genesis_pin,
             hash_verified: HashSet::new(),
         };
@@ -731,12 +746,33 @@ impl BlockTree {
     /// strong as the dense reference — divergence is rejection, never a fork.
     fn connect_extend(&mut self, block: Block) -> Result<bool, ValidationError> {
         let bh = block.hash();
-        let h = &block.header;
         let parent = self.head.clone();
         let parent_model = self.model[&parent].clone();
-        let parent_ledger = &self.ledger[&parent];
+        let parent_ledger = self.ledger[&parent].clone();
         let parent_height = self.blocks[&parent].height;
         let jurors = self.recent_proposers(&parent);
+        let staged = self.validate_at_base(&block, parent_height,
+                                           &parent_ledger, &jurors,
+                                           &parent_model)?;
+        let work = self.cum_work[&parent]
+            .saturating_add(block.header.work.max(1));
+        self.commit_staged(bh, block.header, staged, work);
+        Ok(true)
+    }
+
+    /// Validate `block` against CANON AS THE PARENT STATE, without mutating
+    /// anything. Both the fast path (parent == head, canon already there) and
+    /// the side path (canon rewound to the parent first) run THIS — one
+    /// validation implementation, so the two paths cannot drift. Every check
+    /// and its error precedence is exactly the old fast path's, which the
+    /// negative golden vectors pin.
+    fn validate_at_base(&self, block: &Block, parent_height: u64,
+                        parent_ledger: &TokenLedger,
+                        jurors: &HashSet<String>,
+                        parent_model: &ModelState)
+        -> Result<Staged, ValidationError>
+    {
+        let h = &block.header;
         let dim = self.canon.len();
         let spans: Vec<(u64, u64)> = parent_model.pages.iter()
             .map(|p| (p.start, p.end)).collect();
@@ -786,13 +822,13 @@ impl BlockTree {
         }
         // everything else (header, lottery, roots, fold, token transition)
         let (_, led, post_model, activations) = validate_inner(
-            &block,
+            block,
             None,
             parent_height,
             parent_ledger,
             self.data_contributor.as_deref(),
-            &jurors,
-            &parent_model,
+            jurors,
+            parent_model,
             &self.params,
         )?;
         // per-page trimmed mean over each page's claimants — only coordinates
@@ -833,7 +869,16 @@ impl BlockTree {
         if root != h.state_root {
             return Err(err("state_root does not reproduce from txs"));
         }
-        // COMMIT: apply in place, record undo/redo, extend for growth
+        Ok(Staged { agg, init_pages, new_leaves, led, post_model })
+    }
+
+    /// COMMIT a staged validation as the new head: apply the aggregate to
+    /// canon in place, append growth tails, record sparse undo/redo, adopt
+    /// the pre-computed leaves. Canon MUST already sit at the block's parent
+    /// (true on the fast path by definition; on the side path after rewind).
+    fn commit_staged(&mut self, bh: String, header: Header, staged: Staged,
+                     work: u64) {
+        let Staged { agg, init_pages, new_leaves, led, post_model } = staged;
         let mut undo: Vec<(u32, i64)> = Vec::with_capacity(agg.len());
         for (&i, &m) in &agg {
             let old = self.canon[i as usize];
@@ -845,25 +890,30 @@ impl BlockTree {
             init_pages_flat.extend_from_slice(&ip);
             self.canon.extend(ip);
         }
-        let tail: Vec<i64> = init_pages_flat;
         self.page_leaves = new_leaves;
-        self.undo.insert(bh.clone(), (undo, tail));
+        self.undo.insert(bh.clone(), (undo, init_pages_flat));
         self.redo.insert(bh.clone(), agg.into_iter().collect());
-        let work = self.cum_work[&parent].saturating_add(h.work.max(1));
-        self.blocks.insert(bh.clone(), block.header);
+        self.blocks.insert(bh.clone(), header);
         self.ledger.insert(bh.clone(), led);
         self.model.insert(bh.clone(), post_model);
         self.cum_work.insert(bh.clone(), work);
         self.head = bh;
-        self.side_state = None;
         self.prune_deep();
-        Ok(true)
     }
 
-    /// SLOW PATH: a block whose parent is NOT the head. Reconstruct the parent
-    /// state (undo-walk from canon, or the cached side state), validate with
-    /// the dense reference, and adopt on fork-choice victory. Rare by design —
-    /// ties and short reorgs — and bounded by the prune window.
+    /// SLOW PATH: a block whose parent is NOT the head. REWIND canon in place
+    /// to the parent (sparse undo/redo walk — no copy of the model), run the
+    /// same staged validation as the fast path, then either COMMIT (fork-choice
+    /// victory: canon is already at the parent, so adoption is the ordinary
+    /// commit) or record the side block and ROLL canon forward to the old head.
+    ///
+    /// The old implementation materialized THREE full copies of the model here
+    /// (a cloned parent state, a dense body per tx, and a cached side state) —
+    /// ~915MB each at devnet scale. Ties between two miners are ROUTINE, and
+    /// those transients are what the OOM killer kept reaping on the anchors.
+    /// Side blocks now also get undo/redo entries like head blocks, so a
+    /// multi-block rival chain rewinds through them uniformly — the fragile
+    /// single-slot side_state cache is gone.
     fn connect_side(&mut self, block: Block) -> Result<bool, ValidationError> {
         let bh = block.hash();
         let parent = block.header.prev_hash.clone();
@@ -872,70 +922,177 @@ impl BlockTree {
         let parent_ledger = self.ledger[&parent].clone();
         let parent_height = self.blocks[&parent].height;
         let jurors = self.recent_proposers(&parent);
-        // parent state: cached side state, or undo-walk from canon
-        let parent_w: Vec<i64> = if let Some((h, w)) = &self.side_state {
-            if *h == parent { w.clone() } else { self.state_at(&parent)? }
-        } else {
-            self.state_at(&parent)?
-        };
-        // dense bodies for the reference validator
-        let mut block = block;
-        if block.bodies.len() < block.txs.len() {
-            for tx in &block.txs {
-                if !block.bodies.contains_key(&tx.da_pointer) {
-                    let (n, coords) = Self::body_coords(&block, tx)?;
-                    let mut dense = vec![0i64; n];
-                    for &(i, v) in &coords {
-                        dense[i as usize] = v;
-                    }
-                    block.bodies.insert(tx.da_pointer.clone(), dense);
-                }
+        let plan = self.rewind_to(&parent)?;
+        // From here until adopt/restore, canon IS the parent state. No `?`
+        // returns in between: every error path must roll canon forward first.
+        let staged = match self.validate_at_base(&block, parent_height,
+                                                 &parent_ledger, &jurors,
+                                                 &parent_model) {
+            Ok(s) => s,
+            Err(e) => {
+                self.roll_forward(plan);
+                return Err(e);
             }
-        }
-        let (w, led, post_model) = validate_block(
-            &block,
-            &parent_w,
-            parent_height,
-            &parent_ledger,
-            self.data_contributor.as_deref(),
-            &jurors,
-            &parent_model,
-            &self.params,
-        )?;
-        let work = self.cum_work[&parent].saturating_add(block.header.work.max(1));
-        self.blocks.insert(bh.clone(), block.header);
-        self.ledger.insert(bh.clone(), led);
-        self.model.insert(bh.clone(), post_model.clone());
-        self.cum_work.insert(bh.clone(), work);
+        };
+        let work = self.cum_work[&parent]
+            .saturating_add(block.header.work.max(1));
         let head_work = self.cum_work[&self.head];
         let became = work > head_work || (work == head_work && bh < self.head);
         if became {
-            // REORG: the side chain wins. Adopt its state, and record this
-            // block's own undo/redo relative to its parent (the shared-prefix
-            // undos stay valid; abandoned-branch entries are inert garbage
-            // pruned by depth). O(dim) diff scan — the rare path only.
-            let plen = parent_w.len();
-            let mut undo: Vec<(u32, i64)> = Vec::new();
-            let mut redo: Vec<(u32, i64)> = Vec::new();
-            for (i, (&ow, &nw)) in parent_w.iter().zip(&w).enumerate() {
-                if ow != nw {
-                    undo.push((i as u32, ow));
-                    redo.push((i as u32, nw.wrapping_sub(ow)));
+            // REORG: canon already sits at the parent — adopting the side
+            // branch is the ordinary commit. Undo/redo entries recorded for
+            // the walked path still describe their blocks; abandoned-branch
+            // entries are inert garbage pruned by depth.
+            self.commit_staged(bh, block.header, staged, work);
+            return Ok(true);
+        }
+        // Parked: record the block FULLY — including undo/redo relative to its
+        // parent, so a deeper rival extending it can rewind through it later —
+        // then put canon back at the current head.
+        let undo: Vec<(u32, i64)> = staged.agg.iter()
+            .map(|(&i, _)| (i, self.canon[i as usize])).collect();
+        let tail: Vec<i64> = staged.init_pages.concat();
+        self.undo.insert(bh.clone(), (undo, tail));
+        self.redo.insert(bh.clone(), staged.agg.into_iter().collect());
+        self.blocks.insert(bh.clone(), block.header);
+        self.ledger.insert(bh.clone(), staged.led);
+        self.model.insert(bh.clone(), staged.post_model);
+        self.cum_work.insert(bh.clone(), work);
+        self.roll_forward(plan);
+        self.prune_deep();
+        Ok(false)
+    }
+
+    /// Move CANON (and the leaf cache) from the head to `target` by walking
+    /// sparse undo entries up to the common ancestor and redo entries down the
+    /// side branch — in place, no model copy. Returns the plan that
+    /// `roll_forward` uses to put canon back. All required undo/redo entries
+    /// are verified PRESENT before the first mutation, so an Err leaves canon
+    /// untouched.
+    fn rewind_to(&mut self, target: &str)
+        -> Result<RewindPlan, ValidationError>
+    {
+        // target's ancestry up to a block that lies on the head chain
+        let mut on_head: HashSet<String> = HashSet::new();
+        let mut cur = self.head.clone();
+        on_head.insert(cur.clone());
+        while cur != self.genesis_hash {
+            let Some(h) = self.blocks.get(&cur) else { break };
+            cur = h.prev_hash.clone();
+            on_head.insert(cur.clone());
+        }
+        let mut down: Vec<String> = Vec::new(); // target-first
+        let mut cur = target.to_string();
+        while !on_head.contains(&cur) {
+            let Some(h) = self.blocks.get(&cur) else {
+                return Err(err("orphan: parent unknown"));
+            };
+            down.push(cur.clone());
+            cur = h.prev_hash.clone();
+        }
+        let common = cur;
+        let mut up: Vec<String> = Vec::new(); // head-first
+        let mut cur = self.head.clone();
+        while cur != common {
+            up.push(cur.clone());
+            cur = self.blocks[&cur].prev_hash.clone();
+        }
+        // availability check BEFORE any mutation — all or nothing
+        for h in &up {
+            if !self.undo.contains_key(h) || !self.redo.contains_key(h) {
+                return Err(err("parent state beyond the undo window"));
+            }
+        }
+        for h in &down {
+            if !self.undo.contains_key(h) || !self.redo.contains_key(h) {
+                return Err(err("parent state beyond the undo window"));
+            }
+        }
+        let saved_leaves = self.page_leaves.clone(); // 32B per page — tiny
+        // unwind canon head -> common
+        for h in &up {
+            let (undo, tail) = &self.undo[h];
+            if !tail.is_empty() {
+                let nl = self.canon.len() - tail.len();
+                self.canon.truncate(nl);
+            }
+            for &(i, old) in undo {
+                self.canon[i as usize] = old;
+            }
+        }
+        // redo common -> target down the branch
+        for h in down.iter().rev() {
+            for &(i, m) in &self.redo[h] {
+                let v = self.canon[i as usize];
+                self.canon[i as usize] = v.wrapping_add(m);
+            }
+            let (_, tail) = &self.undo[h];
+            if !tail.is_empty() {
+                self.canon.extend_from_slice(tail);
+            }
+        }
+        // leaf cache must describe canon AT TARGET: recompute every page a
+        // walked block touched (page-sized hashing — bounded by the largest
+        // page, not the model), sized to the target's page table.
+        let target_model = self.model[target].clone();
+        let mut touched_pages: BTreeSet<usize> = BTreeSet::new();
+        let coord_page = |i: u32| -> Option<usize> {
+            target_model.pages.iter()
+                .position(|p| (i as u64) >= p.start && (i as u64) < p.end)
+        };
+        for h in up.iter().chain(down.iter()) {
+            for &(i, _) in &self.redo[h] {
+                if let Some(p) = coord_page(i) {
+                    touched_pages.insert(p);
                 }
             }
-            debug_assert!(w.len() >= plen);
-            let tail: Vec<i64> = w[plen..].to_vec();
-            self.undo.insert(bh.clone(), (undo, tail));
-            self.redo.insert(bh.clone(), redo);
-            self.page_leaves = leaves_for(&w, &post_model);
-            self.canon = w;
-            self.head = bh;
-            self.side_state = None;
-        } else {
-            self.side_state = Some((bh, w));
         }
-        self.prune_deep();
-        Ok(became)
+        let mut leaves = self.page_leaves.clone();
+        leaves.truncate(target_model.pages.len());
+        while leaves.len() < target_model.pages.len() {
+            leaves.push([0u8; 32]); // filled below: growth pages are "touched"
+        }
+        // any page beyond a truncation point, or newly present, must rehash
+        for (pid, page) in target_model.pages.iter().enumerate() {
+            let must = touched_pages.contains(&pid)
+                || pid >= saved_leaves.len()
+                || (page.end as usize) > self.canon.len()
+                || leaves[pid] == [0u8; 32];
+            if must || touched_pages.contains(&pid) {
+                let (s, e) = (page.start as usize, page.end as usize);
+                leaves[pid] =
+                    crate::merkle::leaf_hash(&int64_bytes(&self.canon[s..e]));
+            }
+        }
+        self.page_leaves = leaves;
+        Ok(RewindPlan { up, down, saved_leaves })
+    }
+
+    /// Put canon (and the leaf cache) back at the head `rewind_to` started
+    /// from: undo the side branch in reverse, then re-apply the head chain.
+    fn roll_forward(&mut self, plan: RewindPlan) {
+        let RewindPlan { up, down, saved_leaves } = plan;
+        for h in &down {
+            let (undo, tail) = &self.undo[h];
+            if !tail.is_empty() {
+                let nl = self.canon.len() - tail.len();
+                self.canon.truncate(nl);
+            }
+            for &(i, old) in undo {
+                self.canon[i as usize] = old;
+            }
+        }
+        for h in up.iter().rev() {
+            for &(i, m) in &self.redo[h] {
+                let v = self.canon[i as usize];
+                self.canon[i as usize] = v.wrapping_add(m);
+            }
+            let (_, tail) = &self.undo[h];
+            if !tail.is_empty() {
+                self.canon.extend_from_slice(tail);
+            }
+        }
+        self.page_leaves = saved_leaves;
     }
 
     /// Reconstruct the state at `target` — any block within the undo window,
@@ -1026,11 +1183,6 @@ impl BlockTree {
                 if g.len() * 8 > GENESIS_PIN_MAX_BYTES {
                     self.genesis_pin = None;
                 }
-            }
-        }
-        if let Some((h, _)) = &self.side_state {
-            if self.blocks.get(h).map(|hdr| hdr.height < floor).unwrap_or(true) {
-                self.side_state = None;
             }
         }
     }

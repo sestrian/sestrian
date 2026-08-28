@@ -1144,3 +1144,129 @@ fn proposer_lookback_matches_reference() {
                    "juror-set size diverges for chain {n} cycling {cycle}");
     }
 }
+
+/// PARTIAL page claims around a PARKED fork + a rival chain adoption + a
+/// post-reorg block leaning on the untouched-page leaf cache + a park that
+/// rewinds ACROSS the reorg boundary. chain_replay claims every page in every
+/// block, so a corrupted leaf cache is invisible there (a deliberate break in
+/// `roll_forward` passed the whole suite) — this family exists to catch it.
+/// Head + head state_root are asserted after EVERY block, so a drifted canon
+/// or stale leaf shows up at the block where it happens, not just at the end.
+#[test]
+fn fork_replay_park_reorg_and_leaf_cache() {
+    use sestrian_core::blocktree::{Block, BlockTree};
+    use sestrian_core::model_state::page_state_root;
+    use std::collections::HashMap;
+    for case in vectors()["fork_replay"].as_array().unwrap() {
+        let spec = spec_from(&case["spec"]);
+        let params = params_from(spec.clone(), &case["params"]);
+        let genesis_w = i64s(&case["genesis_w"]);
+        let mut tree = BlockTree::new(
+            genesis_w.clone(),
+            Some(case["data_contributor"].as_str().unwrap().into()),
+            params.clone());
+        for (n, b) in case["blocks"].as_array().unwrap().iter().enumerate() {
+            let header = header_from(&b["header"]);
+            let txs: Vec<core::BackpropTx> =
+                b["txs"].as_array().unwrap().iter().map(tx_from).collect();
+            let bodies: HashMap<String, Vec<i64>> = b["bodies"].as_object().unwrap()
+                .iter().map(|(k, v)| (k.clone(), i64s(v))).collect();
+            let scores: std::collections::BTreeMap<String, u64> =
+                b["scores"].as_object().unwrap().iter()
+                    .filter_map(|(k, x)| x.as_u64().map(|s| (k.clone(), s)))
+                    .collect();
+            let sketches: std::collections::BTreeMap<String, Vec<i32>> =
+                b["sketches"].as_object().unwrap().iter()
+                    .filter_map(|(k, x)| x.as_array().map(|a| (
+                        k.clone(),
+                        a.iter().map(|e| e.as_i64().unwrap_or(0) as i32).collect(),
+                    )))
+                    .collect();
+            tree.add_block(Block { header, txs, bodies, sparse: HashMap::new(),
+                                   transfers: Vec::new(), data_txs: Vec::new(),
+                                   scores, sketches })
+                .unwrap_or_else(|e| panic!("fork block {n} must validate: {}", e.0));
+            assert_eq!(tree.head, b["expected_head"].as_str().unwrap(),
+                       "head after block {n} diverges from the reference");
+            assert_eq!(
+                page_state_root(tree.head_state(), tree.head_model()),
+                b["expected_head_state_root"].as_str().unwrap(),
+                "canon/leaf coherence lost after block {n}");
+        }
+        assert_eq!(tree.head, case["expected_head"].as_str().unwrap());
+        assert_eq!(page_state_root(tree.head_state(), tree.head_model()),
+                   case["expected_state_root"].as_str().unwrap());
+        assert_eq!(tree.head_ledger().root(),
+                   case["expected_ledger_root"].as_str().unwrap());
+    }
+}
+
+/// A rival whose parent lies BELOW the undo window must be REJECTED with the
+/// documented error and must leave canon byte-identical — the all-or-nothing
+/// guarantee of `rewind_to`. Replays the fork family's MAIN chain under
+/// prune_depth 1, then feeds it the deep side block.
+#[test]
+fn deep_rival_beyond_window_rejects_cleanly() {
+    use sestrian_core::blocktree::{Block, BlockTree};
+    use std::collections::HashMap;
+    let v = vectors();
+    let case = &v["fork_replay"].as_array().unwrap()[0];
+    let spec = spec_from(&case["spec"]);
+    let params = params_from(spec.clone(), &case["params"]);
+    let mut tree = BlockTree::new(
+        i64s(&case["genesis_w"]),
+        Some(case["data_contributor"].as_str().unwrap().into()),
+        params);
+    tree.prune_depth = Some(1);
+    let blocks = case["blocks"].as_array().unwrap();
+    let mk = |b: &Value| -> Block {
+        Block {
+            header: header_from(&b["header"]),
+            txs: b["txs"].as_array().unwrap().iter().map(tx_from).collect(),
+            bodies: b["bodies"].as_object().unwrap().iter()
+                .map(|(k, v)| (k.clone(), i64s(v))).collect::<HashMap<_, _>>(),
+            sparse: HashMap::new(),
+            transfers: Vec::new(), data_txs: Vec::new(),
+            scores: b["scores"].as_object().unwrap().iter()
+                .filter_map(|(k, x)| x.as_u64().map(|s| (k.clone(), s)))
+                .collect(),
+            sketches: b["sketches"].as_object().unwrap().iter()
+                .filter_map(|(k, x)| x.as_array().map(|a| (
+                    k.clone(),
+                    a.iter().map(|e| e.as_i64().unwrap_or(0) as i32).collect(),
+                )))
+                .collect(),
+        }
+    };
+    // Replay the whole family under aggressive pruning. Fork choice needs
+    // deeper rewinds as the reorg plays out, and at depth 1 one of the walks
+    // MUST eventually cross the floor: that block must be rejected with the
+    // documented error, the head must not move, and canon must stay
+    // byte-identical — rewind_to's all-or-nothing guarantee.
+    let mut saw_rejection = false;
+    for b in blocks {
+        let before = tree.head_state().clone();
+        let head_before = tree.head.clone();
+        match tree.add_block(mk(b)) {
+            Ok(_) => {}
+            Err(e) => {
+                // under pruning two rejections are legitimate: the walk
+                // crossing the floor, and the orphan of an already-rejected
+                // parent. EVERY rejection must be side-effect-free.
+                assert!(e.0.contains("beyond the undo window")
+                        || e.0.contains("orphan"),
+                        "wrong rejection under pruning: {}", e.0);
+                assert_eq!(tree.head, head_before,
+                           "rejection must not move the head");
+                assert_eq!(tree.head_state(), &before,
+                           "rejection must leave canon byte-identical \
+                            (all-or-nothing rewind)");
+                if e.0.contains("beyond the undo window") {
+                    saw_rejection = true;
+                }
+            }
+        }
+    }
+    assert!(saw_rejection,
+            "depth-1 pruning must force at least one beyond-window rejection");
+}

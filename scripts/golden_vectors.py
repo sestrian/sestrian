@@ -866,6 +866,117 @@ def main():
     # the head is whichever chain fork choice (cumulative attempt-discounted
     # vrf_work) selects; recorded as expected_head for the Rust node.
 
+    # --- FORK REPLAY (v1): PARTIAL page claims around a PARKED fork, a rival
+    # chain that must rewind THROUGH parked side blocks, and a post-reorg block
+    # leaning on the untouched-page leaf cache. chain_replay's blocks claim
+    # every page, so every leaf re-hashes every block and a corrupted leaf
+    # cache is invisible there — proven by a deliberate break that its replay
+    # failed to catch. This family exists to catch exactly that class: the
+    # incremental engine's canon/leaf coherence across park, rewind and reorg.
+    tree2 = BlockTree(genesis_w, data_contributor=founder, params=cr_params)
+
+    def elig2(parent, k):
+        led = tree2.ledger[parent]
+        hh = tree2.blocks[parent].header.height + 1
+        stake, total = led.balance(address(k.pub)), led.supply()
+        for a in range(_lot.ATTEMPT_MAX + 1):
+            pr = _lot.vrf_prove(k, parent, hh, a)
+            if _lot.eligible(k.pub, pr, parent, hh, a, stake, total):
+                return a
+        raise AssertionError("ATTEMPT_MAX must be eligible")
+
+    fork_blocks = []
+
+    def add2(parent, miner_keys, proposer_key, pages):
+        hh = tree2.blocks[parent].header.height
+        model = tree2.model[parent]
+        txs, bodies = [], {}
+        for mk in miner_keys:
+            d = mk_body(model, pages)
+            tx = mk_tx(mk, hh, list(pages), d)
+            txs.append(tx); bodies[tx.da_pointer] = d
+        scr = {t.txid(): 100_000 * (i + 1) for i, t in enumerate(txs)}
+        from rig.sketch import sketch_dense as _skd2
+        skt = {t.txid(): _skd2(bodies[t.da_pointer].tolist()) for t in txs}
+        blk = build_block(tree2, parent, txs, bodies,
+                          {t.txid(): 1.0 for t in txs}, proposer_key,
+                          scores=scr, sketches=skt,
+                          attempt=elig2(parent, proposer_key))
+        tree2.add_block(blk)
+        fork_blocks.append({
+            "parent": parent, "hash": blk.hash,
+            "header": dict(blk.header.__dict__),
+            "txs": [{"miner": t.miner, "base_height": t.base_height,
+                     "delta_hash": t.delta_hash,
+                     "da_pointer": t.da_pointer, "bond": t.bond,
+                     "pages": t.canonical_pages(),
+                     "data_refs": t.canonical_refs(), "sig_hex": t.sig.hex()}
+                    for t in txs],
+            "scores": blk.scores, "sketches": blk.sketches,
+            "bodies": {p: b.tolist() for p, b in blk.bodies.items()},
+            "transfers": [], "data_txs": [],
+            # asserted by Rust after EVERY block: head evolution including the
+            # reorg flip, and the head state root (leaf-cache coherence).
+            "expected_head": tree2.head,
+            "expected_head_state_root":
+                tree2.blocks[tree2.head].header.state_root,
+        })
+        return blk.hash
+
+    n_pages2 = len(tree2.head_model().pages)
+    assert n_pages2 >= 4, "fork family needs >= 4 pages for partial claims"
+    g2 = tree2.genesis.hash
+    f1 = add2(g2, [m0, m1, m2], m0, list(range(n_pages2)))  # fund everyone
+    f2 = add2(f1, [m0], m0, [0, 1])            # main: partial claim
+    f3 = add2(f2, [m0], m0, [1, 2])            # main: partial claim
+    # ONE rival block that PARKS...
+    s2 = add2(f1, [m1], m1, [2, 3])
+    assert tree2.head == f3, "s2 must park for the family's narrative to hold"
+    # ...IMMEDIATELY followed by a head extension touching a DISJOINT page.
+    # This is the block that catches a roll_forward that fails to restore the
+    # leaf cache: pages 0-2 were recomputed at the rewind target during the
+    # park, and this block reads their leaves from the cache while touching
+    # only page 3 — a stale cache commits the wrong root right here. (The
+    # first version of this family always followed a park with another SIDE
+    # connect, whose rewind recomputes exactly the corrupted pages — the
+    # corruption self-healed and a deliberate break sailed through.)
+    f4 = add2(f3, [m2], m2, [3])
+    assert tree2.head == f4, "f4 must extend the main chain"
+    # rival branch continues from s2 until fork choice flips the head — each
+    # pre-flip block PARKS (rewinding through parked siblings), the flip is a
+    # deep adoption ACROSS the reorg boundary.
+    s_parent, s_guard = s2, 0
+    while tree2.head != s_parent:
+        s_guard += 1
+        assert s_guard < 16, "rival chain must eventually win fork choice"
+        s_parent = add2(s_parent, [m1], m1, [2, 3])
+    # post-reorg: lean on CACHED leaves (pages 0/1 untouched on the rival
+    # branch since f1) while touching only page 3.
+    add2(tree2.head, [m0, m1], m0, [3])
+    # and one more PARK: extend the ABANDONED main branch (rewind across the
+    # reorg boundary, through the adopted branch's undo entries)...
+    # (whether it parks or wins a see-saw reorg is the fork rule's call —
+    # both paths exercise a boundary-crossing rewind; reality is recorded)
+    add2(f4, [m2], m2, [0])
+    # ...and once more the disjoint-page head extension right after it.
+    add2(tree2.head, [m0], m0, [1])
+    v["fork_replay"] = [{
+        "spec": v["controller_fold"][0]["spec"],
+        "params": v["chain_replay"][0]["params"],
+        "genesis_w": genesis_w.tolist(),
+        "data_contributor": founder,
+        "blocks": fork_blocks,
+        "expected_head": tree2.head,
+        "expected_head_height": tree2.blocks[tree2.head].header.height,
+        "expected_state_root": tree2.blocks[tree2.head].header.state_root,
+        "expected_ledger_root": tree2.head_ledger().root(),
+        "replay_state_root": __import__(
+            "rig.model_state", fromlist=["page_state_root"]
+        ).page_state_root(tree2.replay_head(), tree2.head_model()),
+    }]
+    assert v["fork_replay"][0]["replay_state_root"] == \
+        v["fork_replay"][0]["expected_state_root"], "fork replay must be bit-exact"
+
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w") as f:
         json.dump(v, f, indent=1)
