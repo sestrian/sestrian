@@ -60,7 +60,10 @@ const SYNC_BYTE_BUDGET: usize = 16 * 1024 * 1024;
 /// over the 64MB gossip cap, over the sync response cap with block overhead,
 /// and 1.33x over everything once base64'd. The live network forked at its
 /// first quota rise because every one of those paths failed at once.
-const DTX_INLINE_MAX: usize = 8 * 1024 * 1024;
+/// 12MB: the protocol-v2 envelope caps a delta at DELTA_MAX_NNZ=1M coords,
+/// whose wire form (base64) tops out near 10.7MB — the old 8MB cap silently
+/// pushed a MAX-QUOTA body onto the slow shard path even when freshly minted.
+const DTX_INLINE_MAX: usize = 12 * 1024 * 1024;
 /// Env-overridable accessor (SESTRIAN_DTX_INLINE_MAX) — a transport knob, not
 /// consensus. Tests force it to 0 so toy-size deltas exercise the
 /// announce+shard-fetch path that production only hits at high quotas.
@@ -71,7 +74,10 @@ fn dtx_inline_max() -> usize {
 }
 /// b64 bytes of shards per ShardResponse (one oversized shard may exceed it —
 /// at least one shard is always served so reconstruction can progress).
-const SHARD_SERVE_BUDGET: usize = 12 * 1024 * 1024;
+/// 32MB serves ~3 full bodies per response (a body's shard set is ~10MB
+/// base64'd); at 12MB it was ONE body per round-trip, which is why a peer
+/// gathering bodies for parked blocks recovered at 2 bodies per 10 minutes.
+const SHARD_SERVE_BUDGET: usize = 32 * 1024 * 1024;
 /// How long an announced-but-unfetched delta stays wanted before giving up.
 const WANT_DELTA_TTL: f64 = 600.0;
 // Must EXCEED the time a sync response actually takes on the wire, or the node
@@ -1485,8 +1491,22 @@ impl Node {
                 self.da_pruned_to = floor;
             }
         }
-        const BODY_WINDOW: u64 = 16;
-        let frontier = match head_h.checked_sub(BODY_WINDOW + 1) {
+        // 128 blocks (~6.4h at the 180s ceiling), was 16 (~48min). Geth keeps
+        // its pruned STATE window tight (128 blocks) but retains block BODIES
+        // far longer in the freezer, precisely so peers can rebuild without
+        // redownloading; we had conflated the two and pruned bodies to shards
+        // after 48 minutes — so any node that fell >16 blocks behind (one OOM
+        // restart was enough) could catch up only via multi-peer shard
+        // gathering, and wedged. 128 blocks of ~16MB bodies is ~2GB of disk:
+        // cheap insurance that a laggard can sync on whole bodies.
+        // SESTRIAN_BODY_WINDOW: transport knob (NOT consensus) so the
+        // lag-catchup proof can force the shard-gathering path at toy scale.
+        let body_window: u64 = {
+            static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+            *V.get_or_init(|| std::env::var("SESTRIAN_BODY_WINDOW").ok()
+                .and_then(|s| s.parse().ok()).unwrap_or(128))
+        };
+        let frontier = match head_h.checked_sub(body_window + 1) {
             Some(f) if f > 0 => f,
             _ => return,
         };
@@ -2389,13 +2409,29 @@ impl Node {
         }
         let served = blocks.len() as u64;
         let batch_hashes: HashSet<String> = blocks.iter().map(|sb| sb.hash()).collect();
-        let known_before = self.tree.blocks.len() + self.pending.len();
+        // "learned" = blocks actually CONNECTED to the tree. It used to count
+        // pending too, so a batch parked waiting for bodies read as progress:
+        // the walkback never fired, the cursor marched to the peer's tip, and
+        // a lagging node sat re-receiving the same unconnectable tip block
+        // forever (the EU wedge, twice). Parking is not progress — only what
+        // validates is.
+        let known_before = self.tree.blocks.len();
         let batch_blocks: Vec<StoredBlock> = blocks;
         for sb in batch_blocks.clone() {
             self.install(sb, Some(peer));
         }
         self.retry_pending();
-        let learned = self.tree.blocks.len() + self.pending.len() > known_before;
+        let learned = self.tree.blocks.len() > known_before;
+        // headers-first: blocks parked for missing BODIES start their shard
+        // fetch NOW, from the peer that just proved responsive — not at the
+        // next round tick (up to 180s away). The shard pump then self-chains
+        // per response, so this kick is what sets body-fetch latency.
+        if !learned {
+            let want = self.missing_bodies(32);
+            if !want.is_empty() {
+                let _ = self.net.send(ToNet::SendShards(peer, want));
+            }
+        }
         if !current {
             return; // data absorbed; do not touch the catch-up state machine
         }
@@ -2832,8 +2868,16 @@ impl Node {
     }
 
     fn serve_sync(&mut self, request: &SyncRequest) -> SyncResponse {
-        // serve OUR head chain from `from_height` upward, oldest-first,
-        // bounded by SYNC_BYTE_BUDGET (always at least one block)
+        // HEADERS-FIRST (Bitcoin IBD, headers-first sync): the block SKELETON
+        // (header + tx records, a few KB each) is served for the whole window
+        // regardless of the byte budget; payload BODIES ride along oldest-first
+        // only until the budget. The old shape budgeted blocks and bodies
+        // together, so one ~15MB-of-bodies block filled the entire response and
+        // a lagging peer caught up at one block per round-trip — exactly the
+        // block production rate, which is why a node that fell behind never
+        // came back. The receiver parks bodiless blocks in `pending` and pulls
+        // their bodies from ALL peers in parallel over the shard exchange, so
+        // skeleton delivery is what sets the catch-up rate.
         let mut ascending: Vec<String> = Vec::new();
         let mut cur = self.tree.head.clone();
         while cur != self.tree.genesis_hash {
@@ -2854,40 +2898,36 @@ impl Node {
                 break;
             }
             let Some(sb) = self.blocks_full.get(&h).cloned() else { continue };
-            // Cost this block BEFORE committing to it. The budget used to be
-            // checked only after a block's payloads were already added, so a
-            // response overshot by a whole block: a 16MB budget produced 31MB
-            // responses, and every one of those is cloned, JSON+base64 encoded,
-            // and (measured) ratchets the server's RSS by 40-90MB. Always serve
-            // at least one block, or a lagging peer can never make progress.
-            let mut this_block: Vec<(String, Payload)> = Vec::new();
-            let mut this_bytes = 0usize;
-            for t in &sb.txs {
-                if let Some(tc) = t.to_core() {
-                    let txid = tc.txid();
-                    if let Some(p) = self.payloads.get(&txid).cloned()
-                        .or_else(|| self.store.get_payload(&txid)) {
-                        // oversized bodies travel by shards, not inline
-                        if p.wire_bytes() > dtx_inline_max() {
-                            continue;
+            // bodies: oldest blocks first, until the budget — never gating the
+            // skeleton. Cost a block's bodies BEFORE adding them (an overshoot
+            // is cloned, JSON+base64 encoded, and measurably ratchets RSS).
+            if bytes < SYNC_BYTE_BUDGET {
+                let mut this_block: Vec<(String, Payload)> = Vec::new();
+                let mut this_bytes = 0usize;
+                for t in &sb.txs {
+                    if let Some(tc) = t.to_core() {
+                        let txid = tc.txid();
+                        if let Some(p) = self.payloads.get(&txid).cloned()
+                            .or_else(|| self.store.get_payload(&txid)) {
+                            // oversized bodies travel by shards, not inline
+                            if p.wire_bytes() > dtx_inline_max() {
+                                continue;
+                            }
+                            this_bytes += p.wire_bytes();
+                            this_block.push((txid, p));
                         }
-                        this_bytes += p.wire_bytes();
-                        this_block.push((txid, p));
                     }
                 }
+                if chain.is_empty() || bytes + this_bytes <= SYNC_BYTE_BUDGET {
+                    bytes += this_bytes;
+                    payloads.extend(this_block);
+                }
             }
-            if !chain.is_empty() && bytes + this_bytes > SYNC_BYTE_BUDGET {
-                break;                      // would overshoot — stop cleanly
-            }
-            bytes += this_bytes;
-            payloads.extend(this_block);
             chain.push(sb);
-            if bytes >= SYNC_BYTE_BUDGET {
-                break;
-            }
         }
         info!(from = request.from_height, served = chain.len(),
-              kb = bytes / 1024, "serving sync request");
+              bodies = payloads.len(), kb = bytes / 1024,
+              "serving sync request");
         let genesis = if request.want_genesis {
             match self.tree.genesis_state() {
                 Some(w) if w.len() * 8 <= SYNC_BYTE_BUDGET => Some(w.clone()),
