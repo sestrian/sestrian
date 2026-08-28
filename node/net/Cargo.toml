@@ -17,6 +17,10 @@ sestrian-core = { path = "../core" }
 # pages to the OS aggressively and does not have the interleaved-lifetime
 # trap; this is the standard fix for long-running Rust servers.
 mimalloc = { version = "0.1", default-features = false }
+# --features heap-prof swaps in jemalloc WITH allocation profiling, for
+# chasing referenced-memory growth with real callstacks (jeprof). Never on in
+# a normal build.
+tikv-jemallocator = { version = "0.6", features = ["profiling"], optional = true }
 libp2p = { version = "0.55", features = [
     "tokio", "gossipsub", "noise", "yamux", "tcp", "quic", "identify",
     "macros", "ed25519", "request-response", "json", "autonat", "dcutr",
@@ -43,3 +47,6 @@ async-trait = "0.1"
 futures = "0.3"
 libc = "0.2"          # advisory flock on the data dir (single-writer guarantee)
 zeroize = "1"         # wipe transient key material from memory after load
+
+[features]
+heap-prof = ["dep:tikv-jemallocator"]

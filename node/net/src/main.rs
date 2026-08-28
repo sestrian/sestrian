@@ -22,8 +22,15 @@ mod node;
 mod proto;
 mod store;
 
+#[cfg(not(feature = "heap-prof"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+// heap-prof builds: jemalloc with profiling, so a live node's growth can be
+// attributed to exact allocation stacks (jeprof) instead of theorized about.
+#[cfg(feature = "heap-prof")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use clap::Parser;
 use libp2p::{Multiaddr, SwarmBuilder};
