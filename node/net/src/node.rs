@@ -1197,13 +1197,20 @@ impl Node {
             scores: blk_scores.clone(),
             sketches: blk_sketches.clone(),
         };
-        let mut bodies = HashMap::new();
+        // SPARSE bodies for our own candidate — the last dense() call on the
+        // hot path. Densifying materialized a full-dimension Vec<i64> PER
+        // CHOSEN TX (~960MB each at devnet scale) on every proposal, which is
+        // why the main proposer's RSS kept climbing after every other copy
+        // was gone. The incremental engine consumes `sparse` natively.
+        let mut sparse = HashMap::new();
         for t in chosen.iter() {
-            bodies.insert(t.da_pointer.clone(), self.payloads[&t.txid()].dense().unwrap());
+            let p = &self.payloads[&t.txid()];
+            sparse.insert(t.da_pointer.clone(),
+                          (p.n as u64, p.coords().unwrap_or_default()));
         }
         let block = sestrian_core::blocktree::Block {
-            header, txs: chosen, bodies,
-            sparse: Default::default(),
+            header, txs: chosen, bodies: HashMap::new(),
+            sparse,
             transfers: core_transfers, data_txs: core_data,
             scores: blk_scores, sketches: blk_sketches,
         };
