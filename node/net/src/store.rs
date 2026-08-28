@@ -512,12 +512,20 @@ impl Store {
         let genesis = self.read_genesis()?;
         let blocks = self.read_blocks();
         if let Some((h, height, state, ledger, model)) = self.read_snapshot() {
-            if let Some(r) = self.fast_replay(&genesis, &blocks, &data_contributor,
+            // genesis moves INTO the fast path (it becomes canon until the
+            // snapshot state replaces it) — holding genesis + a canon copy +
+            // the snapshot state at once put THREE full states (~2.9GB) in
+            // the boot peak, which jemalloc profiling caught live. The rare
+            // fallback re-reads genesis from disk instead.
+            if let Some(r) = self.fast_replay(genesis, &blocks, &data_contributor,
                                               prune_depth, &h, height, state,
                                               ledger, model, params) {
                 return Some(r);
             }
             warn!("fast-boot unusable — falling back to full validated replay");
+            let genesis = self.read_genesis()?;
+            return self.full_replay(genesis, &blocks, data_contributor,
+                                    prune_depth, params);
         }
         self.full_replay(genesis, &blocks, data_contributor, prune_depth, params)
     }
@@ -527,14 +535,14 @@ impl Store {
     /// full validation forward from the snapshot only. Returns None (→ fallback)
     /// if the snapshot block isn't in the log or nothing validates past it.
     #[allow(clippy::too_many_arguments)]
-    fn fast_replay(&self, genesis: &[i64], blocks: &[StoredBlock],
+    fn fast_replay(&self, genesis: Vec<i64>, blocks: &[StoredBlock],
                    dc: &Option<String>, prune_depth: u64, snap_hash: &str,
                    snap_h: u64, snap_state: Vec<i64>, snap_ledger: TokenLedger,
                    snap_model: sestrian_core::model_state::ModelState,
                    params: &sestrian_core::model_state::GenesisParams)
         -> Option<Rebuilt>
     {
-        let mut tree = BlockTree::new(genesis.to_vec(), dc.clone(), params.clone());
+        let mut tree = BlockTree::new(genesis, dc.clone(), params.clone());
         tree.prune_depth = Some(prune_depth);
 
         // 1. headers + cum_work for every block up to the snapshot height, in
