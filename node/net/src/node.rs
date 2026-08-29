@@ -92,10 +92,13 @@ fn dtx_gossip_inline_max() -> usize {
 }
 /// b64 bytes of shards per ShardResponse (one oversized shard may exceed it —
 /// at least one shard is always served so reconstruction can progress).
-/// 32MB serves ~3 full bodies per response (a body's shard set is ~10MB
-/// base64'd); at 12MB it was ONE body per round-trip, which is why a peer
-/// gathering bodies for parked blocks recovered at 2 bodies per 10 minutes.
-const SHARD_SERVE_BUDGET: usize = 32 * 1024 * 1024;
+/// 16MB: ~1-2 full bodies per response (a body's shard set is ~10MB
+/// base64'd). 32MB looked better on a LAN but stalled past the
+/// request-response timeout on the transatlantic path — the EU anchor logged
+/// shard timeouts from every peer and trailed the chain. Throughput comes
+/// from the self-chaining pump (a response immediately triggers the next
+/// request), not from giant single responses a lossy WAN can't finish.
+const SHARD_SERVE_BUDGET: usize = 16 * 1024 * 1024;
 /// How long an announced-but-unfetched delta stays wanted before giving up.
 const WANT_DELTA_TTL: f64 = 600.0;
 // Must EXCEED the time a sync response actually takes on the wire, or the node
