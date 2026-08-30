@@ -977,6 +977,89 @@ def main():
     assert v["fork_replay"][0]["replay_state_root"] == \
         v["fork_replay"][0]["expected_state_root"], "fork replay must be bit-exact"
 
+    # --- FRAUD PROOFS (Sharding Road P1): a page fraud proof must convict a
+    # block that committed a wrong page leaf, from headers alone, and REJECT
+    # every tampered/honest variant. The Rust verifier must agree bit-for-bit
+    # on the verdict (true/false) and, for valid proofs, the honest leaf.
+    from rig import fraud as _fraud, merkle as _mk
+    import copy as _copy
+    fr_spec = spec
+    fr_gp = _GP(spec=fr_spec, retarget_window=4, target_deltas=4,
+                quota_max_4dp=20_000, k_sustain=2, announce_lead=1)
+    fr_gw = quantize(rng.standard_normal(_MSt.genesis(fr_spec).dim()) * 0.1)
+    fk0, fk1 = (Key.generate(b"fraud-m0" + b"0" * 24),
+                Key.generate(b"fraud-m1" + b"0" * 24))
+    fr_founder = address(Key.generate(b"fraud-f" + b"0" * 25).pub)
+    fr_tree = BlockTree(fr_gw, data_contributor=fr_founder, params=fr_gp)
+    fr_model = fr_tree.model[fr_tree.genesis.hash]
+    fr_claim = [i for i in range(len(fr_model.pages)) if fr_model.is_active(i)]
+    fr_txs, fr_bodies = [], {}
+    for mk in (fk0, fk1):
+        d = mk_body(fr_model, fr_claim)
+        t = mk_tx(mk, 0, list(fr_claim), d)
+        fr_txs.append(t); fr_bodies[t.txid()] = d
+    fr_scr = {t.txid(): 100_000 * (i + 1) for i, t in enumerate(fr_txs)}
+    from rig.sketch import sketch_dense as _skf
+    fr_skt = {t.txid(): _skf(fr_bodies[t.txid()].tolist()) for t in fr_txs}
+    def fr_elig(parent, k):
+        led = fr_tree.ledger[parent]
+        hh = fr_tree.blocks[parent].header.height + 1
+        stake, total = led.balance(address(k.pub)), led.supply()
+        for a in range(_lot.ATTEMPT_MAX + 1):
+            pr = _lot.vrf_prove(k, parent, hh, a)
+            if _lot.eligible(k.pub, pr, parent, hh, a, stake, total):
+                return a
+        raise AssertionError("ATTEMPT_MAX must be eligible")
+    fr_blk = build_block(
+        fr_tree, fr_tree.genesis.hash, fr_txs,
+        {t.da_pointer: fr_bodies[t.txid()] for t in fr_txs},
+        {t.txid(): 1.0 for t in fr_txs}, fk0, scores=fr_scr, sketches=fr_skt,
+        attempt=fr_elig(fr_tree.genesis.hash, fk0))
+    fr_tree.add_block(fr_blk)
+    w1 = fr_tree.state[fr_blk.hash]
+    committed = [_mk.leaf_hash(w1[p[0]:p[1]].tobytes()).hex()
+                 for p in fr_model.pages]
+    bd = {t.txid(): fr_bodies[t.txid()] for t in fr_txs}
+    disputed = 1  # an expert page every claimant touched
+    honest = _fraud.build(fr_blk.header, fr_tree.genesis.header,
+                          fr_model.canonical_json(), committed, disputed,
+                          fr_txs, bd, fr_gw)
+    # forge a fraudulent block: corrupt page `disputed`'s committed leaf and
+    # re-fold the state_root so the proof's internal checks all pass
+    bad_leaves = list(committed)
+    ba = bytearray(bytes.fromhex(bad_leaves[disputed])); ba[0] ^= 0xFF
+    bad_leaves[disputed] = bytes(ba).hex()
+    lvl = [bytes.fromhex(x) for x in bad_leaves]
+    while len(lvl) > 1:
+        lvl = [_mk._node_hash(lvl[i], lvl[i + 1] if i + 1 < len(lvl) else lvl[i])
+               for i in range(0, len(lvl), 2)]
+    bad_hdr = _copy.deepcopy(fr_blk.header); bad_hdr.state_root = lvl[0].hex()
+    fraud_p = _fraud.build(bad_hdr, fr_tree.genesis.header,
+                           fr_model.canonical_json(), bad_leaves, disputed,
+                           fr_txs, bd, fr_gw)
+    honest_leaf = _mk.leaf_hash(w1[fr_model.pages[disputed][0]:
+                                   fr_model.pages[disputed][1]].tobytes()).hex()
+    # tamper cases (all must verify FALSE / invalid)
+    t_body = _copy.deepcopy(fraud_p)
+    _k = sorted(t_body["bodies"])[0]; t_body["bodies"][_k]["val"][0] += 1
+    t_branch = _copy.deepcopy(fraud_p)
+    _pp = t_branch["parent_path"]; _pp[0] = (_pp[0][0], ("00" * 32))
+    t_parent = _copy.deepcopy(fraud_p); t_parent["parent_page"][0] += 1
+
+    def _case(p, expect):
+        ok, reason = _fraud.verify(p)
+        assert ok == expect, f"rig fraud self-check: {reason}"
+        return {"proof": p, "expect_fraud": expect}
+
+    v["fraud_proof"] = [
+        {**_case(honest, False), "note": "honest block — no fraud"},
+        {**_case(fraud_p, True), "honest_leaf": honest_leaf,
+         "note": "corrupted page leaf — convicted"},
+        {**_case(t_body, False), "note": "tampered body — invalid"},
+        {**_case(t_branch, False), "note": "wrong parent branch — invalid"},
+        {**_case(t_parent, False), "note": "wrong parent page — invalid"},
+    ]
+
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w") as f:
         json.dump(v, f, indent=1)

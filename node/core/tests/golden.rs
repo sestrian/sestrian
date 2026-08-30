@@ -1270,3 +1270,57 @@ fn deep_rival_beyond_window_rejects_cleanly() {
     assert!(saw_rejection,
             "depth-1 pruning must force at least one beyond-window rejection");
 }
+
+/// Page fraud proofs (Sharding Road P1): the Rust verifier's verdict must match
+/// the rig reference for every case — an honest block, a convicted fraud, and
+/// three tampered proofs — and reproduce the honest leaf on the real fraud.
+#[test]
+fn fraud_proof_verdicts_match_reference() {
+    use sestrian_core::fraud::{verify, Body, PageFraudProof, TxRec};
+    use std::collections::HashMap;
+    for case in vectors()["fraud_proof"].as_array().unwrap() {
+        let p = &case["proof"];
+        let bodies: HashMap<String, Body> = p["bodies"].as_object().unwrap()
+            .iter().map(|(k, b)| (k.clone(), Body {
+                n: b["n"].as_u64().unwrap() as usize,
+                idx: b["idx"].as_array().unwrap().iter()
+                    .map(|x| x.as_u64().unwrap()).collect(),
+                val: b["val"].as_array().unwrap().iter()
+                    .map(|x| x.as_i64().unwrap()).collect(),
+            })).collect();
+        let txs: Vec<TxRec> = p["txs"].as_array().unwrap().iter()
+            .map(|t| TxRec { tx: tx_from(t) }).collect();
+        let parent_path: Vec<(bool, String)> = p["parent_path"].as_array().unwrap()
+            .iter().map(|e| {
+                let a = e.as_array().unwrap();
+                // rig emits "L"/"R"; L == sibling on the left
+                (a[0].as_str().unwrap() == "L", a[1].as_str().unwrap().to_string())
+            }).collect();
+        let proof = PageFraudProof {
+            header: header_from(&p["header"]),
+            parent_header: header_from(&p["parent_header"]),
+            parent_model_json: p["parent_model_json"].as_str().unwrap().into(),
+            committed_leaves: p["committed_leaves"].as_array().unwrap().iter()
+                .map(|x| x.as_str().unwrap().to_string()).collect(),
+            page_id: p["page_id"].as_u64().unwrap() as usize,
+            txids: p["txids"].as_array().unwrap().iter()
+                .map(|x| x.as_str().unwrap().to_string()).collect(),
+            txs,
+            bodies,
+            parent_page: p["parent_page"].as_array().unwrap().iter()
+                .map(|x| x.as_i64().unwrap()).collect(),
+            parent_path,
+        };
+        let (fraud, reason) = verify(&proof);
+        let expect = case["expect_fraud"].as_bool().unwrap();
+        assert_eq!(fraud, expect,
+                   "verdict diverged from rig ({}): {reason}",
+                   case["note"].as_str().unwrap_or(""));
+        if expect {
+            // the conviction must name the SAME honest leaf the rig recomputed
+            let want = case["honest_leaf"].as_str().unwrap();
+            assert!(reason.contains(&want[..12]),
+                    "honest leaf mismatch: {reason} vs {want}");
+        }
+    }
+}

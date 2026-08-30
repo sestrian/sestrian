@@ -17,6 +17,7 @@ pub mod capacity;
 pub mod corpus;
 pub mod da;
 pub mod lottery;
+pub mod fraud;
 pub mod merkle;
 pub mod model_state;
 pub mod token;

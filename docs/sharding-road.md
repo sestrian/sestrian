@@ -11,10 +11,10 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked/decision
 
 ## Phase 1 — The Dispute Game (fraud proofs) — additive, no fork
 
-- [ ] 1.1 Merkle branches: `rig/merkle.py` gains `branch(leaves, idx)` +
+- [x] 1.1 Merkle branches: `rig/merkle.py` gains `branch(leaves, idx)` +
       `verify_branch(root, leaf, idx, path)`; same in `node/core/src/merkle.rs`;
       golden family `merkle_branch` (incl. odd-promote levels, single leaf)
-- [ ] 1.2 `rig/fraud.py`: `PageFraudProof` = {block header, parent header,
+- [x] 1.2 `rig/fraud.py`: `PageFraudProof` = {block header, parent header,
       all txids (recompute txset_root), full tx objects, full sparse bodies of
       txs claiming page P, parent-page bytes + branch to parent state_root,
       committed-leaf branch to the block's state_root}. Verifier recomputes the
@@ -22,10 +22,10 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked/decision
       committed leaf while everything else checks out.
       Scope v1: aggregation fraud on existing pages (growth/fold disputes are
       checkable from ModelState alone — later refinement).
-- [ ] 1.3 Golden family `fraud_proof`: a valid proof; tampered variants that
+- [x] 1.3 Golden family `fraud_proof`: a valid proof; tampered variants that
       must be REJECTED (wrong parent branch, altered body, omitted claimant,
       wrong page id, honest block "proof")
-- [ ] 1.4 `node/core/src/fraud.rs`: bit-exact verifier vs golden
+- [x] 1.4 `node/core/src/fraud.rs`: bit-exact verifier vs golden
 - [ ] 1.5 net: identify the faulting page in validation (incremental engine
       already computes per-page leaves — return the first mismatch), build the
       proof from held data, gossip on `/sestrian/fraud/1`; receivers verify +
@@ -36,7 +36,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked/decision
 - [ ] 1.7 `scripts/fraud-proof-proof.sh` + CI job: byzantine producer on a
       2-node local net → every honest node rejects the block AND emits/verifies
       the proof; chain converges without the fraudulent block
-- [ ] 1.8 verify-the-verifier: break `verify_fraud_proof` two ways (skip body
+- [x] 1.8 verify-the-verifier: break `verify_fraud_proof` two ways (skip body
       hash check; skip branch check) — golden family must fail both
 - [ ] 1.9 deploy fleet-wide (additive release)
 
@@ -129,4 +129,10 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked/decision
 
 ## Execution log
 
-(appended as tasks land)
+- 2026-08-29 DECISION (soundness): a single-page fraud proof is only sound if
+  the accused tree's per-page leaves are known — sibling paths can't be
+  derived from a corrupted root. v5 therefore makes the block BODY carry
+  `page_leaves` (~2KB; validation asserts they fold to header.state_root, so
+  they are self-committed — no header change). Fraud proofs verify against
+  `leaves[P]` directly. This also hands Phase 4's paged validators exactly the
+  foreign-leaf set they need. v5 = lanes + page_leaves, one boundary.

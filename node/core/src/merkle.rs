@@ -46,3 +46,50 @@ pub fn root_from_hashes(mut level: Vec<[u8; 32]>) -> [u8; 32] {
     }
     level[0]
 }
+
+/// The full tree as levels[0] = leaf hashes .. levels[last] = [root] —
+/// mirrors `rig/merkle.py::build` (odd node promoted by hashing with itself).
+pub fn levels(leaf_hashes: Vec<[u8; 32]>) -> Vec<Vec<[u8; 32]>> {
+    assert!(!leaf_hashes.is_empty(), "need at least one leaf");
+    let mut out = vec![leaf_hashes];
+    while out.last().unwrap().len() > 1 {
+        let level = out.last().unwrap();
+        let mut nxt = Vec::with_capacity(level.len().div_ceil(2));
+        for i in (0..level.len()).step_by(2) {
+            let a = &level[i];
+            let b = if i + 1 < level.len() { &level[i + 1] } else { &level[i] };
+            nxt.push(node_hash(a, b));
+        }
+        out.push(nxt);
+    }
+    out
+}
+
+/// Inclusion proof for leaf `index`: (sibling_is_left, sibling_hash) per
+/// level — mirrors `rig/merkle.py::proof` ("L" == sibling on the left).
+pub fn proof(levels: &[Vec<[u8; 32]>], index: usize) -> Vec<(bool, [u8; 32])> {
+    let mut path = Vec::new();
+    let mut idx = index;
+    for level in &levels[..levels.len() - 1] {
+        if idx % 2 == 0 {
+            let sib = if idx + 1 < level.len() { level[idx + 1] } else { level[idx] };
+            path.push((false, sib)); // sibling on the RIGHT
+        } else {
+            path.push((true, level[idx - 1])); // sibling on the LEFT
+        }
+        idx /= 2;
+    }
+    path
+}
+
+/// Fold a leaf hash up its proof; true iff it lands on the committed root —
+/// mirrors `rig/merkle.py::verify` (which takes page bytes; callers here pass
+/// `leaf_hash(bytes)` so disputes can also verify a COMMITTED leaf directly).
+pub fn verify_leaf(leaf: [u8; 32], path: &[(bool, [u8; 32])],
+                   expected_root: &[u8; 32]) -> bool {
+    let mut h = leaf;
+    for (sib_left, sib) in path {
+        h = if *sib_left { node_hash(sib, &h) } else { node_hash(&h, sib) };
+    }
+    &h == expected_root
+}
