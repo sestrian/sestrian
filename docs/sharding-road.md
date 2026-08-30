@@ -122,7 +122,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked/decision
 
 ## Phase 6 — Retirement (operational, evidence-gated)
 
-- [ ] 6.1 criteria doc: what must be true to retire full validators (quarter of
+- [x] 6.1 criteria doc (docs/retirement-criteria.md): what must be true to retire full validators (quarter of
       mixed operation, ≥1 organic fault caught by mechanisms alone)
 - [ ] 6.2 the switch itself: full validators step down; backbone stays
       universally validated forever
