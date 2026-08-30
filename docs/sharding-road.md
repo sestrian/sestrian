@@ -93,10 +93,10 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked/decision
       at assignment; custody challenges: random (page,chunk) challenge each
       epoch — miss the response window → bond slashed (juror-attested like
       data challenges)
-- [ ] 4.3 finality: `settled = height ≤ head − FRAUD_WINDOW && no verified
+- [x] 4.3 finality: `settled = height ≤ head − FRAUD_WINDOW && no verified
       proof && available`; API/status + site show settled vs tentative
       (two-halves rule as product); bridge trains on settled state only
-- [ ] 4.4 fork choice: heaviest chain EXCLUDING blocks with verified fraud
+- [x] 4.4 fork choice: heaviest chain EXCLUDING blocks with verified fraud
       proofs or failed availability (now load-bearing); reorg machinery already
       handles abandonment (fork_replay family extended with a fraud-triggered
       reorg case)
@@ -128,6 +128,22 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked/decision
       universally validated forever
 
 ## Execution log
+
+- 2026-08-30 PHASE 4 (trust model) CORE COMPLETE. The consensus-observable
+  half of wall #1: conviction + fork-choice exclusion + finality. BlockTree
+  gains `convicted` set; convict(hash) reorgs to the heaviest NON-convicted
+  tip (reusing the rewind engine), add_block refuses convicted lines,
+  settled_height() = head-FRAUD_WINDOW(16). on_fraud_proof now CONVICTS +
+  reorgs + re-gossips (load-bearing where a paged node trusted a foreign
+  leaf); /status exposes settled_height + convicted count. Golden test
+  convict_reorgs_off_the_convicted_line (real forked chain); verify-the-
+  verifier — disabling exclusion leaves the head on the convicted block and
+  the test fails. 98 tests green; devnet + fraud-proof gates pass.
+  REMAINING (4a): true partial-canon STORAGE (hold only backbone+assigned
+  pages) — the memory win that lets the model exceed one machine; design
+  locked (accept foreign committed leaves from the block witness, recompute
+  held pages, convict on held-page mismatch), staged as the deepest
+  incremental-engine change. Custody bonds (4.2) + mode flag (4.5) follow it.
 
 - 2026-08-30 PHASE 3 (availability) COMPLETE via the existing per-body DA.
   Delta bodies are ALREADY erasure-coded (K=4/N=12) + Merkle-committed +

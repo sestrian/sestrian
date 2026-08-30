@@ -500,6 +500,12 @@ pub struct BlockTree {
     /// txids whose (body, delta_hash) this process has already verified — the
     /// O(dim) streaming hash then need not repeat at connect. Local memo only.
     pub hash_verified: HashSet<String>,
+    /// Sharding Road P4: block hashes convicted by a verified fraud proof.
+    /// Excluded from fork choice (they and their descendants can never be
+    /// head). A FULL node never accepts a fraudulent block in the first place;
+    /// this is for a PAGED node that trusted a foreign page's committed leaf
+    /// and later learns, via a proof, that it was a lie.
+    pub convicted: HashSet<String>,
 }
 
 const GENESIS_PIN_MAX_BYTES: usize = 64 * 1024 * 1024;
@@ -658,6 +664,7 @@ impl BlockTree {
             redo: HashMap::new(),
             genesis_pin,
             hash_verified: HashSet::new(),
+            convicted: HashSet::new(),
         };
         t.blocks.insert(ghash.clone(), gh);
         t.model.insert(ghash.clone(), model0);
@@ -1177,6 +1184,11 @@ impl BlockTree {
         if self.blocks.contains_key(&bh) {
             return Ok(false);
         }
+        // Sharding Road P4: a block convicted by a verified fraud proof, or one
+        // extending a convicted block, can never be adopted.
+        if self.convicted.contains(&bh) || self.convicted.contains(&block.header.prev_hash) {
+            return Err(err("block is on a convicted (fraudulent) line"));
+        }
         if block.header.prev_hash == self.head {
             self.connect_extend(block)
         } else {
@@ -1208,6 +1220,87 @@ impl BlockTree {
 
     pub fn head_state(&self) -> &Vec<i64> {
         &self.canon
+    }
+
+    /// FRAUD WINDOW (Sharding Road P4): a block is SETTLED once this many
+    /// blocks are built on top of it with no verified fraud proof against it.
+    /// Before then it is tentative — a paged validator may still reorg away
+    /// from it if a proof arrives. Matches the retarget window's timescale.
+    pub const FRAUD_WINDOW: u64 = 16;
+
+    /// The greatest height that is settled (final): head − FRAUD_WINDOW.
+    /// APIs and the trainer treat only settled state as committed.
+    pub fn settled_height(&self) -> u64 {
+        self.blocks.get(&self.head).map(|h| h.height)
+            .unwrap_or(0).saturating_sub(Self::FRAUD_WINDOW)
+    }
+
+    /// A block is convicted, or descends from one — excluded from fork choice.
+    fn is_convicted_line(&self, mut cur: String) -> bool {
+        while cur != self.genesis_hash {
+            if self.convicted.contains(&cur) {
+                return true;
+            }
+            match self.blocks.get(&cur) {
+                Some(h) => cur = h.prev_hash.clone(),
+                None => return false,
+            }
+        }
+        false
+    }
+
+    /// The heaviest NON-convicted tip (a block no heavier known block extends,
+    /// on no convicted line). Fork choice among honest chains.
+    fn best_head(&self) -> String {
+        let is_parent: HashSet<&String> =
+            self.blocks.values().map(|h| &h.prev_hash).collect();
+        let mut best = self.genesis_hash.clone();
+        let mut best_w = 0u64;
+        for (h, _) in self.blocks.iter() {
+            if is_parent.contains(h) {
+                continue; // not a tip
+            }
+            if self.is_convicted_line(h.clone()) {
+                continue;
+            }
+            let w = self.cum_work.get(h).copied().unwrap_or(0);
+            if w > best_w || (w == best_w && *h < best) {
+                best_w = w;
+                best = h.clone();
+            }
+        }
+        best
+    }
+
+    /// CONVICT a block (verified fraud proof) and reorg to the heaviest honest
+    /// tip. If the current head is on the convicted line, canon rewinds to the
+    /// new head (within the undo window; else the caller must resync). Returns
+    /// true if the head changed.
+    pub fn convict(&mut self, block_hash: &str) -> bool {
+        if !self.blocks.contains_key(block_hash) {
+            // not in our tree (a full node already rejected it): record so a
+            // later-arriving copy is refused, but nothing to reorg.
+            self.convicted.insert(block_hash.to_string());
+            return false;
+        }
+        self.convicted.insert(block_hash.to_string());
+        if !self.is_convicted_line(self.head.clone()) {
+            return false; // our head is on an honest chain already
+        }
+        let target = self.best_head();
+        if target == self.head {
+            return false;
+        }
+        // rewind_to moves canon (and the leaf cache) to `target` and returns a
+        // plan for rolling BACK. We are adopting `target` as the head, so we
+        // drop the plan (never roll forward) — canon is already correct there.
+        match self.rewind_to(&target) {
+            Ok(_plan) => {
+                self.head = target;
+                true
+            }
+            Err(_) => false, // target state beyond the window — caller resyncs
+        }
     }
 
     /// FRAUD DIAGNOSIS (Sharding Road P1): for a block that extends the current

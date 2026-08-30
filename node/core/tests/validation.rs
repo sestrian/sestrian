@@ -598,3 +598,4 @@ fn v5_rejects_claim_outside_lane_and_accepts_inside() {
     assert!(!err2.0.contains("outside its lane"),
             "in-lane claim must pass the lane gate, got: {}", err2.0);
 }
+

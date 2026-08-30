@@ -1342,13 +1342,33 @@ impl Node {
         }
     }
 
-    /// Verify a received fraud proof and log the verdict. Fork-choice exclusion
-    /// of a convicted block is Phase 4; here the proof is observed + verified
-    /// (the block is already rejected on its own bad root by every full node).
+    /// Verify a received fraud proof; on conviction, CONVICT the block and
+    /// reorg off it (Sharding Road P4 — load-bearing for paged validators that
+    /// trusted a foreign page's committed leaf). A full node has already
+    /// rejected the block on its own bad root, so convict is a no-op reorg for
+    /// it, but it still records the conviction so the block can never be
+    /// adopted later. Re-gossips a valid proof so it propagates.
     fn on_fraud_proof(&mut self, proof: Value) {
         match crate::fraud_verify(&proof) {
-            Some((true, reason)) =>
-                info!("FRAUD PROOF VERIFIED — {reason}"),
+            Some((true, reason)) => {
+                // the convicted block's hash is the accused header's block hash
+                let bh = proof.get("header")
+                    .and_then(|h| serde_json::from_value::<WireHeader>(h.clone()).ok())
+                    .map(|w| w.to_core().block_hash());
+                info!("FRAUD PROOF VERIFIED — {reason}");
+                if let Some(bh) = bh {
+                    if !self.tree.convicted.contains(&bh) {
+                        let old = self.tree.head.clone();
+                        if self.tree.convict(&bh) {
+                            warn!(block = &bh[..12].to_string(),
+                                  "CONVICTED — reorged off a fraudulent block");
+                            self.on_head_advance(&old);
+                        }
+                        // propagate a first-seen valid proof
+                        self.publish(&Gossip::Fraud { proof });
+                    }
+                }
+            }
             Some((false, reason)) =>
                 warn!("received fraud proof did not convict: {reason}"),
             None => warn!("received unparseable fraud proof"),
@@ -1746,6 +1766,11 @@ impl Node {
         let led = self.tree.head_ledger();
         json!({
             "height": self.head_height(),
+            // Sharding Road P4: SETTLED (final) vs the tentative tip. A paged
+            // validator may still reorg the last FRAUD_WINDOW blocks if a proof
+            // arrives; settled state is committed.
+            "settled_height": self.tree.settled_height(),
+            "convicted": self.tree.convicted.len(),
             "head": &self.tree.head[..16],
             "supply": led.supply(),
             "delta_pool": self.delta_pool.len(),

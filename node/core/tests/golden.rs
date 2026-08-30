@@ -1384,3 +1384,53 @@ fn av_sampling_matches_reference() {
         assert_eq!(recoverable(avail, k), case["recoverable"].as_bool().unwrap());
     }
 }
+
+/// Conviction + finality (Sharding Road P4): adopt a forked head, convict it
+/// (as a verified fraud proof would), and the tree must reorg to the heaviest
+/// NON-convicted tip and stay off the convicted line. settled_height tracks
+/// head − FRAUD_WINDOW.
+#[test]
+fn convict_reorgs_off_the_convicted_line() {
+    use sestrian_core::blocktree::{Block, BlockTree};
+    use std::collections::{HashMap, HashSet};
+    let v = vectors();
+    let case = &v["fork_replay"].as_array().unwrap()[0];
+    let spec = spec_from(&case["spec"]);
+    let params = params_from(spec.clone(), &case["params"]);
+    let mut tree = BlockTree::new(i64s(&case["genesis_w"]),
+        Some(case["data_contributor"].as_str().unwrap().into()), params);
+    let mk = |b: &Value| Block {
+        header: header_from(&b["header"]),
+        txs: b["txs"].as_array().unwrap().iter().map(tx_from).collect(),
+        bodies: b["bodies"].as_object().unwrap().iter()
+            .map(|(k, val)| (k.clone(), i64s(val))).collect::<HashMap<_, _>>(),
+        sparse: HashMap::new(), transfers: Vec::new(), data_txs: Vec::new(),
+        scores: b["scores"].as_object().unwrap().iter()
+            .filter_map(|(k, x)| x.as_u64().map(|s| (k.clone(), s))).collect(),
+        sketches: b["sketches"].as_object().unwrap().iter()
+            .filter_map(|(k, x)| x.as_array().map(|a| (k.clone(),
+                a.iter().map(|e| e.as_i64().unwrap_or(0) as i32).collect()))).collect(),
+    };
+    for b in case["blocks"].as_array().unwrap() {
+        let _ = tree.add_block(mk(b));
+    }
+    let winner = tree.head.clone();
+    let mut ancestors = HashSet::new();
+    let mut c = winner.clone();
+    while c != tree.genesis_hash { ancestors.insert(c.clone());
+        c = tree.blocks[&c].prev_hash.clone(); }
+    let has_sibling = tree.blocks.keys().any(|h|
+        !ancestors.contains(h) && *h != tree.genesis_hash
+        && tree.cum_work.contains_key(h));
+
+    let moved = tree.convict(&winner);
+    assert!(tree.convicted.contains(&winner));
+    assert!(!tree.convicted.contains(&tree.head),
+            "head must reorg off the convicted block");
+    if has_sibling {
+        assert!(moved, "convicting the head with a sibling must reorg");
+        assert_ne!(tree.head, winner);
+    }
+    assert_eq!(tree.settled_height(),
+        tree.blocks[&tree.head].height.saturating_sub(BlockTree::FRAUD_WINDOW));
+}
