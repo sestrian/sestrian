@@ -383,6 +383,9 @@ pub enum Gossip {
     /// seeing an unknown head syncs from its sender, so divergence resolves
     /// within a round regardless of what earlier messages were lost.
     Head { hash: String, height: u64 },
+    /// A page fraud proof (Sharding Road P1): the accused block is provably
+    /// wrong at one page. Carried as JSON so it needs no core serde derives.
+    Fraud { proof: Value },
 }
 
 /// Range chain sync over libp2p request-response (JSON codec).

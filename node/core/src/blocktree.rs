@@ -553,6 +553,40 @@ pub fn genesis_block_hash(genesis_w: &[i64], params: &GenesisParams) -> String {
 
 /// Leaf hash of one page of `canon` with the aggregated delta substituted in —
 /// the page's POST-block bytes, streamed without copying the span.
+/// Per-page trimmed mean over each page's claimants — only coordinates some
+/// claimant touched can change (all-zero columns average to zero). Shared by
+/// `validate_at_base` and the fraud-diagnosis path so the honest recomputation
+/// is one implementation.
+fn page_aggregate(block: &Block, spans: &[(u64, u64)],
+                  tx_coords: &[Vec<(u32, i64)>]) -> BTreeMap<u32, i64> {
+    let mut agg: BTreeMap<u32, i64> = BTreeMap::new();
+    for (page_id, &(start, end)) in spans.iter().enumerate() {
+        let claimants: Vec<usize> = block.txs.iter().enumerate()
+            .filter(|(_, t)| t.canonical_pages().contains(&(page_id as u32)))
+            .map(|(i, _)| i)
+            .collect();
+        if claimants.is_empty() {
+            continue;
+        }
+        let mut touched: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
+        for (slot, &ci) in claimants.iter().enumerate() {
+            for &(i, v) in &tx_coords[ci] {
+                if (i as u64) >= start && (i as u64) < end && v != 0 {
+                    touched.entry(i)
+                        .or_insert_with(|| vec![0i64; claimants.len()])[slot] = v;
+                }
+            }
+        }
+        for (i, mut col) in touched {
+            let m = trimmed_mean_scalar(&mut col, 0.2);
+            if m != 0 {
+                agg.insert(i, m);
+            }
+        }
+    }
+    agg
+}
+
 fn leaf_with_subs(canon: &[i64], start: usize, end: usize,
                   subs: &BTreeMap<u32, i64>) -> [u8; 32] {
     use sha2::{Digest, Sha256};
@@ -831,34 +865,9 @@ impl BlockTree {
             parent_model,
             &self.params,
         )?;
-        // per-page trimmed mean over each page's claimants — only coordinates
-        // some claimant touched can change (all-zero columns average to zero)
-        let mut agg: BTreeMap<u32, i64> = BTreeMap::new();
-        for (page_id, &(start, end)) in spans.iter().enumerate() {
-            let claimants: Vec<usize> = block.txs.iter().enumerate()
-                .filter(|(_, t)| t.canonical_pages().contains(&(page_id as u32)))
-                .map(|(i, _)| i)
-                .collect();
-            if claimants.is_empty() {
-                continue;
-            }
-            // union of touched coords in this span
-            let mut touched: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
-            for (slot, &ci) in claimants.iter().enumerate() {
-                for &(i, v) in &tx_coords[ci] {
-                    if (i as u64) >= start && (i as u64) < end && v != 0 {
-                        touched.entry(i)
-                            .or_insert_with(|| vec![0i64; claimants.len()])[slot] = v;
-                    }
-                }
-            }
-            for (i, mut col) in touched {
-                let m = trimmed_mean_scalar(&mut col, 0.2);
-                if m != 0 {
-                    agg.insert(i, m);
-                }
-            }
-        }
+        // per-page trimmed mean over each page's claimants (shared with the
+        // fraud-diagnosis path so the honest recomputation cannot drift)
+        let agg = page_aggregate(block, &spans, &tx_coords);
         // fold results came from validate_inner; growth appends after aggregation
         let init_pages: Vec<Vec<i64>> = activations.iter()
             .map(|(page_id, _, _, trigger)| page_init(trigger, *page_id, &self.params.spec))
@@ -1189,6 +1198,48 @@ impl BlockTree {
 
     pub fn head_state(&self) -> &Vec<i64> {
         &self.canon
+    }
+
+    /// FRAUD DIAGNOSIS (Sharding Road P1): for a block that extends the current
+    /// head (canon IS its parent state), recompute the honest per-page leaves.
+    /// A page where these differ from the block's committed leaves is provable
+    /// fraud. Returns None if the block doesn't extend the head or its bodies
+    /// are unusable. Growth blocks are out of fraud-v1 scope (leaf-count would
+    /// differ) — the caller checks that.
+    pub fn honest_leaves_at_head(&self, block: &Block) -> Option<Vec<[u8; 32]>> {
+        if block.header.prev_hash != self.head {
+            return None;
+        }
+        let parent_model = self.model.get(&self.head)?;
+        let spans: Vec<(u64, u64)> = parent_model.pages.iter()
+            .map(|p| (p.start, p.end)).collect();
+        let dim = self.canon.len();
+        let mut tx_coords: Vec<Vec<(u32, i64)>> = Vec::with_capacity(block.txs.len());
+        for tx in &block.txs {
+            let (n, coords) = Self::body_coords(block, tx).ok()?;
+            if n != dim {
+                return None;
+            }
+            tx_coords.push(coords);
+        }
+        let agg = page_aggregate(block, &spans, &tx_coords);
+        // no growth pages: fraud v1 disputes only same-shape blocks
+        let (_, leaves) = self.state_root_with(&spans, &agg, &[]);
+        Some(leaves)
+    }
+
+    /// The parent-page bytes + Merkle inclusion branch for `page_id` against the
+    /// CURRENT head's state_root — the availability evidence a fraud proof
+    /// carries. Canon is the parent state on the head-extending path, and
+    /// `page_leaves` are exactly its per-page leaf hashes.
+    pub fn head_page_evidence(&self, page_id: usize)
+        -> Option<(Vec<i64>, Vec<(bool, [u8; 32])>)>
+    {
+        let model = self.model.get(&self.head)?;
+        let p = model.pages.get(page_id)?;
+        let page = self.canon[p.start as usize..p.end as usize].to_vec();
+        let levels = crate::merkle::levels(self.page_leaves.clone());
+        Some((page, crate::merkle::proof(&levels, page_id)))
     }
 
     /// The block to CHECKPOINT: the head's PARENT, not the head. A snapshot

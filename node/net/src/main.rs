@@ -18,9 +18,12 @@
 
 mod api;
 mod bridge;
+mod fraud_bridge;
 mod node;
 mod proto;
 mod store;
+
+pub use fraud_bridge::fraud_verify;
 
 #[cfg(not(feature = "heap-prof"))]
 #[global_allocator]
@@ -223,6 +226,10 @@ fn network_params(name: &str) -> &'static NetworkParams {
 /// Silence is the enemy here: a mismatch means a chain you can never join, so it
 /// must fail at startup with an explanation, not at block 1 with nothing.
 fn apply_network(args: &mut Args) -> &'static NetworkParams {
+    if args.byzantine_aggregation && args.network != "local" {
+        panic!("--byzantine-aggregation is a dispute-game attack harness and \
+                is refused on any network but --network local");
+    }
     let net = network_params(&args.network);
     let adopt = |field: &mut String, baked: &'static str, what: &str| {
         if baked.is_empty() {
@@ -331,6 +338,11 @@ struct Args {
     /// the sortition politeness ladder) across machines; 0 = process start
     #[arg(long, default_value_t = 0.0)]
     t0: f64,
+    /// ATTACK MODE (local net only): mint blocks with one page's aggregate
+    /// corrupted, committing a wrong state_root. Exists to drive the fraud-
+    /// proof dispute game; refused on any real network.
+    #[arg(long, default_value_t = false)]
+    byzantine_aggregation: bool,
 }
 
 /// Decrypt a pynacl-encrypted wallet: argon2id(MODERATE) -> XSalsa20-Poly1305.
@@ -1038,6 +1050,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             data_refs: args.data_refs.split(',')
                 .map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
             da_retain_blocks: args.da_retain_blocks,
+            byzantine_aggregation: args.byzantine_aggregation,
         },
         topic,
         bridge_tx: bridge_cmd_tx,

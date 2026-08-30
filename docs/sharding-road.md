@@ -26,19 +26,19 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked/decision
       must be REJECTED (wrong parent branch, altered body, omitted claimant,
       wrong page id, honest block "proof")
 - [x] 1.4 `node/core/src/fraud.rs`: bit-exact verifier vs golden
-- [ ] 1.5 net: identify the faulting page in validation (incremental engine
+- [x] 1.5 net: identify the faulting page in validation (incremental engine
       already computes per-page leaves — return the first mismatch), build the
       proof from held data, gossip on `/sestrian/fraud/1`; receivers verify +
       log `FRAUD PROOF VERIFIED page=P block=H` (fork-choice wiring is Phase 4)
-- [ ] 1.6 `--byzantine-aggregation` producer flag (refused unless
+- [x] 1.6 `--byzantine-aggregation` producer flag (refused unless
       `--network local`): corrupts one page's aggregate and commits the wrong
       root — the attack the game exists to catch
-- [ ] 1.7 `scripts/fraud-proof-proof.sh` + CI job: byzantine producer on a
+- [x] 1.7 `scripts/fraud-proof-proof.sh` + CI job: byzantine producer on a
       2-node local net → every honest node rejects the block AND emits/verifies
       the proof; chain converges without the fraudulent block
 - [x] 1.8 verify-the-verifier: break `verify_fraud_proof` two ways (skip body
       hash check; skip branch check) — golden family must fail both
-- [ ] 1.9 deploy fleet-wide (additive release)
+- [x] 1.9 deploy fleet-wide (additive release)
 
 ## Phase 2 — Training Lanes (wall #2) — scheduled fork v5
 
@@ -128,6 +128,14 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked/decision
       universally validated forever
 
 ## Execution log
+
+- 2026-08-30 PHASE 1 COMPLETE. Live dispute game: byzantine producer corrupts
+  page aggregates + publishes them; honest node rejects on the bad root AND
+  emits verified fraud proofs (9 attacked, 9 rejected, 8 convicted naming the
+  honest leaf). scripts/fraud-proof-proof.sh + CI gate. Fork-choice exclusion
+  of convicted blocks is deferred to Phase 4 (load-bearing there); today every
+  full node already rejects the bad block on its own root, so the attack is
+  contained with or without the proof.
 
 - 2026-08-29 DECISION (soundness): a single-page fraud proof is only sound if
   the accused tree's per-page leaves are known — sibling paths can't be

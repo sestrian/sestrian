@@ -601,6 +601,8 @@ pub enum ToChain {
     Dtx(crate::proto::WireDeltaTx, Payload, Option<PeerId>),
     Atx(serde_json::Value),
     Blk(StoredBlock, Option<PeerId>),
+    /// a received page fraud proof (JSON) — verify + act
+    Fraud(serde_json::Value),
     /// a peer announced a head we may not have
     Head { peer: PeerId, hash: String, height: u64 },
     PeerConnected(PeerId),
@@ -638,6 +640,10 @@ pub struct NodeConfig {
     /// serves catch-up only inside its window; joining from genesis leans on
     /// the archive anchors until checkpoint sync exists (tracked).
     pub da_retain_blocks: u64,
+    /// LOCAL-NET-ONLY attack mode: mint blocks with one page's aggregate
+    /// corrupted, committing a wrong state_root. The dispute game exists to
+    /// catch exactly this; main.rs refuses it unless --network local.
+    pub byzantine_aggregation: bool,
 }
 
 pub struct Node {
@@ -1184,6 +1190,18 @@ impl Node {
                 core::model_state::page_init(trigger, *page_id, &self.tree.params.spec)
             })
             .collect();
+        // ATTACK (local net only): corrupt one claimed page's aggregate so the
+        // committed state_root is provably wrong. The page_leaves witness will
+        // match the corrupt root (it's derived from it), so the block looks
+        // internally consistent — only a validator that RE-AGGREGATES catches
+        // it, which is exactly what the fraud proof packages.
+        if self.cfg.byzantine_aggregation {
+            if let Some((&coord, _)) = agg.iter().next() {
+                *agg.get_mut(&coord).unwrap() =
+                    agg[&coord].wrapping_add(1_000_000);
+                warn!(coord, "BYZANTINE: corrupting one page aggregate");
+            }
+        }
         // Aggregate first, THEN append the growth pages, THEN root — the exact
         // validate_block order, now enforced by calling the validator's own
         // construction rather than a second implementation of it.
@@ -1245,6 +1263,79 @@ impl Node {
     // ---- installation ----------------------------------------------------
     /// Try to install a stored block (bodies from the payload store). Returns
     /// true if installed; queues it as pending when payloads are missing.
+    /// Build a page fraud proof for a head-extending block whose committed
+    /// state_root is wrong, and gossip it. No-op if the block isn't disputable
+    /// in fraud v1 (not head-extending, no leaf witness, or a growth block).
+    fn emit_fraud_if_provable(&mut self, sb: &StoredBlock) {
+        if sb.page_leaves.is_empty() || sb.header.prev_hash != self.tree.head {
+            return;
+        }
+        let Some(block) = sb.to_core_sparse(&self.payloads) else { return };
+        let Some(honest) = self.tree.honest_leaves_at_head(&block) else { return };
+        if honest.len() != sb.page_leaves.len() {
+            return; // growth / shape mismatch — out of fraud-v1 scope
+        }
+        let Some(pid) = (0..honest.len())
+            .find(|&i| hex::encode(honest[i]) != sb.page_leaves[i]) else { return };
+        let Some((parent_page, branch)) = self.tree.head_page_evidence(pid) else { return };
+        let parent = self.tree.head.clone();
+        let parent_hdr = self.tree.blocks[&parent].clone();
+        let parent_model_json = self.tree.model[&parent].canonical_json();
+        // claimant bodies for the disputed page
+        let mut bodies = serde_json::Map::new();
+        for t in &block.txs {
+            if !t.canonical_pages().contains(&(pid as u32)) { continue; }
+            let Some(p) = self.payloads.get(&t.txid()) else { return };
+            let Some(coords) = p.coords() else { return };
+            bodies.insert(t.txid(), serde_json::json!({
+                "n": p.n,
+                "idx": coords.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+                "val": coords.iter().map(|(_, v)| *v).collect::<Vec<_>>(),
+            }));
+        }
+        let txs_json: Vec<Value> = block.txs.iter().map(|t| serde_json::json!({
+            "miner": t.miner, "base_height": t.base_height,
+            "delta_hash": t.delta_hash, "da_pointer": t.da_pointer,
+            "bond": t.bond, "pages": t.canonical_pages(),
+            "data_refs": t.canonical_refs(), "sig_hex": hex::encode(&t.sig),
+        })).collect();
+        let proof = serde_json::json!({
+            "header": WireHeader::from_core(&sb.header.to_core()),
+            "parent_header": WireHeader::from_core(&parent_hdr),
+            "parent_model_json": parent_model_json,
+            "committed_leaves": sb.page_leaves,
+            "page_id": pid,
+            "txids": block.txs.iter().map(|t| t.txid()).collect::<Vec<_>>(),
+            "txs": txs_json,
+            "bodies": Value::Object(bodies),
+            "parent_page": parent_page,
+            "parent_path": branch.iter()
+                .map(|(l, h)| serde_json::json!([if *l {"L"} else {"R"}, hex::encode(h)]))
+                .collect::<Vec<_>>(),
+        });
+        // verify our own proof before broadcasting (never gossip a dud)
+        match crate::fraud_verify(&proof) {
+            Some((true, reason)) => {
+                warn!(page = pid, height = sb.header.height, "{reason}");
+                self.publish(&Gossip::Fraud { proof });
+            }
+            other => warn!(?other, "declined to emit non-convicting fraud proof"),
+        }
+    }
+
+    /// Verify a received fraud proof and log the verdict. Fork-choice exclusion
+    /// of a convicted block is Phase 4; here the proof is observed + verified
+    /// (the block is already rejected on its own bad root by every full node).
+    fn on_fraud_proof(&mut self, proof: Value) {
+        match crate::fraud_verify(&proof) {
+            Some((true, reason)) =>
+                info!("FRAUD PROOF VERIFIED — {reason}"),
+            Some((false, reason)) =>
+                warn!("received fraud proof did not convict: {reason}"),
+            None => warn!("received unparseable fraud proof"),
+        }
+    }
+
     fn install(&mut self, sb: StoredBlock, from: Option<PeerId>) -> bool {
         let bh = sb.hash();
         // Gate on the TREE, not the serving cache: after a restart the cache
@@ -1371,6 +1462,13 @@ impl Node {
                     }
                 } else {
                     warn!("invalid block h{}: {}", sb.header.height, e.0);
+                    // Sharding Road P1: a wrong committed state_root on a block
+                    // that extends OUR head is provable fraud. Build the proof
+                    // from held state and gossip it, so light peers can reject
+                    // the block without recomputing the whole model.
+                    if e.0.contains("state_root does not reproduce") {
+                        self.emit_fraud_if_provable(&sb);
+                    }
                 }
                 false
             }
@@ -2118,6 +2216,9 @@ pub async fn run(
                                 let _ = chain_tx.send(ToChain::Head {
                                     peer: propagation_source, hash, height });
                             }
+                            Gossip::Fraud { proof } => {
+                                let _ = chain_tx.send(ToChain::Fraud(proof));
+                            }
                         }
                     }
                 }
@@ -2419,6 +2520,7 @@ impl Node {
                 self.install(block, source);
                 self.retry_pending();
             }
+            ToChain::Fraud(proof) => self.on_fraud_proof(proof),
             ToChain::Head { peer, hash, height } => {
                 if !self.tree.blocks.contains_key(&hash) {
                     let from = self.sync_cursor.get(&peer).copied()
@@ -2772,7 +2874,20 @@ impl Node {
                                 self.on_head_advance(&old);
                                 self.publish(&Gossip::Blk { block: stored });
                             }
-                            Err(e) => warn!("own block rejected: {}", e.0),
+                            Err(e) => {
+                                // A real attacker gossips its bad block anyway
+                                // rather than self-censoring — that is what the
+                                // dispute game must catch. Honest producers keep
+                                // the self-check as the self-rejecting-blocks
+                                // guard it has always been.
+                                if self.cfg.byzantine_aggregation {
+                                    warn!("BYZANTINE: publishing self-invalid \
+                                           block h{} anyway", stored.header.height);
+                                    self.publish(&Gossip::Blk { block: stored });
+                                } else {
+                                    warn!("own block rejected: {}", e.0);
+                                }
+                            }
                         }
                     }
                 }

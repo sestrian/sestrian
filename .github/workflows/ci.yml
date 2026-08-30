@@ -257,6 +257,32 @@ jobs:
   # window must recover across a shard-only gap. Reproduces how the EU anchor
   # wedged twice on 2026-08-27/28 (headers-first sync + the shard pump are
   # what it exercises); found live, pinned here.
+  # The dispute game (Sharding Road P1): a byzantine producer commits corrupted
+  # page aggregates; an honest node must reject them AND emit verified fraud
+  # proofs convicting them. This is what lets a future paged validator trust
+  # pages it does not hold.
+  fraud-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: node
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: a byzantine block is convicted by a live fraud proof
+        run: bash scripts/fraud-proof-proof.sh 70
+      - name: upload fraud-proof logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fraud-proof-logs
+          path: /tmp/fraud*.log
+          if-no-files-found: ignore
+
   lag-catchup:
     runs-on: ubuntu-latest
     timeout-minutes: 25
