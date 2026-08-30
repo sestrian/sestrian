@@ -210,7 +210,8 @@ def _submit(node: str, addr: str, route: str, build, tries: int = 3,
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["new", "restore", "show", "balance", "send",
-                                    "submit-data", "challenge", "vote", "registry"])
+                                    "submit-data", "stake-custody", "challenge",
+                                    "vote", "registry"])
     ap.add_argument("--path", default=DEFAULT_PATH)
     ap.add_argument("--node", default="http://localhost:8090")
     ap.add_argument("--to", default=None)
@@ -221,6 +222,7 @@ def main():
     #   python -c "from rig import corpus,json ..."  (see docs/joining.md)
     ap.add_argument("--manifest", default=None)             # JSON: data_hash, da_root, size_bytes
     ap.add_argument("--media-type", default="text")
+    ap.add_argument("--pages", default=None)   # stake-custody: page ids "1,2,3"
     ap.add_argument("--stake", type=float, default=None)    # whole tokens
     ap.add_argument("--data-id", default=None)              # challenge target
     ap.add_argument("--reason", default="validity")         # validity | ownership
@@ -302,6 +304,35 @@ def main():
         print(f"CONFIRMED: data staked ({man.size_bytes} bytes, "
               f"hash {man.data_hash[:16]}…, stake {a.stake}): {out}")
         print(f"  now mine with:  --data-refs {man.data_hash}")
+    elif a.cmd == "stake-custody":
+        # Sharding Road P4: a PAGED validator posts a CUSTODY BOND committing to
+        # hold + serve specific expert pages. It rides the existing staked-
+        # registry rails (media_type "custody"); the availability challenge/slash
+        # that already polices data withholding (Phase 3 + data-challenge)
+        # polices page custody too — a holder that cannot serve its pages loses
+        # the bond. The da_root commits to (holder, pages) so the entry is
+        # unambiguous and challengeable.
+        if a.pages is None or a.stake is None:
+            raise SystemExit("stake-custody needs --pages and --stake")
+        import hashlib
+        from rig.token import DataSubmitTx
+        pages = sorted(int(x) for x in a.pages.split(",") if x.strip() != "")
+        commit = f"custody|{rec['pub']}|{','.join(map(str, pages))}"
+        data_hash = hashlib.sha256(commit.encode()).hexdigest()
+        da_root = hashlib.sha256(("da|" + commit).encode()).hexdigest()
+        print(f"  custody bond: pages {pages}")
+        print(f"  data_hash {data_hash}")
+        def _build(nonce):
+            tx = DataSubmitTx(owner_pub=rec["pub"], data_hash=data_hash,
+                              size_bytes=max(1, len(pages)), media_type="custody",
+                              stake=int(round(a.stake * GRAIN)),
+                              nonce=nonce, da_root=da_root).signed(key)
+            return tx, {"owner_pub": tx.owner_pub, "data_hash": tx.data_hash,
+                        "size_bytes": tx.size_bytes, "media_type": tx.media_type,
+                        "stake": tx.stake, "nonce": tx.nonce,
+                        "da_root": tx.da_root, "sig": tx.sig.hex()}
+        out = _submit(a.node, rec["address"], "/data/submit", _build)
+        print(f"CONFIRMED: custody bond staked for pages {pages}: {out}")
     elif a.cmd == "challenge":
         if not a.data_id or a.stake is None:
             raise SystemExit("challenge needs --data-id and --stake")

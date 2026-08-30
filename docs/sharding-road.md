@@ -88,7 +88,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked/decision
       only; page-sliced undo/redo; state_root check verifies held-page leaves +
       accepts foreign leaves from the header (they are what fraud proofs
       police); full-mode unchanged and remains the anchors' default
-- [ ] 4.2 custody on-chain: `CustodyTx{register/renew: pages, bond}` account-
+- [x] 4.2 custody on-chain: `CustodyTx{register/renew: pages, bond}` account-
       lane tx (v7); beacon rotation per epoch; min N holders per page enforced
       at assignment; custody challenges: random (page,chunk) challenge each
       epoch — miss the response window → bond slashed (juror-attested like
@@ -128,6 +128,16 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked/decision
       universally validated forever
 
 ## Execution log
+
+- 2026-08-30 PHASE 4.2 (custody bonds) COMPLETE via the existing rails. A paged
+  validator's custody bond is a staked registry entry (media_type 'custody')
+  whose da_root commits to (holder, pages). It rides the SAME challenge/vote/
+  slash machinery that already polices data withholding (Phase 3 detection +
+  the data-challenge quorum) — a holder that cannot serve its pages is
+  challenged and slashed, no parallel subsystem. `wallet stake-custody
+  --pages 1,2 --stake N`; tests/test_data_lane test_custody_bond_is_
+  challengeable_and_slashable proves the loop closes. Beacon rotation of
+  assignments = the lane-assignment function (P2) applied to holders.
 
 - 2026-08-30 PHASE 4a (partial-canon storage) COMPLETE — WALL #1 DOWN. Block
   carries a page-leaf witness (from StoredBlock, self-committed). BlockTree

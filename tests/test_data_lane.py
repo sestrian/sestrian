@@ -225,3 +225,48 @@ def test_accepted_entry_records_its_commitment(led_and_owner):
     entry = led.registry[tx.txid()]
     assert entry["da_root"] == tx.da_root, \
         "the registry must persist da_root so challengers can sample later"
+
+
+def test_custody_bond_is_challengeable_and_slashable():
+    """Sharding Road P4: a PAGED validator's custody bond is a staked registry
+    entry (media_type 'custody') committing to hold specific pages. It rides
+    the SAME challenge/slash rails as any staked commitment — a holder that
+    cannot serve its pages is challenged and slashed, exactly like a data
+    withholder. This is what makes 'someone holds every page' enforceable
+    without a parallel subsystem."""
+    import hashlib
+    led = TokenLedger()
+    holder = Key.generate(b"custody-holder-seed-0000000000!!")
+    challenger = Key.generate(b"custody-chal-seed-00000000000!!!")
+    jurors = [Key.generate(f"cust-juror-{i}-seed-0000000000!".encode()[:32])
+              for i in range(3)]
+    led.apply_reward(1, [holder.pub], "genesis", [])
+    led.apply_reward(2, [challenger.pub], "genesis", [])
+    # stake a custody bond over pages 1,2 — exactly what `wallet stake-custody`
+    # builds: media_type 'custody', da_root committing to (holder, pages)
+    pages = [1, 2]
+    commit = f"custody|{holder.pub}|{','.join(map(str, pages))}"
+    data_hash = hashlib.sha256(commit.encode()).hexdigest()
+    da_root = hashlib.sha256(("da|" + commit).encode()).hexdigest()
+    bond = DataSubmitTx(owner_pub=holder.pub, data_hash=data_hash,
+                        size_bytes=len(pages), media_type="custody",
+                        stake=1 * GRAIN, nonce=0, da_root=da_root).signed(holder)
+    assert led.apply_data_tx(bond, 2, set())
+    assert led.registry[bond.txid()]["media_type"] == "custody"
+    # the holder stops serving its pages → challenged
+    ch = DataChallengeTx(challenger_pub=challenger.pub, data_id=bond.txid(),
+                         stake=GRAIN // 2, reason="validity",
+                         nonce=0).signed(challenger)
+    assert led.apply_data_tx(ch, 3, set())
+    recent = {j.pub for j in jurors}
+    for j in jurors:
+        vote = DataVoteTx(voter_pub=j.pub, challenge_id=ch.txid(),
+                          support=True, nonce=0).signed(j)
+        assert led.apply_data_tx(vote, 4, recent)
+    bond_stake = led.registry[bond.txid()]["stake"]
+    chal_before = led.balance(address(challenger.pub))
+    led.resolve_expired_challenges(3 + CHALLENGE_WINDOW + 1)
+    # the custody bond is SLASHED — the holder loses it to the challenger
+    assert led.registry[bond.txid()]["status"] == "revoked"
+    assert led.registry[bond.txid()]["stake"] == 0
+    assert led.balance(address(challenger.pub)) == chal_before + bond_stake + ch.stake
