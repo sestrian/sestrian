@@ -18,6 +18,7 @@ pub mod corpus;
 pub mod da;
 pub mod lottery;
 pub mod fraud;
+pub mod availability;
 pub mod lanes;
 pub mod merkle;
 pub mod model_state;

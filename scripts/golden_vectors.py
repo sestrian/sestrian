@@ -1088,6 +1088,28 @@ def main():
         })
     v["lane_assignment"] = lane_cases
 
+    # --- AVAILABILITY SAMPLING (Sharding Road P3): the detection-probability
+    # curve is a PROTOCOL PARAMETER, not a comment. Pin P(catch a withheld
+    # block) for (n, k, available, samples) so the Rust sampler's math — and
+    # thus the security margin — matches the reference exactly.
+    from rig import da as _da
+    av_cases = []
+    for (n, k, avail, s) in [
+        (12, 4, 12, 3),   # fully available — never falsely flagged
+        (12, 4, 8, 3),    # exactly recoverable (n-k missing) boundary
+        (12, 4, 7, 3),    # unrecoverable by ONE — must be catchable
+        (12, 4, 4, 4),    # only k present
+        (12, 4, 3, 4),    # below k — dead
+        (24, 8, 16, 6),
+    ]:
+        av_cases.append({
+            "n": n, "k": k, "available": avail, "samples": s,
+            "p_detect_1e6": round(
+                _da.detection_probability(avail, n, k, s) * 1_000_000),
+            "recoverable": avail >= k,
+        })
+    v["av_sampling"] = av_cases
+
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w") as f:
         json.dump(v, f, indent=1)

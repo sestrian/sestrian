@@ -644,6 +644,10 @@ pub struct NodeConfig {
     /// corrupted, committing a wrong state_root. The dispute game exists to
     /// catch exactly this; main.rs refuses it unless --network local.
     pub byzantine_aggregation: bool,
+    /// LOCAL-NET-ONLY: mint + publish a block but WITHHOLD its body shards
+    /// (skip disperse, refuse to serve) — the data-availability attack. An
+    /// honest node cannot gather the body, so it never adopts the block.
+    pub byzantine_withhold: bool,
 }
 
 pub struct Node {
@@ -675,6 +679,8 @@ pub struct Node {
     /// our head (a height rule evicted the whole fork on every head advance,
     /// found live)
     pub pending_at: HashMap<String, f64>,
+    /// blocks already flagged UNAVAILABLE (log-once — Sharding Road P3)
+    pub availability_flagged: HashSet<String>,
     pub seen: HashSet<String>,
     /// insertion order for `seen`, so it can be bounded as a recency ring
     pub seen_order: VecDeque<String>,
@@ -2759,6 +2765,28 @@ impl Node {
                     let _ = self.net.send(ToNet::SendShards(*p, want.clone()));
                 }
             }
+            // AVAILABILITY VERDICT (Sharding Road P3): a pending block whose
+            // bodies stay ungatherable past the fetch window is UNAVAILABLE —
+            // a withholding proposer. It can never be adopted; the honest chain
+            // advances on other blocks, so liveness holds. Names the block once.
+            let stuck: Vec<(String, u64)> = self.pending.iter()
+                .filter(|(bh, _)| self.pending_at.get(*bh)
+                    .map(|t| now() - t > 4.0 * self.cfg.interval).unwrap_or(false))
+                .filter(|(_, (sb, _))| sb.txs.iter().any(|t| t.to_core()
+                    .map(|tc| { let id = tc.txid();
+                        !self.payloads.contains_key(&id)
+                            && !self.store.has_payload(&id)
+                            && self.store.reconstruct_payload(&id).is_none() })
+                    .unwrap_or(false)))
+                .map(|(bh, (sb, _))| (bh.clone(), sb.header.height))
+                .collect();
+            for (bh, h) in stuck {
+                if self.availability_flagged.insert(bh.clone()) {
+                    warn!(height = h, block = &bh[..12].to_string(),
+                          "AVAILABILITY: block UNAVAILABLE — bodies withheld \
+                           past the fetch window; will never be adopted");
+                }
+            }
             // republish unconfirmed deltas for the current height: a publish
             // can silently fail before the gossip mesh forms
             let hh = self.head_height();
@@ -3158,6 +3186,11 @@ impl Node {
     }
 
     fn serve_shards(&mut self, request: &ShardRequest) -> ShardResponse {
+        // ATTACK: a withholding node answers no shard request — the data-
+        // availability attack the sampling verdict exists to catch.
+        if self.cfg.byzantine_withhold {
+            return ShardResponse { bodies: Vec::new(), busy: false };
+        }
         // byte-budgeted, rotating per-body cursor: any size body moves in
         // bounded responses; >= 1 shard always served (see the fork incident)
         let mut bodies = Vec::new();

@@ -1366,3 +1366,21 @@ fn lane_assignment_matches_reference() {
         }
     }
 }
+
+/// Availability sampling (Sharding Road P3): the detection-probability curve is
+/// a protocol parameter; Rust must reproduce it to 1e-6 so the security margin
+/// matches the reference.
+#[test]
+fn av_sampling_matches_reference() {
+    use sestrian_core::availability::{detection_probability, recoverable};
+    for case in vectors()["av_sampling"].as_array().unwrap() {
+        let n = case["n"].as_u64().unwrap();
+        let k = case["k"].as_u64().unwrap();
+        let avail = case["available"].as_u64().unwrap();
+        let s = case["samples"].as_u64().unwrap();
+        let got = (detection_probability(avail, n, k, s) * 1_000_000.0).round() as i64;
+        assert_eq!(got, case["p_detect_1e6"].as_i64().unwrap(),
+                   "detection probability diverged for n={n} k={k} avail={avail} s={s}");
+        assert_eq!(recoverable(avail, k), case["recoverable"].as_bool().unwrap());
+    }
+}

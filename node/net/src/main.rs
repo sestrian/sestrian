@@ -233,9 +233,10 @@ fn network_params(name: &str) -> &'static NetworkParams {
 /// Silence is the enemy here: a mismatch means a chain you can never join, so it
 /// must fail at startup with an explanation, not at block 1 with nothing.
 fn apply_network(args: &mut Args) -> &'static NetworkParams {
-    if args.byzantine_aggregation && args.network != "local" {
-        panic!("--byzantine-aggregation is a dispute-game attack harness and \
-                is refused on any network but --network local");
+    if (args.byzantine_aggregation || args.byzantine_withhold)
+        && args.network != "local" {
+        panic!("byzantine attack harnesses are refused on any network but \
+                --network local");
     }
     let net = network_params(&args.network);
     let adopt = |field: &mut String, baked: &'static str, what: &str| {
@@ -350,6 +351,10 @@ struct Args {
     /// proof dispute game; refused on any real network.
     #[arg(long, default_value_t = false)]
     byzantine_aggregation: bool,
+    /// ATTACK MODE (local net only): withhold minted blocks' body shards —
+    /// the data-availability attack. Refused on any real network.
+    #[arg(long, default_value_t = false)]
+    byzantine_withhold: bool,
 }
 
 /// Decrypt a pynacl-encrypted wallet: argon2id(MODERATE) -> XSalsa20-Poly1305.
@@ -1046,6 +1051,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         account_pool: Default::default(),
         pending: Default::default(),
         pending_at: Default::default(),
+        availability_flagged: Default::default(),
         seen: Default::default(),
         seen_order: Default::default(),
         cfg: node::NodeConfig {
@@ -1058,6 +1064,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
             da_retain_blocks: args.da_retain_blocks,
             byzantine_aggregation: args.byzantine_aggregation,
+            byzantine_withhold: args.byzantine_withhold,
         },
         topic,
         bridge_tx: bridge_cmd_tx,

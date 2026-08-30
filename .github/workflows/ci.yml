@@ -307,6 +307,30 @@ jobs:
           path: /tmp/lane*.log
           if-no-files-found: ignore
 
+  # Data availability (Sharding Road P3): a withholding proposer's blocks are
+  # flagged UNAVAILABLE and never adopted, while the honest chain stays live.
+  withholding:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: node
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: withheld blocks are detected; honest chain stays live
+        run: bash scripts/withholding-proof.sh 100
+      - name: upload withholding logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: withholding-logs
+          path: /tmp/wh*.log
+          if-no-files-found: ignore
+
   lag-catchup:
     runs-on: ubuntu-latest
     timeout-minutes: 25

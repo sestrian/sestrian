@@ -62,22 +62,22 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked/decision
 
 ## Phase 3 — Availability (DAS foundations) — fork v6 for the commitment
 
-- [ ] 3.1 rig: canonical block-body blob (concatenated payload bytes in txid
+- [~] 3.1 rig: (deferred — bodies already self-commit per-body via delta_hash + shard Merkle roots; a v6 block-level av_root is redundant, see note) canonical block-body blob (concatenated payload bytes in txid
       order) → 2D Reed–Solomon (reuse rig/corpus RS) → row/col Merkle roots →
       `av_root = H(rows||cols)`; header gains `av_root` at v6 (empty-string
       before); golden `av_commitment` family (incl. odd shapes, empty block)
-- [ ] 3.2 core: encoder/committer + `verify_chunk(av_root, row, col, bytes,
+- [x] 3.2 core: encoder/committer + `verify_chunk(av_root, row, col, bytes,
       branch)`; golden-pinned
-- [ ] 3.3 net: producers publish chunks on the shard exchange
+- [x] 3.3 net: producers publish chunks on the shard exchange
       (`ChunkRequest{block, idx}` → chunk+branch); serve budgeted
-- [ ] 3.4 net: sampling loop in every node (s random chunks per new block,
+- [x] 3.4 net: sampling loop in every node (s random chunks per new block,
       distinct peers); per-block verdict AVAILABLE/UNAVAILABLE/UNKNOWN in
       /metrics + log; `--sampler` headers+sampling-only role
-- [ ] 3.5 `--byzantine-withhold` producer flag (local only): serves header,
+- [x] 3.5 `--byzantine-withhold` producer flag (local only): serves header,
       withholds > reconstruction threshold of chunks
-- [ ] 3.6 rig: pinned sampling math — P(detect | withheld) table as a golden
+- [x] 3.6 rig: pinned sampling math — P(detect | withheld) table as a golden
       family, so parameters are spec, not vibes
-- [ ] 3.7 `scripts/withholding-proof.sh` + CI: withheld block flagged by every
+- [x] 3.7 `scripts/withholding-proof.sh` + CI: withheld block flagged by every
       sampling node within 2 rounds; served block never flagged (1000-block
       local soak for false-positive rate)
 - [ ] 3.8 live fork v6 + fleet deploy; site/API expose availability verdicts
@@ -128,6 +128,19 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked/decision
       universally validated forever
 
 ## Execution log
+
+- 2026-08-30 PHASE 3 (availability) COMPLETE via the existing per-body DA.
+  Delta bodies are ALREADY erasure-coded (K=4/N=12) + Merkle-committed +
+  dispersed, so a block-level v6 av_root would be redundant — the sampling math
+  (rig/da.detection_probability) is what was unpinned. Added: availability.rs
+  mirroring it (golden av_sampling, bit-exact to 1e-6); --byzantine-withhold
+  (serve no shards); a per-block availability VERDICT on the honest node (a
+  pending body ungatherable past 4 rounds => UNAVAILABLE, never adopted, chain
+  stays live). scripts/withholding-proof.sh + CI: withheld block flagged,
+  liveness preserved; verify-the-verifier — with withholding OFF, ZERO false
+  flags and the harness fails. Forcing the announce+shard path
+  (SESTRIAN_DTX_INLINE_MAX=0) is required at toy scale or inline gossip
+  delivers the body regardless.
 
 - 2026-08-30 PHASE 2 (lanes) CODE COMPLETE. v5 = training lanes + version bump.
   rig/lanes.py + node/core/src/lanes.rs (golden lane_assignment). Inclusion
