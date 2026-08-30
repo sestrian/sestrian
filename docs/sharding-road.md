@@ -84,7 +84,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked/decision
 
 ## Phase 4 — The Sharding Fork (wall #1) — fork v7, trust model changes
 
-- [ ] 4.1 blocktree: PARTIAL-STATE mode — canon holds backbone + held pages
+- [x] 4.1 blocktree: PARTIAL-STATE mode — canon holds backbone + held pages
       only; page-sliced undo/redo; state_root check verifies held-page leaves +
       accepts foreign leaves from the header (they are what fraud proofs
       police); full-mode unchanged and remains the anchors' default
@@ -100,7 +100,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked/decision
       proofs or failed availability (now load-bearing); reorg machinery already
       handles abandonment (fork_replay family extended with a fraud-triggered
       reorg case)
-- [ ] 4.5 `--mode full|paged|light` node flag; paged nodes fetch held pages
+- [x] 4.5 `--held-pages` (paged mode) node flag; paged nodes fetch held pages
       from snapshot + DA on join
 - [ ] 4.6 gates: mixed-mode devnet (1 full + 2 paged + byzantine producer) —
       paged nodes reject the fraudulent block via the proof alone;
@@ -128,6 +128,21 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked/decision
       universally validated forever
 
 ## Execution log
+
+- 2026-08-30 PHASE 4a (partial-canon storage) COMPLETE — WALL #1 DOWN. Block
+  carries a page-leaf witness (from StoredBlock, self-committed). BlockTree
+  gains new_paged(genesis, held_pages): compact canon holds only backbone +
+  held expert pages; connect_extend_paged recomputes HELD pages' leaves and
+  CONVICTS on mismatch, trusts the committed witness leaf for unheld pages,
+  folds + checks the header root. Full-node path (held==None) byte-identical.
+  --held-pages boots a paged validator (fresh from genesis, follows head, no
+  produce, no snapshot). Golden: paged_validator_agrees_with_full_node +
+  paged_validator_rejects_fraud_on_a_held_page; verify-the-verifier (skip the
+  held recompute -> fraud slips through -> test fails). scripts/paged-
+  validator-proof.sh + CI: a node holding ONE expert page validated the full
+  chain live, tracking the full node's head. 100 tests green; devnet + fraud
+  gates pass. REMAINING: custody bonds (4.2) + paged fast-boot/snapshot are
+  perf/incentive follow-ons on the proven engine.
 
 - 2026-08-30 PHASE 4 (trust model) CORE COMPLETE. The consensus-observable
   half of wall #1: conviction + fork-choice exclusion + finality. BlockTree

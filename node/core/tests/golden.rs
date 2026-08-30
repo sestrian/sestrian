@@ -477,7 +477,7 @@ fn full_chain_replay_matches_reference() {
                         .collect())
                     .unwrap_or_default();
             tree.add_block(Block { header, txs, bodies, sparse: HashMap::new(), transfers, data_txs, scores,
-                                   sketches })
+                                   sketches, witness_leaves: Vec::new() })
                 .expect("reference block must validate");
         }
         assert_eq!(tree.head, case["expected_head"].as_str().unwrap(),
@@ -1189,7 +1189,7 @@ fn fork_replay_park_reorg_and_leaf_cache() {
                     .collect();
             tree.add_block(Block { header, txs, bodies, sparse: HashMap::new(),
                                    transfers: Vec::new(), data_txs: Vec::new(),
-                                   scores, sketches })
+                                   scores, sketches, witness_leaves: Vec::new() })
                 .unwrap_or_else(|e| panic!("fork block {n} must validate: {}", e.0));
             assert_eq!(tree.head, b["expected_head"].as_str().unwrap(),
                        "head after block {n} diverges from the reference");
@@ -1241,6 +1241,7 @@ fn deep_rival_beyond_window_rejects_cleanly() {
                     a.iter().map(|e| e.as_i64().unwrap_or(0) as i32).collect(),
                 )))
                 .collect(),
+            witness_leaves: Vec::new(),
         }
     };
     // Replay the whole family under aggressive pruning. Fork choice needs
@@ -1410,6 +1411,7 @@ fn convict_reorgs_off_the_convicted_line() {
         sketches: b["sketches"].as_object().unwrap().iter()
             .filter_map(|(k, x)| x.as_array().map(|a| (k.clone(),
                 a.iter().map(|e| e.as_i64().unwrap_or(0) as i32).collect()))).collect(),
+        witness_leaves: Vec::new(),
     };
     for b in case["blocks"].as_array().unwrap() {
         let _ = tree.add_block(mk(b));
@@ -1433,4 +1435,131 @@ fn convict_reorgs_off_the_convicted_line() {
     }
     assert_eq!(tree.settled_height(),
         tree.blocks[&tree.head].height.saturating_sub(BlockTree::FRAUD_WINDOW));
+}
+
+/// PAGED VALIDATOR (Sharding Road P4 — wall #1): a node holding only backbone +
+/// one expert page must validate the SAME chain as a full node and agree on the
+/// head state_root and settled state, while its canon holds far fewer bytes.
+/// This is the memory win that lets the model exceed one machine.
+#[test]
+fn paged_validator_agrees_with_full_node() {
+    use sestrian_core::blocktree::{Block, BlockTree};
+    use std::collections::{BTreeSet, HashMap};
+    let v = vectors();
+    // fork_replay has partial page claims — a paged node holding page 1 sees
+    // real work on its page AND foreign work it must trust.
+    let case = &v["fork_replay"].as_array().unwrap()[0];
+    let spec = spec_from(&case["spec"]);
+    let params = params_from(spec.clone(), &case["params"]);
+    let genesis_w = i64s(&case["genesis_w"]);
+    let dc = Some(case["data_contributor"].as_str().unwrap().to_string());
+
+    let mut full = BlockTree::new(genesis_w.clone(), dc.clone(), params.clone());
+    let mut held = BTreeSet::new();
+    held.insert(1usize); // + backbone (page 0) auto-added
+    let mut paged = BlockTree::new_paged(genesis_w.clone(), held, dc, params.clone());
+    assert!(paged.is_paged());
+    // the paged node holds strictly fewer bytes than the full model
+    assert!(paged.head_state().len() < full.head_state().len(),
+            "paged canon must be smaller than the full model");
+
+    let mk = |b: &Value| -> Block {
+        Block {
+            header: header_from(&b["header"]),
+            txs: b["txs"].as_array().unwrap().iter().map(tx_from).collect(),
+            bodies: b["bodies"].as_object().unwrap().iter()
+                .map(|(k, val)| (k.clone(), i64s(val))).collect::<HashMap<_, _>>(),
+            sparse: HashMap::new(), transfers: Vec::new(), data_txs: Vec::new(),
+            scores: b["scores"].as_object().unwrap().iter()
+                .filter_map(|(k, x)| x.as_u64().map(|s| (k.clone(), s))).collect(),
+            sketches: b["sketches"].as_object().unwrap().iter()
+                .filter_map(|(k, x)| x.as_array().map(|a| (k.clone(),
+                    a.iter().map(|e| e.as_i64().unwrap_or(0) as i32).collect()))).collect(),
+            witness_leaves: Vec::new(), // filled below from the full node
+        }
+    };
+
+    // feed only the MAIN chain (paged nodes follow the head; siblings park).
+    // The full node computes the witness leaves each block; the paged node is
+    // handed exactly those (as the StoredBlock witness would carry them).
+    for b in case["blocks"].as_array().unwrap() {
+        if b["parent"].as_str().unwrap() != full.head { continue; }
+        // full node first — it produces the committed leaves
+        let mut fb = mk(b);
+        if full.add_block(fb_clone(&fb)).is_err() { continue; }
+        // witness = the full node's per-page leaves at the new head
+        let leaves = full.page_leaves_at_head();
+        fb.witness_leaves = leaves;
+        paged.add_block(fb).expect("paged node must validate the head block");
+        assert_eq!(paged.head, full.head, "paged head must track full head");
+    }
+    // both agree on the committed state_root and finality
+    assert_eq!(paged.blocks[&paged.head].state_root,
+               full.blocks[&full.head].state_root,
+               "paged and full must commit the same state_root");
+    assert_eq!(paged.settled_height(), full.settled_height());
+}
+
+fn fb_clone(b: &sestrian_core::blocktree::Block) -> sestrian_core::blocktree::Block {
+    sestrian_core::blocktree::Block {
+        header: b.header.clone(),
+        txs: b.txs.clone(),
+        bodies: b.bodies.clone(),
+        sparse: b.sparse.clone(),
+        transfers: b.transfers.clone(),
+        data_txs: b.data_txs.clone(),
+        scores: b.scores.clone(),
+        sketches: b.sketches.clone(),
+        witness_leaves: b.witness_leaves.clone(),
+    }
+}
+
+/// A paged node must CONVICT (reject) a block whose HELD page's committed leaf
+/// is a lie — it recomputes its own pages and cannot be fooled there. It only
+/// trusts UNHELD pages. This is the security floor of the paged design.
+#[test]
+fn paged_validator_rejects_fraud_on_a_held_page() {
+    use sestrian_core::blocktree::{Block, BlockTree};
+    use std::collections::{BTreeSet, HashMap};
+    let v = vectors();
+    let case = &v["fork_replay"].as_array().unwrap()[0];
+    let spec = spec_from(&case["spec"]);
+    let params = params_from(spec.clone(), &case["params"]);
+    let genesis_w = i64s(&case["genesis_w"]);
+    let dc = Some(case["data_contributor"].as_str().unwrap().to_string());
+    let mut full = BlockTree::new(genesis_w.clone(), dc.clone(), params.clone());
+    let mut held = BTreeSet::new();
+    held.insert(1usize);
+    let mut paged = BlockTree::new_paged(genesis_w.clone(), held, dc, params.clone());
+
+    let first = &case["blocks"].as_array().unwrap()[0];
+    let mk = |b: &Value| Block {
+        header: header_from(&b["header"]),
+        txs: b["txs"].as_array().unwrap().iter().map(tx_from).collect(),
+        bodies: b["bodies"].as_object().unwrap().iter()
+            .map(|(k, val)| (k.clone(), i64s(val))).collect::<HashMap<_, _>>(),
+        sparse: HashMap::new(), transfers: Vec::new(), data_txs: Vec::new(),
+        scores: b["scores"].as_object().unwrap().iter()
+            .filter_map(|(k, x)| x.as_u64().map(|s| (k.clone(), s))).collect(),
+        sketches: b["sketches"].as_object().unwrap().iter()
+            .filter_map(|(k, x)| x.as_array().map(|a| (k.clone(),
+                a.iter().map(|e| e.as_i64().unwrap_or(0) as i32).collect()))).collect(),
+        witness_leaves: Vec::new(),
+    };
+    let mut fb = mk(first);
+    full.add_block(fb_clone(&fb)).expect("full validates");
+    // Forge a byzantine block: lie about the HELD page's leaf in both the
+    // witness AND the header root (internally consistent, as a real byzantine
+    // producer's block is). The paged node recomputes page 1 from its own
+    // canon, folds the HONEST leaf, and the honest root won't match the
+    // forged header root — caught, because it holds that page.
+    let mut witness = full.page_leaves_at_head();
+    witness[1][0] ^= 0xFF;
+    let forged_root = hex::encode(
+        sestrian_core::merkle::root_from_hashes(witness.clone()));
+    fb.witness_leaves = witness;
+    fb.header.state_root = forged_root;
+    let err = paged.add_block(fb).unwrap_err();
+    assert!(err.0.contains("state_root does not reproduce"),
+            "a paged node must reject fraud on a page it holds: {}", err.0);
 }

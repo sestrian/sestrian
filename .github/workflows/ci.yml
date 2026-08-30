@@ -331,6 +331,30 @@ jobs:
           path: /tmp/wh*.log
           if-no-files-found: ignore
 
+  # Paged validator (Sharding Road P4 — wall #1): a node holding only backbone +
+  # one expert page validates the full chain, tracking a full node's head.
+  paged-validator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: node
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: a node holding one expert page validates the full chain
+        run: bash scripts/paged-validator-proof.sh 80
+      - name: upload paged-validator logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paged-validator-logs
+          path: /tmp/pg*.log
+          if-no-files-found: ignore
+
   lag-catchup:
     runs-on: ubuntu-latest
     timeout-minutes: 25

@@ -31,6 +31,11 @@ pub struct Block {
     pub data_txs: Vec<AccountTx>,          // rev 3: Data{Submit,Challenge,Vote}
     pub scores: BTreeMap<String, u64>,     // rev 7: txid -> micro-nat held-out score
     pub sketches: BTreeMap<String, Vec<i32>>, // rev 8: txid -> [i32; SKETCH_DIM]
+    /// Sharding Road P4: the block's committed per-page leaf hashes (from the
+    /// StoredBlock witness). EMPTY for a full node (it recomputes every leaf);
+    /// a PAGED node uses these for pages it does not hold. Never trusted for a
+    /// held page — those are recomputed and any mismatch is fraud.
+    pub witness_leaves: Vec<[u8; 32]>,
 }
 
 /// rev 7: a delta's score = its held-out loss improvement in micro-nats, >= 0,
@@ -500,6 +505,16 @@ pub struct BlockTree {
     /// txids whose (body, delta_hash) this process has already verified — the
     /// O(dim) streaming hash then need not repeat at connect. Local memo only.
     pub hash_verified: HashSet<String>,
+    /// Sharding Road P4 — PAGED VALIDATOR. `None` = a full node (canon is the
+    /// whole model; every existing path is byte-identical). `Some(pages)` = a
+    /// paged node: canon holds ONLY these pages' bytes (backbone is always in
+    /// the set), it recomputes their leaves and CONVICTS on a mismatch, and it
+    /// trusts the block's committed witness leaf for every other page. This is
+    /// the memory win that lets the model outgrow any single machine.
+    held: Option<BTreeSet<usize>>,
+    /// per page id: byte offset of its span inside the compact `canon`, or None
+    /// if unheld. Identity for a full node (never consulted there).
+    page_base: Vec<Option<usize>>,
     /// Sharding Road P4: block hashes convicted by a verified fraud proof.
     /// Excluded from fork choice (they and their descendants can never be
     /// head). A FULL node never accepts a fraudulent block in the first place;
@@ -665,6 +680,8 @@ impl BlockTree {
             genesis_pin,
             hash_verified: HashSet::new(),
             convicted: HashSet::new(),
+            held: None,
+            page_base: Vec::new(),
         };
         t.blocks.insert(ghash.clone(), gh);
         t.model.insert(ghash.clone(), model0);
@@ -677,6 +694,51 @@ impl BlockTree {
         t.cum_work.insert(ghash, 0);
         t
     }
+
+    /// A PAGED validator over `held_pages` (page ids; backbone page 0 is added
+    /// automatically). Canon holds only those pages' bytes — the memory win.
+    /// `genesis_full` is the full genesis vector (used once to slice out the
+    /// held pages, then dropped). Every leaf is still known (page_leaves), so
+    /// the state_root is fully checkable; only the held pages' BYTES are kept.
+    pub fn new_paged(genesis_full: Vec<i64>, mut held_pages: BTreeSet<usize>,
+                     data_contributor: Option<String>, params: GenesisParams)
+        -> Self
+    {
+        let gh = genesis_header(&genesis_full, &params);
+        let ghash = gh.block_hash();
+        let model0 = ModelState::genesis(&params.spec);
+        held_pages.insert(0); // backbone is always held (everyone validates it)
+        let page_leaves = leaves_for(&genesis_full, &model0);
+        // compact canon: held pages' bytes concatenated in page order
+        let mut canon = Vec::new();
+        let mut page_base = vec![None; model0.pages.len()];
+        for (pid, p) in model0.pages.iter().enumerate() {
+            if held_pages.contains(&pid) {
+                page_base[pid] = Some(canon.len());
+                canon.extend_from_slice(&genesis_full[p.start as usize..p.end as usize]);
+            }
+        }
+        let mut t = BlockTree {
+            blocks: HashMap::new(), ledger: HashMap::new(), model: HashMap::new(),
+            cum_work: HashMap::new(), head: ghash.clone(), genesis_hash: ghash.clone(),
+            data_contributor, params, prune_depth: None,
+            canon, page_leaves, undo: HashMap::new(), redo: HashMap::new(),
+            genesis_pin: None, hash_verified: HashSet::new(), convicted: HashSet::new(),
+            held: Some(held_pages), page_base,
+        };
+        t.blocks.insert(ghash.clone(), gh);
+        t.model.insert(ghash.clone(), model0);
+        let mut genesis_ledger = TokenLedger::new();
+        if let Some(dc) = &t.data_contributor {
+            genesis_ledger.seed_genesis_data(dc);
+        }
+        t.ledger.insert(ghash.clone(), genesis_ledger);
+        t.cum_work.insert(ghash, 0);
+        t
+    }
+
+    /// Is this a paged validator?
+    pub fn is_paged(&self) -> bool { self.held.is_some() }
 
     /// Seed the tree at a snapshot checkpoint (fast boot): the canonical state,
     /// ledger and model at `hash` become the head. The model_root commitment on
@@ -1189,11 +1251,123 @@ impl BlockTree {
         if self.convicted.contains(&bh) || self.convicted.contains(&block.header.prev_hash) {
             return Err(err("block is on a convicted (fraudulent) line"));
         }
+        if self.held.is_some() {
+            // A paged node only follows the head forward; a reorg it can't
+            // validate from held pages means resync (rare — the anchors are the
+            // deep-history validators). Non-extending blocks are parked.
+            if block.header.prev_hash == self.head {
+                return self.connect_extend_paged(block);
+            }
+            return Err(err("orphan: paged node follows head only"));
+        }
         if block.header.prev_hash == self.head {
             self.connect_extend(block)
         } else {
             self.connect_side(block)
         }
+    }
+
+    /// PAGED connect (Sharding Road P4): validate a head-extending block while
+    /// holding only some pages. Recompute the leaves of HELD touched pages from
+    /// compact canon; trust the committed witness leaf for unheld pages; fold
+    /// and check against the header. A held page whose recomputed leaf differs
+    /// from the witness is FRAUD on a page we hold — reject (the net layer then
+    /// emits a proof). Commit applies the aggregate to held coordinates only.
+    fn connect_extend_paged(&mut self, block: Block)
+        -> Result<bool, ValidationError>
+    {
+        let bh = block.hash();
+        let parent = self.head.clone();
+        let parent_model = self.model[&parent].clone();
+        let parent_ledger = self.ledger[&parent].clone();
+        let parent_height = self.blocks[&parent].height;
+        let jurors = self.recent_proposers(&parent);
+        let spans: Vec<(u64, u64)> = parent_model.pages.iter()
+            .map(|p| (p.start, p.end)).collect();
+        if block.witness_leaves.len() != parent_model.pages.len() {
+            return Err(err("paged node needs a full page-leaf witness"));
+        }
+        // body-free rules (header, lottery, claims, lanes, fold, ledger)
+        let (_, led, post_model, activations) = validate_inner(
+            &block, None, parent_height, &parent_ledger,
+            self.data_contributor.as_deref(), &jurors, &parent_model,
+            &self.params)?;
+        // per-page aggregate over HELD pages only (we can't verify the rest)
+        let held = self.held.as_ref().unwrap().clone();
+        let mut tx_coords: Vec<Vec<(u32, i64)>> = Vec::with_capacity(block.txs.len());
+        for tx in &block.txs {
+            let (_, coords) = Self::body_coords(&block, tx)?;
+            tx_coords.push(coords);
+        }
+        let agg_full = page_aggregate(&block, &spans, &tx_coords);
+        // build new leaves: held touched pages recomputed, others from witness
+        let mut new_leaves = self.page_leaves.clone();
+        let mut held_agg: BTreeMap<u32, i64> = BTreeMap::new();
+        for (pid, &(start, end)) in spans.iter().enumerate() {
+            let touched = agg_full.range(start as u32..end as u32).next().is_some();
+            if let Some(base) = self.page_base[pid] {
+                // held: recompute from compact canon. leaf_with_subs iterates
+                // canon indices [base, base+len) and looks up subs by canon
+                // index, so the aggregate must be re-keyed from GLOBAL coord i
+                // to CANON index base + (i - start).
+                let len = (end - start) as usize;
+                let sub: BTreeMap<u32, i64> = agg_full
+                    .range(start as u32..end as u32)
+                    .map(|(&i, &v)| (base as u32 + (i - start as u32), v))
+                    .collect();
+                for (&i, &v) in agg_full.range(start as u32..end as u32) {
+                    held_agg.insert(i, v);
+                }
+                new_leaves[pid] = leaf_with_subs(&self.canon, base, base + len, &sub);
+            } else if touched {
+                // unheld + touched: trust the committed witness leaf
+                new_leaves[pid] = block.witness_leaves[pid];
+            }
+        }
+        for (i, (page_id, _, _, trigger)) in activations.iter().enumerate() {
+            let ip = page_init(trigger, *page_id, &self.params.spec);
+            // a grown page: hold it iff we hold new experts (v1: paged nodes do
+            // not auto-adopt grown pages — trust the witness leaf for them)
+            let _ = i;
+            new_leaves.push(crate::merkle::leaf_hash(&int64_bytes(&ip)));
+        }
+        let root = hex::encode(crate::merkle::root_from_hashes(new_leaves.clone()));
+        if root != block.header.state_root {
+            // Either the proposer committed a wrong root, or a HELD page's
+            // recompute disagrees with the commitment — both mean this block is
+            // not one we can adopt. If a held page is the culprit it is provable
+            // fraud (the net layer builds the proof from held state).
+            return Err(err("state_root does not reproduce from txs"));
+        }
+        // COMMIT: apply the held aggregate to compact canon; sparse undo over
+        // held coords (unheld coords are not stored, so nothing to undo there).
+        let mut undo: Vec<(u32, i64)> = Vec::with_capacity(held_agg.len());
+        for (&i, &m) in &held_agg {
+            let base = self.page_base[self.page_of(i as usize, &spans)].unwrap();
+            let (pstart, _) = spans[self.page_of(i as usize, &spans)];
+            let ci = base + (i as usize - pstart as usize);
+            undo.push((i, self.canon[ci]));
+            self.canon[ci] = self.canon[ci].wrapping_add(m);
+        }
+        let _ = held;
+        self.page_leaves = new_leaves;
+        self.undo.insert(bh.clone(), (undo, Vec::new()));
+        self.redo.insert(bh.clone(), held_agg.into_iter().collect());
+        let work = self.cum_work[&parent].saturating_add(block.header.work.max(1));
+        self.blocks.insert(bh.clone(), block.header);
+        self.ledger.insert(bh.clone(), led);
+        self.model.insert(bh.clone(), post_model);
+        self.cum_work.insert(bh.clone(), work);
+        self.head = bh;
+        self.prune_deep();
+        Ok(true)
+    }
+
+    /// Which page a global coordinate falls in (linear over spans — used only
+    /// on the paged commit path, over the few coords a block actually moves).
+    fn page_of(&self, coord: usize, spans: &[(u64, u64)]) -> usize {
+        spans.iter().position(|&(s, e)| coord >= s as usize && coord < e as usize)
+            .unwrap_or(0)
     }
 
     /// Drop undo/redo (and the genesis pin, when oversized) beyond the window.
@@ -1220,6 +1394,12 @@ impl BlockTree {
 
     pub fn head_state(&self) -> &Vec<i64> {
         &self.canon
+    }
+
+    /// The committed per-page leaf hashes at the head — the witness a full node
+    /// hands to a paged node (and StoredBlock carries on the wire).
+    pub fn page_leaves_at_head(&self) -> Vec<[u8; 32]> {
+        self.page_leaves.clone()
     }
 
     /// FRAUD WINDOW (Sharding Road P4): a block is SETTLED once this many

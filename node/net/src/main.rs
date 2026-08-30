@@ -355,6 +355,13 @@ struct Args {
     /// the data-availability attack. Refused on any real network.
     #[arg(long, default_value_t = false)]
     byzantine_withhold: bool,
+    /// PAGED VALIDATOR (Sharding Road P4): hold only backbone + these expert
+    /// page ids (comma-separated), keeping canon bytes for them alone — the
+    /// memory win that lets the model exceed one machine. Empty = a full node.
+    /// A paged node follows the head and trusts foreign pages' committed leaves,
+    /// backstopped by fraud proofs. v1: starts fresh from genesis.
+    #[arg(long, default_value = "")]
+    held_pages: String,
 }
 
 /// Decrypt a pynacl-encrypted wallet: argon2id(MODERATE) -> XSalsa20-Poly1305.
@@ -1013,15 +1020,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // self-verifying, so a fresh node bootstraps from one peer + the id.
     resolve_genesis(&args, &store, &mut swarm, &gp).await;
 
-    // replay any existing chain from disk (validated)
-    let (tree, blocks_full, payloads) = store
-        .replay(dc.clone(), args.prune_depth, &gp)
-        .expect("chain replay failed");
+    // PAGED VALIDATOR boot (Sharding Road P4): hold only backbone + the listed
+    // expert pages. v1 starts fresh from genesis and follows the head, so the
+    // full-model bytes are never resident. A full node takes the normal replay.
+    let (tree, blocks_full, payloads) = if !args.held_pages.is_empty() {
+        let held: std::collections::BTreeSet<usize> = args.held_pages
+            .split(',').filter_map(|s| s.trim().parse().ok()).collect();
+        let genesis = store.read_genesis().expect("paged node needs genesis");
+        info!(pages = ?held, "PAGED VALIDATOR — holding backbone + these expert pages");
+        let tree = core::blocktree::BlockTree::new_paged(
+            genesis, held, dc.clone(), gp.clone());
+        (tree, std::collections::HashMap::new(), std::collections::HashMap::new())
+    } else {
+        store.replay(dc.clone(), args.prune_depth, &gp)
+            .expect("chain replay failed")
+    };
 
     // Guarantee a current-format snapshot at the replayed head, so the NEXT
     // boot is a fast-boot even for an idle watcher that never advances to a
     // SNAPSHOT_EVERY height. Skips the write if disk already has one at head.
-    if !matches!(store.read_snapshot(), Some((h, ..)) if h == tree.head) {
+    // A paged node's canon is compact (not a full state), so it never writes a
+    // snapshot — it starts fresh from genesis and follows the head (v1).
+    if !tree.is_paged()
+        && !matches!(store.read_snapshot(), Some((h, ..)) if h == tree.head) {
         let head = tree.head.clone();
         let height = tree.blocks[&head].height;
         store.write_snapshot(&head, height, tree.head_state(), tree.head_ledger(),
@@ -1055,7 +1076,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         seen: Default::default(),
         seen_order: Default::default(),
         cfg: node::NodeConfig {
-            produce: args.produce,
+            produce: args.produce && args.held_pages.is_empty(),
             model_name: net.genesis_model.to_string(),
             interval: args.interval,
             seconds: args.seconds,

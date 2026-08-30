@@ -64,7 +64,7 @@ fn header(tree: &BlockTree, height: u64, n_txs: u64) -> core::Header {
 
 fn empty_block(header: core::Header) -> Block {
     Block { header, txs: vec![], bodies: HashMap::new(), sparse: HashMap::new(), transfers: vec![], data_txs: vec![],
-            scores: Default::default(), sketches: Default::default() }
+            scores: Default::default(), sketches: Default::default(), witness_leaves: Vec::new() }
 }
 
 /// A correctly-signed page-claiming delta tx over `body` (hash matches).
@@ -98,7 +98,7 @@ fn tx_block(tree: &BlockTree, tx: core::BackpropTx, body: Vec<i64>) -> Block {
         transfers: vec![],
         data_txs: vec![],
         scores: Default::default(),
-        sketches: Default::default(),
+        sketches: Default::default(), witness_leaves: Vec::new()
     }
 }
 
@@ -577,7 +577,7 @@ fn v5_rejects_claim_outside_lane_and_accepts_inside() {
         bodies.insert(tx.da_pointer.clone(), body.to_vec());
         Block { header: h, txs: vec![tx], bodies, sparse: HashMap::new(),
                 transfers: vec![], data_txs: vec![], scores: Default::default(),
-                sketches: Default::default() }
+                sketches: Default::default(), witness_leaves: Vec::new() }
     };
 
     // claim a foreign lane's expert → must be rejected specifically for lanes

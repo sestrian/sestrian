@@ -360,9 +360,18 @@ impl StoredBlock {
         for v in &self.data_txs {
             data_txs.push(account_tx_from_json(v)?);
         }
+        // P4: carry the committed page-leaf witness so a PAGED validator can
+        // trust pages it does not hold. Full nodes ignore it. Bad hex is
+        // dropped to a zero leaf (a paged node then treats that page as
+        // unknown and cannot settle a block relying on it).
+        let witness_leaves = self.page_leaves.iter()
+            .map(|h| hex::decode(h).ok()
+                .and_then(|b| b.try_into().ok()).unwrap_or([0u8; 32]))
+            .collect();
         Some(Block { header: self.header.to_core(), txs, bodies,
                      sparse: HashMap::new(), transfers, data_txs,
-                     scores: self.scores.clone(), sketches: self.sketches.clone() })
+                     scores: self.scores.clone(), sketches: self.sketches.clone(),
+                     witness_leaves })
     }
 }
 

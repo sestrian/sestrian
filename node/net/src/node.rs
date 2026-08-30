@@ -1275,6 +1275,8 @@ impl Node {
             sparse,
             transfers: core_transfers, data_txs: core_data,
             scores: blk_scores, sketches: blk_sketches,
+            // the producer is a full node building this; leaves are recomputed
+            witness_leaves: cand_leaves,
         };
         Some((stored, block))
     }
@@ -1596,7 +1598,7 @@ impl Node {
                 }
             }
         }
-        if h % SNAPSHOT_EVERY == 0 {
+        if h % SNAPSHOT_EVERY == 0 && !self.tree.is_paged() {
             // checkpoint the head's PARENT (see snapshot_basis_hash), streaming
             // from the in-place rewound canon — no ~915MB state clone.
             let sh = self.tree.snapshot_basis_hash();
@@ -2499,7 +2501,9 @@ async fn run_chain(
             }
         }
     }
-    // final report + snapshot (moved here from the old single loop)
+    // final report + snapshot (moved here from the old single loop). A paged
+    // node's canon is compact — it never writes a snapshot (starts fresh v1).
+    if !node.tree.is_paged() {
     let sh = node.tree.snapshot_basis_hash();
     let sheight = node.tree.blocks.get(&sh).map(|b| b.height)
         .unwrap_or_else(|| node.head_height());
@@ -2512,6 +2516,7 @@ async fn run_chain(
         let hh = node.head_height();
         node.store.write_snapshot(&head, hh, node.tree.head_state(),
                                   node.tree.head_ledger(), node.tree.head_model());
+    }
     }
     let mut lineage = Vec::new();
     let mut cur = node.tree.head.clone();
