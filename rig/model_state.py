@@ -110,6 +110,17 @@ class GenesisParams:
     # aggregation already assumes; a network with fewer miners than this sets
     # it to its fleet size (see NetworkParams) and raises it as miners join.
     growth_quorum: int = 3
+    # PROTOCOL v5 (Sharding Road, Phase 2): TRAINING LANES. From this height a
+    # delta is only includable if its claimed pages lie in the miner's lane
+    # (backbone + a beacon-assigned stripe of expert pages) for the current
+    # epoch. Lifts the single-queue throughput ceiling: N lanes accept work in
+    # parallel, so throughput scales with miners instead of contending for a
+    # handful of per-block seats. v5 also makes blocks CARRY their page_leaves
+    # witness so the Phase-1 fraud proofs work against any block, not only a
+    # head-extending one. 0 disables (pre-fork / toy nets that never set it).
+    v5_height: int = 0
+    lane_width: int = 8          # expert pages per lane
+    lane_epoch_len: int = 16     # blocks per lane-assignment epoch
 
 
 ACTIVE, FROZEN = "A", "F"

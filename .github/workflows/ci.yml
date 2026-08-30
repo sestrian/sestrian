@@ -283,6 +283,30 @@ jobs:
           path: /tmp/fraud*.log
           if-no-files-found: ignore
 
+  # Training lanes (Sharding Road P2): two miners in different lanes cross a v5
+  # activation; their disjoint work coexists, chains agree, no lane rejections.
+  lanes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: node
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: two lanes coexist across a v5 fork
+        run: bash scripts/lanes-proof.sh 90
+      - name: upload lanes logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lanes-logs
+          path: /tmp/lane*.log
+          if-no-files-found: ignore
+
   lag-catchup:
     runs-on: ubuntu-latest
     timeout-minutes: 25

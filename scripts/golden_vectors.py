@@ -1060,6 +1060,34 @@ def main():
         {**_case(t_parent, False), "note": "wrong parent page — invalid"},
     ]
 
+    # --- TRAINING LANES (Sharding Road P2): lane assignment is a pure function
+    # every node must reproduce. Pin lane counts, per-miner assignment across
+    # epochs, and the claimable set (backbone always in; experts striped).
+    from rig import lanes as _lanes
+    lane_spec = _MSt.genesis(spec)
+    _exp = [i for i in range(len(lane_spec.pages))
+            if lane_spec.pages[i][2] != "backbone"]
+    lane_cases = []
+    for lw in (2, 4):
+        n = _lanes.n_lanes(len(_exp), lw)
+        assigns = [[ep, _lanes.lane_of_miner(ep, mk.pub, n)]
+                   for ep in (0, 1, 7)
+                   for mk in (m0, m1, m2)]
+        claim = {}
+        for mk in (m0, m1, m2):
+            claim[mk.pub] = sorted(_lanes.claimable_pages(0, mk.pub,
+                                                          lane_spec, lw))
+        lane_cases.append({
+            "spec": v["controller_fold"][0]["spec"],
+            "lane_width": lw,
+            "expert_ids": _exp,
+            "n_lanes": n,
+            "assignments": assigns,     # [epoch, miner_pub -> lane]
+            "assign_pubs": [mk.pub for mk in (m0, m1, m2)],
+            "claimable": {k: v_ for k, v_ in claim.items()},
+        })
+    v["lane_assignment"] = lane_cases
+
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w") as f:
         json.dump(v, f, indent=1)

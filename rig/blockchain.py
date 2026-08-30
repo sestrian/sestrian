@@ -60,6 +60,11 @@ def expected_version(height: int, params=None) -> int:
     # mismatch" rather than "upgrade your node". Version bumps resume at v5,
     # and the version_schedule golden family now pins rig == Rust so a
     # one-sided bump can never pass CI again.
+    # v5 (training lanes) activates at params.v5_height when set — like v3, a
+    # scheduled coordinated upgrade signalled by the header version.
+    if params is not None and getattr(params, "v5_height", 0) \
+            and height >= params.v5_height:
+        return 5
     if params is not None and height >= params.v3_height:
         return 3
     v = VERSION_SCHEDULE[0][1]
@@ -360,6 +365,19 @@ def validate_block(block: Block, parent_w_int: np.ndarray, parent_height: int,
                 if not parent_model.is_active(p):
                     raise ValidationError(
                         f"tx claims missing/frozen page {p}")
+            # v5 TRAINING LANES: a delta may only claim backbone + its miner's
+            # lane pages for this epoch. Pure function of (epoch, miner, active
+            # page table) — every node computes the same set.
+            if params is not None and getattr(params, "v5_height", 0) \
+                    and h.height >= params.v5_height:
+                from rig.lanes import claimable_pages
+                epoch = h.height // params.lane_epoch_len
+                allowed = claimable_pages(epoch, tx.miner, parent_model,
+                                          params.lane_width)
+                if not set(pages) <= allowed:
+                    raise ValidationError(
+                        f"tx claims pages outside its lane (miner "
+                        f"{tx.miner[:8]}, epoch {epoch})")
             mask = np.zeros(dim, dtype=bool)
             for p in pages:
                 s, e = parent_model.page_span(p)

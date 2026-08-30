@@ -58667,5 +58667,169 @@
    "expect_fraud": false,
    "note": "wrong parent page \u2014 invalid"
   }
+ ],
+ "lane_assignment": [
+  {
+   "spec": {
+    "n_layers": 2,
+    "d_model": 4,
+    "d_ff": 8,
+    "n_experts_initial": 2,
+    "e_max": 4,
+    "backbone_params": 100
+   },
+   "lane_width": 2,
+   "expert_ids": [
+    1,
+    2,
+    3,
+    4
+   ],
+   "n_lanes": 2,
+   "assignments": [
+    [
+     0,
+     0
+    ],
+    [
+     0,
+     1
+    ],
+    [
+     0,
+     0
+    ],
+    [
+     1,
+     1
+    ],
+    [
+     1,
+     1
+    ],
+    [
+     1,
+     0
+    ],
+    [
+     7,
+     0
+    ],
+    [
+     7,
+     0
+    ],
+    [
+     7,
+     0
+    ]
+   ],
+   "assign_pubs": [
+    "c74fa57d749ec00bea5c197f59a82fd3d47c67c89e02f0625058cb9394a313f6",
+    "323157b101d0d7c712af9f6bf25513f8e74ed35cf1ff9b5245c9bf8325793af1",
+    "c3852de5d8505161eb5c5bc51829f57e00f5efd6ac53f6e0162d9ee60d37de07"
+   ],
+   "claimable": {
+    "c74fa57d749ec00bea5c197f59a82fd3d47c67c89e02f0625058cb9394a313f6": [
+     0,
+     1,
+     3
+    ],
+    "323157b101d0d7c712af9f6bf25513f8e74ed35cf1ff9b5245c9bf8325793af1": [
+     0,
+     2,
+     4
+    ],
+    "c3852de5d8505161eb5c5bc51829f57e00f5efd6ac53f6e0162d9ee60d37de07": [
+     0,
+     1,
+     3
+    ]
+   }
+  },
+  {
+   "spec": {
+    "n_layers": 2,
+    "d_model": 4,
+    "d_ff": 8,
+    "n_experts_initial": 2,
+    "e_max": 4,
+    "backbone_params": 100
+   },
+   "lane_width": 4,
+   "expert_ids": [
+    1,
+    2,
+    3,
+    4
+   ],
+   "n_lanes": 1,
+   "assignments": [
+    [
+     0,
+     0
+    ],
+    [
+     0,
+     0
+    ],
+    [
+     0,
+     0
+    ],
+    [
+     1,
+     0
+    ],
+    [
+     1,
+     0
+    ],
+    [
+     1,
+     0
+    ],
+    [
+     7,
+     0
+    ],
+    [
+     7,
+     0
+    ],
+    [
+     7,
+     0
+    ]
+   ],
+   "assign_pubs": [
+    "c74fa57d749ec00bea5c197f59a82fd3d47c67c89e02f0625058cb9394a313f6",
+    "323157b101d0d7c712af9f6bf25513f8e74ed35cf1ff9b5245c9bf8325793af1",
+    "c3852de5d8505161eb5c5bc51829f57e00f5efd6ac53f6e0162d9ee60d37de07"
+   ],
+   "claimable": {
+    "c74fa57d749ec00bea5c197f59a82fd3d47c67c89e02f0625058cb9394a313f6": [
+     0,
+     1,
+     2,
+     3,
+     4
+    ],
+    "323157b101d0d7c712af9f6bf25513f8e74ed35cf1ff9b5245c9bf8325793af1": [
+     0,
+     1,
+     2,
+     3,
+     4
+    ],
+    "c3852de5d8505161eb5c5bc51829f57e00f5efd6ac53f6e0162d9ee60d37de07": [
+     0,
+     1,
+     2,
+     3,
+     4
+    ]
+   }
+  }
  ]
 }

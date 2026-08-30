@@ -406,6 +406,11 @@ fn params_from(spec: core::model_state::ModelSpec, p: &Value) -> core::model_sta
         v3_height: 1_000_000_000,
         v4_height: 1_000_000_000,
         growth_quorum: 3,
+        v5_height: p.get("v5_height").and_then(|x| x.as_u64()).unwrap_or(0),
+        lane_width: p.get("lane_width").and_then(|x| x.as_u64())
+            .unwrap_or(8) as usize,
+        lane_epoch_len: p.get("lane_epoch_len").and_then(|x| x.as_u64())
+            .unwrap_or(16),
     }
 }
 
@@ -1321,6 +1326,43 @@ fn fraud_proof_verdicts_match_reference() {
             let want = case["honest_leaf"].as_str().unwrap();
             assert!(reason.contains(&want[..12]),
                     "honest leaf mismatch: {reason} vs {want}");
+        }
+    }
+}
+
+/// Training lanes (Sharding Road P2): lane assignment is a pure function every
+/// node must reproduce — lane counts, per-miner/per-epoch lane, and the
+/// claimable set (backbone always in, experts striped) must match rig exactly.
+#[test]
+fn lane_assignment_matches_reference() {
+    use sestrian_core::lanes;
+    use sestrian_core::model_state::ModelState;
+    for case in vectors()["lane_assignment"].as_array().unwrap() {
+        let spec = spec_from(&case["spec"]);
+        let model = ModelState::genesis(&spec);
+        let lw = case["lane_width"].as_u64().unwrap() as usize;
+        let expert_ids: Vec<usize> = case["expert_ids"].as_array().unwrap()
+            .iter().map(|x| x.as_u64().unwrap() as usize).collect();
+        let n = lanes::n_lanes(expert_ids.len(), lw);
+        assert_eq!(n as u64, case["n_lanes"].as_u64().unwrap(), "lane count");
+        let pubs: Vec<&str> = case["assign_pubs"].as_array().unwrap()
+            .iter().map(|x| x.as_str().unwrap()).collect();
+        let mut ai = 0;
+        for a in case["assignments"].as_array().unwrap() {
+            let epoch = a[0].as_u64().unwrap();
+            let want = a[1].as_u64().unwrap() as usize;
+            let miner = pubs[ai % pubs.len()];
+            assert_eq!(lanes::lane_of_miner(epoch, miner, n), want,
+                       "lane_of_miner diverged");
+            ai += 1;
+        }
+        for (mp, want) in case["claimable"].as_object().unwrap() {
+            let mut got: Vec<u32> = lanes::claimable_pages(0, mp, &model, lw)
+                .into_iter().collect();
+            got.sort_unstable();
+            let expect: Vec<u32> = want.as_array().unwrap().iter()
+                .map(|x| x.as_u64().unwrap() as u32).collect();
+            assert_eq!(got, expect, "claimable set diverged for {mp}");
         }
     }
 }

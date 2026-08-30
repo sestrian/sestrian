@@ -231,6 +231,16 @@ fn validate_inner(
                 return Err(err("tx claims missing/frozen page"));
             }
         }
+        // v5 TRAINING LANES: claims must lie in the miner's lane (backbone +
+        // its epoch stripe). Mirrors rig/lanes.claimable_pages.
+        if params.v5_height != 0 && h.height >= params.v5_height {
+            let epoch = h.height / params.lane_epoch_len;
+            let allowed = crate::lanes::claimable_pages(
+                epoch, &tx.miner, parent_model, params.lane_width);
+            if !pages.iter().all(|p| allowed.contains(p)) {
+                return Err(err("tx claims pages outside its lane"));
+            }
+        }
         if parent_w.is_some() {
             let body = &block.bodies[&tx.da_pointer];
             let mut mask = vec![false; dim];

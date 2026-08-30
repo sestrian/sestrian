@@ -18,6 +18,7 @@ pub mod corpus;
 pub mod da;
 pub mod lottery;
 pub mod fraud;
+pub mod lanes;
 pub mod merkle;
 pub mod model_state;
 pub mod token;
@@ -313,6 +314,9 @@ pub fn expected_version_at(
     height: u64,
     params: &crate::model_state::GenesisParams,
 ) -> u64 {
+    if params.v5_height != 0 && height >= params.v5_height {
+        return 5;
+    }
     if height >= params.v3_height {
         return 3;
     }

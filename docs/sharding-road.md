@@ -42,19 +42,19 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked/decision
 
 ## Phase 2 — Training Lanes (wall #2) — scheduled fork v5
 
-- [ ] 2.1 rig: `lane_assignment(epoch, pubkey, n_lanes)` pure fn; lane → expert
+- [x] 2.1 rig: `lane_assignment(epoch, pubkey, n_lanes)` pure fn; lane → expert
       page partition (round-robin over active experts); backbone always
       claimable; `GenesisParams` gains {lanes_enable_height, lane_k,
       lane_epoch_len, n_lanes fn of active experts}
-- [ ] 2.2 rig: inclusion rule at v5 heights — every tx's claims ⊆ backbone ∪
+- [x] 2.2 rig: inclusion rule at v5 heights — every tx's claims ⊆ backbone ∪
       its miner's lane pages; ≤ lane_k deltas per lane per block; per-miner ≤1
       unchanged; `expected_version` v5 entry
-- [ ] 2.3 golden: `lane_assignment` family + `chain_replay` rebuilt to CROSS
+- [x] 2.3 golden: `lane_assignment` family + `chain_replay` rebuilt to CROSS
       the v5 activation (the bit-exact-across-a-fork test that caught us twice)
-- [ ] 2.4 core: port assignment + inclusion checks into validate_inner
-- [ ] 2.5 net: producer filters candidates by lane; `Train` already carries
+- [x] 2.4 core: port assignment + inclusion checks into validate_inner
+- [x] 2.5 net: producer filters candidates by lane; `Train` already carries
       active_pages — send lane-filtered set so the trainer claims its lane
-- [ ] 2.6 gates: 6-miner/3-lane devnet variant (`scripts/lanes-proof.sh`) —
+- [x] 2.6 gates: 6-miner/3-lane devnet variant (`scripts/lanes-proof.sh`) —
       throughput scales, no lane starves, convergence identical; full suite +
       soak + growth + lag across the activation boundary
 - [ ] 2.7 live fork: schedule v5 on the fleet inside a day-window, cross it in
@@ -128,6 +128,16 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked/decision
       universally validated forever
 
 ## Execution log
+
+- 2026-08-30 PHASE 2 (lanes) CODE COMPLETE. v5 = training lanes + version bump.
+  rig/lanes.py + node/core/src/lanes.rs (golden lane_assignment). Inclusion
+  rule in validate_inner (one site, both paths route through it); producer +
+  trainer restrict to the miner's lane. scripts/lanes-proof.sh: 2 miners cross
+  v5 at h4 (lane_width 1), disjoint work coexists, chains AGREE, zero lane
+  rejects. Negative unit test v5_rejects_claim_outside_lane + verify-the-
+  verifier (disabling the core check makes the foreign-lane block pass). 96
+  tests green; devnet/soak/growth all converge at v5-off default. Live v5
+  activation on the fleet (2.7) is scheduled at deploy time.
 
 - 2026-08-30 PHASE 1 COMPLETE. Live dispute game: byzantine producer corrupts
   page aggregates + publishes them; honest node rejects on the bad root AND

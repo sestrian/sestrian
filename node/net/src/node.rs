@@ -1007,10 +1007,23 @@ impl Node {
             nnz >= parent_model.required_nnz(&pages)
                 && nnz <= self.tree.params.delta_max_nnz
         };
+        // v5 TRAINING LANES: only include deltas whose claims lie in the
+        // miner's lane, or the validator (rightly) rejects our own block.
+        let gp = &self.tree.params;
+        let lane_ok = |t: &core::BackpropTx| -> bool {
+            if gp.v5_height == 0 || hh + 1 < gp.v5_height {
+                return true;
+            }
+            let epoch = (hh + 1) / gp.lane_epoch_len;
+            let allowed = core::lanes::claimable_pages(
+                epoch, &t.miner, parent_model, gp.lane_width);
+            t.canonical_pages().iter().all(|p| allowed.contains(p))
+        };
         let mut cands: Vec<&core::BackpropTx> = self.delta_pool.values()
             .filter(|t| t.base_height == hh)
             .filter(|t| t.canonical_refs().iter().any(|r| active_hashes.contains(r)))
             .filter(|t| quota_ok(t))
+            .filter(|t| lane_ok(t))
             .collect();
         if cands.is_empty() {
             return None;
@@ -2765,9 +2778,21 @@ impl Node {
                 self.train_inflight = true;
                 self.train_deadline = now() + TRAIN_TIMEOUT_SECS;
                 let model = &self.tree.model[&self.tree.head];
-                let active_pages: Vec<u32> = model.pages.iter().enumerate()
-                    .filter(|(_, p)| p.status == "A")
-                    .map(|(i, _)| i as u32).collect();
+                let hh1 = self.head_height() + 1;
+                let gp = &self.tree.params;
+                // v5: train only OUR lane (backbone + assigned experts), so the
+                // delta we produce is includable. Pre-v5: every active page.
+                let active_pages: Vec<u32> = if gp.v5_height != 0
+                    && hh1 >= gp.v5_height {
+                    let epoch = hh1 / gp.lane_epoch_len;
+                    core::lanes::claimable_pages(
+                        epoch, &self.key.pub_hex(), model, gp.lane_width)
+                        .into_iter().collect()
+                } else {
+                    model.pages.iter().enumerate()
+                        .filter(|(_, p)| p.status == "A")
+                        .map(|(i, _)| i as u32).collect()
+                };
                 let min_nnz = model.required_nnz(&active_pages);
                 let _ = self.bridge_tx.try_send(ToBridge::Train {
                     height: self.head_height(),

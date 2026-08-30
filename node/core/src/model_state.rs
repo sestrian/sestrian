@@ -84,6 +84,10 @@ pub struct GenesisParams {
     /// scheduled. 3 matches the >=3-honest-miners regime the trimmed mean
     /// already assumes; a smaller fleet ships a smaller value and raises it.
     pub growth_quorum: usize,
+    /// v5 (Sharding Road P2) TRAINING LANES activation height; 0 disables.
+    pub v5_height: u64,
+    pub lane_width: usize,       // expert pages per lane
+    pub lane_epoch_len: u64,     // blocks per lane-assignment epoch
 }
 
 impl GenesisParams {
@@ -102,6 +106,9 @@ impl GenesisParams {
             v3_height: 288,
             v4_height: 608,
             growth_quorum: 3,
+            v5_height: 0,
+            lane_width: 8,
+            lane_epoch_len: 16,
         }
     }
 }

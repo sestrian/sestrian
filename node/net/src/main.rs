@@ -123,6 +123,13 @@ fn genesis_params(net: &NetworkParams) -> core::model_state::GenesisParams {
         if let Some(v) = env_u64("SESTRIAN_LOCAL_GROWTH_QUORUM") {
             gp.growth_quorum = v as usize;
         }
+        if let Some(v) = env_u64("SESTRIAN_LOCAL_V5_HEIGHT") { gp.v5_height = v; }
+        if let Some(v) = env_u64("SESTRIAN_LOCAL_LANE_WIDTH") {
+            gp.lane_width = v as usize;
+        }
+        if let Some(v) = env_u64("SESTRIAN_LOCAL_LANE_EPOCH_LEN") {
+            gp.lane_epoch_len = v;
+        }
     }
     gp
 }

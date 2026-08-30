@@ -512,3 +512,89 @@ fn frame_resists_delimiter_injection() {
     assert_eq!(core::frame(&[b"x", b"yz"]), core::frame(&[b"x", b"yz"]));
 }
 
+
+// --- v5 training lanes (Sharding Road P2) -----------------------------------
+
+/// A model with a backbone + 4 expert pages, v5 active from height 1 with
+/// lane_width 1 (so 4 lanes, one expert each). Backbone is page 0.
+fn lane_params() -> GenesisParams {
+    let mut p = GenesisParams::new(ModelSpec {
+        n_layers: 1, d_model: 2, d_ff: 2,
+        n_experts_initial: 4, e_max: 8, backbone_params: 4,
+    });
+    p.v5_height = 1;
+    p.lane_width = 1;
+    p.lane_epoch_len = 16;
+    p
+}
+
+#[test]
+fn v5_rejects_claim_outside_lane_and_accepts_inside() {
+    use sestrian_core::lanes;
+    use sestrian_core::model_state::ModelState;
+    let params = lane_params();
+    let model = ModelState::genesis(&params.spec);
+    let dim = model.dim() as usize;
+    let tree = BlockTree::new(vec![0i64; dim], None, params.clone());
+    let _ = &tree;
+
+    // the block's proposer key also signs the delta (single miner here)
+    let key = core::Key::from_seed([7u8; 32]);
+    let epoch = 1 / params.lane_epoch_len;
+    let mine = lanes::claimable_pages(epoch, &key.pub_hex(), &model, params.lane_width);
+    // an expert page NOT in my lane must exist (4 lanes, I own 1 expert)
+    let mut foreign_expert = None;
+    for i in 0..model.pages.len() {
+        if model.pages[i].kind != "backbone" && !mine.contains(&(i as u32)) {
+            foreign_expert = Some(i as u32);
+            break;
+        }
+    }
+    let foreign = foreign_expert.expect("a foreign expert page must exist");
+
+    // build a body that touches the foreign page (guarantees a nonzero claim)
+    let (s, e) = (model.pages[foreign as usize].start as usize,
+                  model.pages[foreign as usize].end as usize);
+    let mut body = vec![0i64; dim];
+    for v in body.iter_mut().take(e).skip(s) { *v = 1; }
+
+    // header proposer must be lottery-eligible; reuse the helper's key path by
+    // signing with `key` and letting cold-start eligibility pass at attempt 0.
+    let proof = core::lottery::vrf_prove(&key, &tree.genesis_hash, 1, 0);
+    let mk_block = |pages: Vec<u32>, body: &[i64]| {
+        let tx = page_tx(&key, pages, body);
+        let mut h = core::Header {
+            height: 1, prev_hash: tree.genesis_hash.clone(),
+            state_root: String::new(), txset_root: String::new(), n_txs: 1,
+            work: core::lottery::attempt_work(&proof, 0), proposer: key.pub_hex(),
+            transfer_root: String::new(), ledger_root: String::new(),
+            data_root: String::new(), vrf_proof: hex::encode(&proof),
+            score_root: String::new(), sketch_root: String::new(),
+            model_root: String::new(), vrf_attempt: 0, version: 5,
+        };
+        h.txset_root = core::txset_root(&[tx.txid()]);
+        let mut bodies = HashMap::new();
+        bodies.insert(tx.da_pointer.clone(), body.to_vec());
+        Block { header: h, txs: vec![tx], bodies, sparse: HashMap::new(),
+                transfers: vec![], data_txs: vec![], scores: Default::default(),
+                sketches: Default::default() }
+    };
+
+    // claim a foreign lane's expert → must be rejected specifically for lanes
+    let mut t = BlockTree::new(vec![0i64; dim], None, params.clone());
+    let err = t.add_block(mk_block(vec![foreign], &body)).unwrap_err();
+    assert!(err.0.contains("outside its lane"),
+            "expected a lane rejection, got: {}", err.0);
+
+    // claim only MY lane's expert → passes the lane gate (fails later on a
+    // blank root, proving the lane check is not what stopped it)
+    let my_expert = *mine.iter().find(|&&p| p != 0).unwrap();
+    let (ms, me) = (model.pages[my_expert as usize].start as usize,
+                    model.pages[my_expert as usize].end as usize);
+    let mut mybody = vec![0i64; dim];
+    for v in mybody.iter_mut().take(me).skip(ms) { *v = 1; }
+    let mut t2 = BlockTree::new(vec![0i64; dim], None, params.clone());
+    let err2 = t2.add_block(mk_block(vec![my_expert], &mybody)).unwrap_err();
+    assert!(!err2.0.contains("outside its lane"),
+            "in-lane claim must pass the lane gate, got: {}", err2.0);
+}
