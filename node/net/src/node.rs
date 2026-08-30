@@ -1187,7 +1187,8 @@ impl Node {
         // Aggregate first, THEN append the growth pages, THEN root — the exact
         // validate_block order, now enforced by calling the validator's own
         // construction rather than a second implementation of it.
-        let (cand_state_root, _) = self.tree.state_root_with(&spans, &agg, &init_pages);
+        let (cand_state_root, cand_leaves) =
+            self.tree.state_root_with(&spans, &agg, &init_pages);
         // proposer lottery (v1): the proof binds to (height, ATTEMPT); work is
         // the attempt-discounted non-forgeable weight derived from it.
         let vrf_proof = core::lottery::vrf_prove(&self.key, &head, hh + 1, attempt);
@@ -1217,6 +1218,9 @@ impl Node {
             data_txs,
             scores: blk_scores.clone(),
             sketches: blk_sketches.clone(),
+            // P1 witness: the committed page leaves, self-verifying against
+            // state_root — what a fraud proof needs to name the disputed page.
+            page_leaves: cand_leaves.iter().map(hex::encode).collect(),
         };
         // SPARSE bodies for our own candidate — the last dense() call on the
         // hot path. Densifying materialized a full-dimension Vec<i64> PER

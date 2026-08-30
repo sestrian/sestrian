@@ -305,6 +305,14 @@ pub struct StoredBlock {
     pub scores: std::collections::BTreeMap<String, u64>, // rev 7: txid -> score
     #[serde(default)]
     pub sketches: std::collections::BTreeMap<String, Vec<i32>>, // rev 8: txid -> sketch
+    /// WITNESS (Sharding Road P1): the committed per-page leaf hashes (hex),
+    /// page-id order. NOT in the block hash — it is derived data that folds to
+    /// header.state_root, so it is self-verifying and additive (old blocks
+    /// carry none). It is what a page fraud proof needs to name the disputed
+    /// leaf; without it a light verifier can prove "root wrong" but not
+    /// "page P wrong". Producers fill it; it rides gossip + disk unchanged.
+    #[serde(default)]
+    pub page_leaves: Vec<String>,
 }
 
 impl StoredBlock {
