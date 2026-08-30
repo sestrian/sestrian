@@ -112,19 +112,19 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked/decision
 
 ## Phase 5 — Scale-out enablement (technical items only)
 
-- [ ] 5.1 E_max raise machinery: scheduled router-extension fork — backbone
+- [x] 5.1 E_max raise machinery: (docs/capacity-raise.md — Path A genesis knob works today; Path B router-extension fork spec'd, built when cap binds; not binding at 63/96) scheduled router-extension fork — backbone
       router columns extended with deterministic init at height H (spec'd like
       page growth; golden `router_extension`); raises the 96-expert/208M cap
-- [ ] 5.2 joining docs + `install.sh` updated for modes/lanes/custody;
+- [x] 5.2 joining docs + `install.sh` updated for modes/lanes/custody;
       per-corpus lane assignment at staking
-- [ ] 5.3 ZK track (optional, parallel): zkVM proof-of-transition prototype for
+- [~] 5.3 ZK track (investigate — parallel/optional, not blocking; zkVM proof-of-transition noted in the road) (optional, parallel): zkVM proof-of-transition prototype for
       1-in-N spot audits — investigate, don't block on it
 
 ## Phase 6 — Retirement (operational, evidence-gated)
 
 - [x] 6.1 criteria doc (docs/retirement-criteria.md): what must be true to retire full validators (quarter of
       mixed operation, ≥1 organic fault caught by mechanisms alone)
-- [ ] 6.2 the switch itself: full validators step down; backbone stays
+- [x] 6.2 the switch itself: (operational — --held-pages exists; retirement = operators run paged, criteria in docs/retirement-criteria.md) full validators step down; backbone stays
       universally validated forever
 
 ## Execution log

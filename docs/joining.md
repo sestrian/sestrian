@@ -173,6 +173,43 @@ uv run --with torch --with numpy --with pynacl python -m client.miner_bridge \
 Callers `POST /inference` with a signed, fee-bearing receipt that settles to
 your wallet on-chain.
 
+**🧩 Validate a slice (paged validator).** When the model grows past one
+machine's RAM, you don't have to hold all of it. Run a **paged validator** that
+keeps only the backbone + a few expert pages and trusts the rest, backstopped
+by fraud proofs:
+
+```bash
+sestrian-node --held-pages 3,7,12 --peers <anchor> --data-refs genesis
+```
+
+It validates the whole chain holding a fraction of the model, recomputing its
+own pages (it cannot be fooled there) and trusting the committed leaf for
+others. Post a **custody bond** to commit to serving your pages and earn for
+holding them:
+
+```bash
+uv run --with numpy --with pynacl python -m client.wallet stake-custody \
+    --pages 3,7,12 --stake 5
+```
+
+A holder that stops serving its pages is challenged and slashed — the same
+availability machinery that polices data withholding. (Today the model still
+fits one machine, so this is optional; it is how the network scales past that.)
+
+## Node roles at a glance
+
+| Flag | Role | Holds |
+|------|------|-------|
+| `--produce` + trainer | miner | full model |
+| (none) | full validator | full model |
+| `--held-pages P,Q` | paged validator | backbone + P,Q |
+| `--relay-server` | anchor/relay | full model + deep history |
+
+Lanes: once training lanes activate (v5), the beacon assigns each miner an
+expert-page lane per epoch; your trainer trains and claims only that lane, so a
+thousand miners no longer contend for a handful of block seats. Nothing to
+configure — assignment is a deterministic function of your key and the height.
+
 ## Back up your wallet
 
 `~/.sestrian/wallet.json` **is** your identity and your balance. There is no
