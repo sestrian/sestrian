@@ -84,6 +84,22 @@ fn dtx_inline_max() -> usize {
 /// stalled peer can cost at most KBs per message. Tests forcing
 /// SESTRIAN_DTX_INLINE_MAX=0 exercise the same announce path.
 const DTX_GOSSIP_INLINE_MAX: usize = 256 * 1024;
+/// Shard request timeout (SESTRIAN_SHARD_TIMEOUT_SECS, default 30). The
+/// adaptive throttle + fast pump drive real retries; this only bounds a truly
+/// dead request. The old value was 120 — long enough that one stalled peer
+/// froze the fetch. Env-tunable so the recovery proof can pin old vs new.
+fn shard_timeout_secs() -> u64 {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("SESTRIAN_SHARD_TIMEOUT_SECS").ok()
+        .and_then(|s| s.parse().ok()).unwrap_or(30))
+}
+/// Fast body-pump interval in seconds (SESTRIAN_BODY_PUMP_SECS, default 4);
+/// 0 disables it (the old per-round-only behavior). Env-tunable for the proof.
+fn body_pump_secs() -> f64 {
+    static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("SESTRIAN_BODY_PUMP_SECS").ok()
+        .and_then(|s| s.parse().ok()).unwrap_or(4.0))
+}
 fn dtx_gossip_inline_max() -> usize {
     static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *V.get_or_init(|| std::env::var("SESTRIAN_DTX_GOSSIP_INLINE_MAX").ok()
@@ -551,7 +567,7 @@ pub fn behaviour(
             JsonCodec::new(SHARD_REQ_MAX, SHARD_RESP_MAX),
             [(StreamProtocol::new("/sestrian/shards/1"), ProtocolSupport::Full)],
             request_response::Config::default()
-                .with_request_timeout(Duration::from_secs(120)),
+                .with_request_timeout(Duration::from_secs(shard_timeout_secs())),
         ),
         peerx: request_response::Behaviour::with_codec(
             JsonCodec::new(4096, 64 * 1024),
@@ -590,6 +606,11 @@ pub enum ToNet {
     /// the chain's catch-up state machine sees the window it asked for
     SendSync(PeerId, u64),
     SendShards(PeerId, Vec<String>),
+    /// Like SendShards but BYPASSES the adaptive throttle — used to pull the
+    /// block currently BLOCKING head advance from every peer at once (Bitcoin's
+    /// concurrent critical-block fetch: first response wins, no single slow
+    /// link can stall progress).
+    SendShardsUrgent(PeerId, Vec<String>),
     /// the connected head changed — the net loop announces this each round
     /// and anchors its mesh-blind pulls on the height
     HeadInfo { hash: String, height: u64 },
@@ -648,6 +669,11 @@ pub struct NodeConfig {
     /// (skip disperse, refuse to serve) — the data-availability attack. An
     /// honest node cannot gather the body, so it never adopts the block.
     pub byzantine_withhold: bool,
+    /// LOCAL-NET-ONLY test injection: DROP every other shard request (no reply
+    /// at all), forcing the requester onto its timeout+retry path. Used to
+    /// prove the fast body pump / adaptive throttle recover in seconds instead
+    /// of waiting out a long timeout.
+    pub flaky_serve: bool,
 }
 
 pub struct Node {
@@ -698,6 +724,8 @@ pub struct Node {
     /// once-per-round training dispatch (production is a separate, per-tick
     /// eligibility ladder — see the run loop)
     pub last_trained_round: i64,
+    /// last time the fast body pump fired (see round_tick)
+    pub last_body_pump: f64,
     /// wall-clock of the last Head gossip we RECEIVED. Gossipsub mesh re-graft
     /// after churn (same-PeerId reconnect) is flaky; if no foreign head has
     /// been heard for a couple of rounds while peers are connected, the node
@@ -2073,6 +2101,12 @@ pub async fn run(
     let mut sync_req_id: HashMap<PeerId, request_response::OutboundRequestId> =
         HashMap::new();
     let mut last_shard_req: HashMap<PeerId, f64> = HashMap::new();
+    // EWMA of observed shard round-trip time per peer (seconds). The retry
+    // throttle adapts to it: a fast peer is re-asked in a few seconds, a slow
+    // one is backed off — instead of a fixed 120s that made one stalled peer
+    // freeze the fetch. (Bitcoin learned the same: a FIXED stall timeout churns
+    // peers on slow links; v25 made it adaptive.)
+    let mut shard_rtt: HashMap<PeerId, f64> = HashMap::new();
     let mut shard_req_id: HashMap<PeerId, request_response::OutboundRequestId> =
         HashMap::new();
 
@@ -2152,9 +2186,24 @@ pub async fn run(
                               peer, from);
                 }
                 ToNet::SendShards(peer, txids) => {
+                    // adaptive throttle: re-ask a peer after ~2.5x its observed
+                    // RTT, clamped to [3s, 20s]; 5s default for an unmeasured
+                    // peer. Not the old fixed 120s.
+                    let hold = shard_rtt.get(&peer)
+                        .map(|r| (r * 2.5).clamp(3.0, 20.0)).unwrap_or(5.0);
                     let busy = last_shard_req.get(&peer)
-                        .map(|t| now() - t < 120.0).unwrap_or(false);
+                        .map(|t| now() - t < hold).unwrap_or(false);
                     if !busy && !txids.is_empty() {
+                        last_shard_req.insert(peer, now());
+                        let rid = swarm.behaviour_mut().shards
+                            .send_request(&peer, ShardRequest { txids });
+                        shard_req_id.insert(peer, rid);
+                    }
+                }
+                ToNet::SendShardsUrgent(peer, txids) => {
+                    // the blocking block — pull from every peer regardless of
+                    // throttle; whichever answers first unsticks us.
+                    if !txids.is_empty() {
                         last_shard_req.insert(peer, now());
                         let rid = swarm.behaviour_mut().shards
                             .send_request(&peer, ShardRequest { txids });
@@ -2404,6 +2453,14 @@ pub async fn run(
                             let current = shard_req_id.get(&peer)
                                 == Some(&request_id);
                             if current {
+                                // learn this peer's RTT for the adaptive throttle
+                                if !response.busy {
+                                    if let Some(&sent) = last_shard_req.get(&peer) {
+                                        let rtt = (now() - sent).clamp(0.05, 30.0);
+                                        let e = shard_rtt.entry(peer).or_insert(rtt);
+                                        *e = 0.7 * *e + 0.3 * rtt;
+                                    }
+                                }
                                 shard_req_id.remove(&peer);
                                 last_shard_req.remove(&peer);
                             }
@@ -2592,7 +2649,20 @@ impl Node {
                 let _ = reply.send(self.serve_sync(&request));
             }
             ToChain::ShardServe(request, reply) => {
-                let _ = reply.send(self.serve_shards(&request));
+                // BURST drop: serve-nothing for DROP of every CYCLE seconds
+                // (env-tunable), simulating a peer overwhelmed then recovering.
+                let cyc = std::env::var("SESTRIAN_FLAKY_CYCLE").ok()
+                    .and_then(|s| s.parse::<f64>().ok()).unwrap_or(25.0);
+                let drop_win = std::env::var("SESTRIAN_FLAKY_DROP").ok()
+                    .and_then(|s| s.parse::<f64>().ok()).unwrap_or(20.0);
+                let drop_it = self.cfg.flaky_serve && (now() % cyc) < drop_win;
+                if drop_it {
+                    // DROP: no reply, so the requester must time out — exercises
+                    // the retry path the wedge lived in.
+                    drop(reply);
+                } else {
+                    let _ = reply.send(self.serve_shards(&request));
+                }
             }
             ToChain::SyncBatch { peer, current, from, blocks, payloads, their_head } => {
                 self.handle_sync_batch(peer, current, from, blocks, payloads,
@@ -2780,8 +2850,43 @@ impl Node {
 }
 
 impl Node {
+    /// The bodies of the SINGLE lowest-height pending block — the one blocking
+    /// head advance. Pulling exactly these from every peer is what unsticks a
+    /// node, so it is a tight, bounded set (one block's deltas), not the whole
+    /// pending backlog.
+    fn blocking_bodies(&mut self) -> Vec<String> {
+        let Some((_, sb)) = self.pending.values()
+            .map(|(sb, _)| (sb.header.height, sb))
+            .min_by_key(|(h, _)| *h)
+            .map(|(h, sb)| (h, sb.clone()))
+        else { return Vec::new() };
+        sb.txs.iter()
+            .filter_map(|t| t.to_core().map(|tc| tc.txid()))
+            .filter(|id| !self.payloads.contains_key(id)
+                    && !self.store.has_payload(id)
+                    && self.store.reconstruct_payload(id).is_none())
+            .collect()
+    }
+
     fn round_tick(&mut self, round: i64, elapsed_in_round: f64,
                   connected: Vec<PeerId>, mesh_blind: bool) {
+        // FAST BODY PUMP (independent of the slow per-round refetch): every
+        // ~4s, pull the block currently BLOCKING head advance from EVERY peer
+        // at once, bypassing the adaptive throttle (SendShardsUrgent). This is
+        // what keeps a node from wedging when responses stall — the self-
+        // chaining pump only fires ON a response, and the per-round refetch is
+        // minutes apart on a slow-interval network. First peer to answer wins.
+        let pump_secs = body_pump_secs();
+        if pump_secs > 0.0 && now() - self.last_body_pump > pump_secs
+            && !self.pending.is_empty() && !connected.is_empty() {
+            self.last_body_pump = now();
+            let blk = self.blocking_bodies();
+            if !blk.is_empty() {
+                for p in &connected {
+                    let _ = self.net.send(ToNet::SendShardsUrgent(*p, blk.clone()));
+                }
+            }
+        }
         if round >= 0 && round != self.last_trained_round {
             self.last_trained_round = round;
             release_free_memory();

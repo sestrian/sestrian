@@ -233,7 +233,7 @@ fn network_params(name: &str) -> &'static NetworkParams {
 /// Silence is the enemy here: a mismatch means a chain you can never join, so it
 /// must fail at startup with an explanation, not at block 1 with nothing.
 fn apply_network(args: &mut Args) -> &'static NetworkParams {
-    if (args.byzantine_aggregation || args.byzantine_withhold)
+    if (args.byzantine_aggregation || args.byzantine_withhold || args.flaky_serve)
         && args.network != "local" {
         panic!("byzantine attack harnesses are refused on any network but \
                 --network local");
@@ -355,6 +355,9 @@ struct Args {
     /// the data-availability attack. Refused on any real network.
     #[arg(long, default_value_t = false)]
     byzantine_withhold: bool,
+    /// TEST injection (local net only): drop every other shard request.
+    #[arg(long, default_value_t = false)]
+    flaky_serve: bool,
     /// PAGED VALIDATOR (Sharding Road P4): hold only backbone + these expert
     /// page ids (comma-separated), keeping canon bytes for them alone — the
     /// memory win that lets the model exceed one machine. Empty = a full node.
@@ -1086,6 +1089,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             da_retain_blocks: args.da_retain_blocks,
             byzantine_aggregation: args.byzantine_aggregation,
             byzantine_withhold: args.byzantine_withhold,
+            flaky_serve: args.flaky_serve,
         },
         topic,
         bridge_tx: bridge_cmd_tx,
@@ -1108,6 +1112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         last_proposed_round: -1,
         last_produce_log_round: -1,
         last_trained_round: -1,
+        last_body_pump: 0.0,
         sync_cursor: Default::default(),
         net: tokio::sync::mpsc::unbounded_channel().0, // replaced inside run()
         sync_walkback: Default::default(),
